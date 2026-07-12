@@ -2,7 +2,7 @@
 
 操作系统：Windows 11
 
-在一切开始前，只有main.py。
+在一切开始前，只有one.py。
 
 所有文件均位于main.py所在的文件夹内（类似Mozilla Firefox Portable Edition）。
 
