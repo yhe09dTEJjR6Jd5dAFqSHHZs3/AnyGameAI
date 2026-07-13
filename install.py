@@ -1,9 +1,3 @@
-# -*- coding: utf-8 -*-
-"""AnyGameAI 自包含安装器。
-
-预期流程：浏览 -> 确认 -> 安装 -> 完成。
-仅使用 Python 标准库；不联网，不安装第三方包，不修改系统 Python。
-"""
 from __future__ import annotations
 
 import hashlib
