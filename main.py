@@ -31,9 +31,10 @@ FEATURE_LEN=PIXELS*FEATURE_CHANNELS
 COARSE_W=16
 COARSE_H=9
 COARSE_LEN=COARSE_W*COARSE_H*FEATURE_CHANNELS
+SQUARED_DIFF=tuple(value*value for value in range(-255,256))
 FEATURE_ALGORITHM_VERSION=4
 ACTION_ALGORITHM_VERSION=6
-DATABASE_SCHEMA_VERSION=3
+DATABASE_SCHEMA_VERSION=4
 MAX_SAMPLES=1500
 MAX_PROTOTYPES=320
 SUPPORTED_BUTTONS={"left","right","middle"}
@@ -333,27 +334,29 @@ def coarse_distance(a,b):
 def feature_distance(a,b):
     if not feature_valid(a) or not feature_valid(b):
         return float("inf")
+    first=memoryview(feature_bytes(a))
+    second=memoryview(feature_bytes(b))
     weights=(0.30,0.19,0.19,0.22,0.10)
     total=0.0
     for channel,weight in enumerate(weights):
         offset=channel*PIXELS
-        value=0.0
+        value=0
         for index in range(offset,offset+PIXELS):
-            delta=float(a[index])-float(b[index])
-            value+=delta*delta
+            value+=SQUARED_DIFF[int(first[index])-int(second[index])+255]
         total+=weight*value/PIXELS
     return total
 def visual_distance(a,b):
     if not feature_valid(a) or not feature_valid(b):
         return float("inf")
+    first=memoryview(feature_bytes(a))
+    second=memoryview(feature_bytes(b))
     weights=(0.34,0.22,0.22,0.22)
     total=0.0
     for channel,weight in enumerate(weights):
         offset=channel*PIXELS
-        value=0.0
+        value=0
         for index in range(offset,offset+PIXELS):
-            delta=float(a[index])-float(b[index])
-            value+=delta*delta
+            value+=SQUARED_DIFF[int(first[index])-int(second[index])+255]
         total+=weight*value/PIXELS
     return total
 def upgrade_feature(feature,version):
@@ -457,6 +460,64 @@ def temporal_distance(first,second):
     dpi_gap=min(1.0,abs(a["dpi"]-b["dpi"])/96.0)
     backend_gap=0.0 if a["capture_method"]==b["capture_method"] else 1.0
     return 0.25*frame_gap+0.25*action_gap+0.12*cursor_gap+0.10*duration_gap+0.08*change_gap+0.07*size_gap+0.05*dpi_gap+0.08*backend_gap
+class CaptureWorker:
+    def __init__(self,bridge,key):
+        self.bridge=bridge
+        self.key=key
+        self.requests=queue.Queue(maxsize=1)
+        self.stop_event=threading.Event()
+        self.retired=False
+        self.thread=threading.Thread(target=self._run,name="UniversalGameAI-Capture-"+str(key[1]),daemon=True)
+        self.thread.start()
+    def request(self,callback,timeout):
+        if self.retired or not self.thread.is_alive():
+            raise CaptureUnavailable(str(self.key[1])+"采集工作线程不可用")
+        response=queue.Queue(maxsize=1)
+        try:
+            self.requests.put_nowait((callback,response))
+        except queue.Full:
+            raise CaptureUnavailable(str(self.key[1])+"采集工作线程仍在处理上一请求")
+        try:
+            ok,value=response.get(timeout=max(0.05,float(timeout)))
+        except queue.Empty:
+            self.retired=True
+            raise CaptureUnavailable(str(self.key[1])+"采集超时，整个工作线程已隔离并将在后续请求中替换")
+        if ok:
+            return value
+        raise value
+    def _run(self):
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    item=self.requests.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if item is None:
+                    break
+                callback,response=item
+                try:
+                    result=callback()
+                    response.put_nowait((True,result))
+                except BaseException as error:
+                    try:
+                        response.put_nowait((False,error))
+                    except Exception:
+                        pass
+        finally:
+            try:
+                self.bridge.release_capture_thread_resources(threading.get_ident())
+            except Exception:
+                pass
+    def stop(self,wait=False,timeout=0.5):
+        self.retired=True
+        self.stop_event.set()
+        try:
+            self.requests.put_nowait(None)
+        except Exception:
+            pass
+        if wait and self.thread.is_alive() and self.thread is not threading.current_thread():
+            self.thread.join(max(0.0,float(timeout)))
+        return not self.thread.is_alive()
 class WindowsGraphicsCapture:
     def __init__(self,bridge):
         self.bridge=bridge
@@ -524,7 +585,7 @@ class WindowsGraphicsCapture:
             return
         for key in ("session","pool"):
             self._close(item.get(key))
-        for key in ("session","pool","capture_item","winrt_device","context","device"):
+        for key in ("staging","session","pool","capture_item","winrt_device","context","device"):
             self._release(item.get(key))
         if item.get("ro_initialized"):
             try:
@@ -618,20 +679,21 @@ class WindowsGraphicsCapture:
                 item=self._create_session(hwnd,geometry)
                 self.sessions[key]=item
             return item
-    def _sample_bgra(self,raw,row_pitch,width,height,crop):
+    def _sample_bgra(self,pointer,row_pitch,width,height,crop,out_w,out_h):
         left,top,crop_w,crop_h=crop
-        result=bytearray(PREVIEW_W*PREVIEW_H*3)
-        for oy in range(PREVIEW_H):
-            sy=min(height-1,top+(2*oy+1)*crop_h//(2*PREVIEW_H))
-            for ox in range(PREVIEW_W):
-                sx=min(width-1,left+(2*ox+1)*crop_w//(2*PREVIEW_W))
+        raw=ctypes.cast(pointer,ctypes.POINTER(ctypes.c_ubyte))
+        result=bytearray(int(out_w)*int(out_h)*3)
+        for oy in range(int(out_h)):
+            sy=min(height-1,top+(2*oy+1)*crop_h//(2*int(out_h)))
+            for ox in range(int(out_w)):
+                sx=min(width-1,left+(2*ox+1)*crop_w//(2*int(out_w)))
                 index=sy*row_pitch+sx*4
-                position=(oy*PREVIEW_W+ox)*3
+                position=(oy*int(out_w)+ox)*3
                 result[position]=raw[index+2]
                 result[position+1]=raw[index+1]
                 result[position+2]=raw[index]
         return bytes(result)
-    def capture(self,hwnd,client_rect):
+    def capture(self,hwnd,client_rect,out_w=FEATURE_W,out_h=FEATURE_H):
         window_rect=self.bridge.window_rect(hwnd)
         geometry=tuple(client_rect)+tuple(window_rect)
         item=self._session(hwnd,geometry)
@@ -652,8 +714,9 @@ class WindowsGraphicsCapture:
             time.sleep(0.008)
         if frame is None:
             raise CaptureUnavailable("Windows Graphics Capture暂未返回画面")
-        surface=access=texture=staging=None
+        surface=access=texture=None
         mapped=False
+        staging=None
         try:
             surface=ctypes.c_void_p()
             self._check(self._call(frame,6,ctypes.c_long,[ctypes.POINTER(ctypes.c_void_p)],ctypes.byref(surface)),"读取捕获帧表面")
@@ -663,14 +726,19 @@ class WindowsGraphicsCapture:
             self._check(self._call(access,3,ctypes.c_long,[ctypes.POINTER(GUID),ctypes.POINTER(ctypes.c_void_p)],ctypes.byref(texture_iid),ctypes.byref(texture)),"获取D3D11纹理")
             desc=D3D11_TEXTURE2D_DESC()
             self._call(texture,10,None,[ctypes.POINTER(D3D11_TEXTURE2D_DESC)],ctypes.byref(desc))
-            staging_desc=D3D11_TEXTURE2D_DESC(desc.Width,desc.Height,1,1,desc.Format,DXGI_SAMPLE_DESC(1,0),3,0,0x20000,0)
-            staging=ctypes.c_void_p()
-            self._check(self._call(item["device"],5,ctypes.c_long,[ctypes.POINTER(D3D11_TEXTURE2D_DESC),ctypes.c_void_p,ctypes.POINTER(ctypes.c_void_p)],ctypes.byref(staging_desc),None,ctypes.byref(staging)),"创建CPU可读捕获纹理")
+            staging_key=(int(desc.Width),int(desc.Height),int(desc.Format))
+            if item.get("staging_key")!=staging_key or not item.get("staging"):
+                self._release(item.get("staging"))
+                staging_desc=D3D11_TEXTURE2D_DESC(desc.Width,desc.Height,1,1,desc.Format,DXGI_SAMPLE_DESC(1,0),3,0,0x20000,0)
+                created=ctypes.c_void_p()
+                self._check(self._call(item["device"],5,ctypes.c_long,[ctypes.POINTER(D3D11_TEXTURE2D_DESC),ctypes.c_void_p,ctypes.POINTER(ctypes.c_void_p)],ctypes.byref(staging_desc),None,ctypes.byref(created)),"创建CPU可读捕获纹理")
+                item["staging"]=created
+                item["staging_key"]=staging_key
+            staging=item["staging"]
             self._call(item["context"],47,None,[ctypes.c_void_p,ctypes.c_void_p],staging,texture)
             mapped_resource=D3D11_MAPPED_SUBRESOURCE()
             self._check(self._call(item["context"],14,ctypes.c_long,[ctypes.c_void_p,ctypes.c_uint32,ctypes.c_uint32,ctypes.c_uint32,ctypes.POINTER(D3D11_MAPPED_SUBRESOURCE)],staging,0,1,0,ctypes.byref(mapped_resource)),"映射捕获纹理")
             mapped=True
-            raw=ctypes.string_at(mapped_resource.pData,int(mapped_resource.RowPitch)*int(desc.Height))
             cx,cy,cw,ch=client_rect
             wx,wy,ww,wh=window_rect
             scale_x=float(desc.Width)/max(1,ww)
@@ -679,14 +747,14 @@ class WindowsGraphicsCapture:
             top=max(0,min(int(desc.Height)-1,round((cy-wy)*scale_y)))
             crop_w=max(1,min(int(desc.Width)-left,round(cw*scale_x)))
             crop_h=max(1,min(int(desc.Height)-top,round(ch*scale_y)))
-            return self._sample_bgra(raw,int(mapped_resource.RowPitch),int(desc.Width),int(desc.Height),(left,top,crop_w,crop_h))
+            return self._sample_bgra(mapped_resource.pData,int(mapped_resource.RowPitch),int(desc.Width),int(desc.Height),(left,top,crop_w,crop_h),int(out_w),int(out_h))
         finally:
             if mapped:
                 try:
                     self._call(item["context"],15,None,[ctypes.c_void_p,ctypes.c_uint32],staging,0)
                 except Exception:
                     pass
-            for obj in (staging,texture,access,surface):
+            for obj in (texture,access,surface):
                 self._release(obj)
             self._close(frame)
             self._release(frame)
@@ -727,6 +795,7 @@ class WinBridge:
         self.calibrations={}
         self.capture_task_lock=threading.RLock()
         self.capture_tasks={}
+        self.gdi_resources={}
         self.wgc=WindowsGraphicsCapture(self)
     def _bind(self):
         self.WNDENUMPROC=ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
@@ -903,36 +972,92 @@ class WinBridge:
             self.user32.ClipCursor(ctypes.byref(previous) if previous is not None else None)
         except Exception:
             pass
+    def _dispose_gdi_resource(self,item):
+        if not item:
+            return
+        try:
+            if item.get("memory") and item.get("old"):
+                self.gdi32.SelectObject(item["memory"],item["old"])
+        except Exception:
+            pass
+        try:
+            if item.get("bitmap"):
+                self.gdi32.DeleteObject(item["bitmap"])
+        except Exception:
+            pass
+        try:
+            if item.get("memory"):
+                self.gdi32.DeleteDC(item["memory"])
+        except Exception:
+            pass
+        try:
+            if item.get("source"):
+                self.user32.ReleaseDC(wintypes.HWND(int(item.get("source_hwnd",0))),item["source"])
+        except Exception:
+            pass
+    def release_capture_thread_resources(self,thread_id=None):
+        wanted=threading.get_ident() if thread_id is None else int(thread_id)
+        with self.capture_task_lock:
+            keys=[key for key in self.gdi_resources if key[0]==wanted]
+            items=[self.gdi_resources.pop(key) for key in keys]
+        for item in items:
+            self._dispose_gdi_resource(item)
+        try:
+            self.wgc.release_thread(wanted)
+        except Exception:
+            pass
+    def _gdi_resource(self,kind,source_hwnd,width,height):
+        key=(threading.get_ident(),str(kind),int(source_hwnd),int(width),int(height))
+        stale=[]
+        with self.capture_task_lock:
+            item=self.gdi_resources.get(key)
+            if item:
+                return item
+            stale_keys=[existing for existing in self.gdi_resources if existing[:3]==key[:3] and existing!=key]
+            stale=[self.gdi_resources.pop(existing) for existing in stale_keys]
+        for old in stale:
+            self._dispose_gdi_resource(old)
+        source=self.user32.GetDC(wintypes.HWND(int(source_hwnd)))
+        if not source:
+            raise ctypes.WinError(ctypes.get_last_error())
+        memory=bitmap=old=bits=None
+        try:
+            memory,bitmap,old,bits=self._make_dib(source,int(width),int(height))
+            item={"source":source,"source_hwnd":int(source_hwnd),"memory":memory,"bitmap":bitmap,"old":old,"bits":bits,"width":int(width),"height":int(height)}
+            source=memory=bitmap=old=bits=None
+            with self.capture_task_lock:
+                previous=self.gdi_resources.get(key)
+                if previous:
+                    self._dispose_gdi_resource(item)
+                    return previous
+                self.gdi_resources[key]=item
+            return item
+        finally:
+            if source:
+                self.user32.ReleaseDC(wintypes.HWND(int(source_hwnd)),source)
+            if memory and old:
+                self.gdi32.SelectObject(memory,old)
+            if bitmap:
+                self.gdi32.DeleteObject(bitmap)
+            if memory:
+                self.gdi32.DeleteDC(memory)
     def _isolated_capture(self,key,callback,timeout=0.35):
         with self.capture_task_lock:
-            existing=self.capture_tasks.get(key)
-            if existing and existing["thread"].is_alive():
-                raise CaptureUnavailable(str(key[1])+"采集线程疑似挂起，已隔离且不再等待")
-            output=queue.Queue(maxsize=1)
-            holder={}
-            def run():
-                try:
-                    output.put((True,callback()),block=False)
-                except BaseException as error:
-                    try:
-                        output.put((False,error),block=False)
-                    except Exception:
-                        pass
-                finally:
-                    with self.capture_task_lock:
-                        if self.capture_tasks.get(key) is holder:
-                            self.capture_tasks.pop(key,None)
-            thread=threading.Thread(target=run,name="UniversalGameAI-Capture-"+str(key[1]),daemon=True)
-            holder.update({"thread":thread,"output":output,"started":time.time()})
-            self.capture_tasks[key]=holder
-            thread.start()
+            worker=self.capture_tasks.get(key)
+            if worker is None or worker.retired or not worker.thread.is_alive():
+                if worker is not None:
+                    worker.stop(False,0.0)
+                worker=CaptureWorker(self,key)
+                self.capture_tasks[key]=worker
         try:
-            ok,value=output.get(timeout=max(0.05,float(timeout)))
-        except queue.Empty:
-            raise CaptureUnavailable(str(key[1])+"采集超时，后端已隔离；不会把超时结果用于学习或训练")
-        if ok:
-            return value
-        raise value
+            return worker.request(callback,timeout)
+        except CaptureUnavailable:
+            if worker.retired:
+                worker.stop(False,0.0)
+                with self.capture_task_lock:
+                    if self.capture_tasks.get(key) is worker:
+                        self.capture_tasks.pop(key,None)
+            raise
     def valid(self,hwnd):
         return bool(hwnd and self.user32.IsWindow(wintypes.HWND(hwnd)))
     def class_name(self,hwnd):
@@ -1070,55 +1195,34 @@ class WinBridge:
                 result[position+1]=raw[index+1]
                 result[position+2]=raw[index]
         return bytes(result)
-    def _capture_print(self,hwnd,width,height):
-        reference=self.user32.GetDC(wintypes.HWND(0))
-        if not reference:
-            raise ctypes.WinError(ctypes.get_last_error())
-        memory=bitmap=old=bits=None
-        try:
-            memory,bitmap,old,bits=self._make_dib(reference,width,height)
-            ctypes.memset(bits,0,width*height*4)
-            if not self.user32.PrintWindow(wintypes.HWND(hwnd),memory,3):
-                raise CaptureUnavailable("PrintWindow采集失败")
-            raw=ctypes.string_at(bits.value,width*height*4)
-            return self._rgb_from_raw(raw,width,height)
-        finally:
-            if memory and old:
-                self.gdi32.SelectObject(memory,old)
-            if bitmap:
-                self.gdi32.DeleteObject(bitmap)
-            if memory:
-                self.gdi32.DeleteDC(memory)
-            self.user32.ReleaseDC(wintypes.HWND(0),reference)
-    def _capture_dc(self,source_hwnd,sx,sy,width,height):
-        source=self.user32.GetDC(wintypes.HWND(source_hwnd))
-        if not source:
-            raise ctypes.WinError(ctypes.get_last_error())
-        memory=bitmap=old=bits=None
-        try:
-            memory,bitmap,old,bits=self._make_dib(source,PREVIEW_W,PREVIEW_H)
-            self.gdi32.SetStretchBltMode(memory,4)
-            if not self.gdi32.StretchBlt(memory,0,0,PREVIEW_W,PREVIEW_H,source,sx,sy,width,height,0x00CC0020):
-                raise CaptureUnavailable("窗口DC采集失败")
-            raw=ctypes.string_at(bits.value,PREVIEW_W*PREVIEW_H*4)
-            return self._rgb_from_raw(raw,PREVIEW_W,PREVIEW_H,PREVIEW_W,PREVIEW_H)
-        finally:
-            if memory and old:
-                self.gdi32.SelectObject(memory,old)
-            if bitmap:
-                self.gdi32.DeleteObject(bitmap)
-            if memory:
-                self.gdi32.DeleteDC(memory)
-            self.user32.ReleaseDC(wintypes.HWND(source_hwnd),source)
+    def _capture_print(self,hwnd,width,height,out_w=FEATURE_W,out_h=FEATURE_H):
+        key_kind="print|"+str(int(hwnd))
+        item=self._gdi_resource(key_kind,0,int(width),int(height))
+        ctypes.memset(item["bits"],0,int(width)*int(height)*4)
+        if not self.user32.PrintWindow(wintypes.HWND(hwnd),item["memory"],3):
+            raise CaptureUnavailable("PrintWindow采集失败")
+        raw=(ctypes.c_ubyte*(int(width)*int(height)*4)).from_address(int(item["bits"].value))
+        return self._rgb_from_raw(raw,int(width),int(height),int(out_w),int(out_h))
+    def _capture_dc(self,source_hwnd,sx,sy,width,height,out_w=FEATURE_W,out_h=FEATURE_H):
+        key_kind="dc|"+str(int(source_hwnd))
+        item=self._gdi_resource(key_kind,int(source_hwnd),int(out_w),int(out_h))
+        self.gdi32.SetStretchBltMode(item["memory"],4)
+        if not self.gdi32.StretchBlt(item["memory"],0,0,int(out_w),int(out_h),item["source"],int(sx),int(sy),int(width),int(height),0x00CC0020):
+            raise CaptureUnavailable("窗口DC采集失败")
+        raw=(ctypes.c_ubyte*(int(out_w)*int(out_h)*4)).from_address(int(item["bits"].value))
+        return self._rgb_from_raw(raw,int(out_w),int(out_h),int(out_w),int(out_h))
     def _rgb_to_gray(self,rgb):
         source=rgb_bytes(rgb)
         if source is None:
             return None
         return bytes((source[index]*77+source[index+1]*150+source[index+2]*29)>>8 for index in range(0,len(source),3))
     def _quality(self,rgb):
-        source=preview_rgb_bytes(rgb)
-        if source is None:
-            return {"mean":0.0,"std":0.0,"spread":0,"black":True,"solid":True,"low_information":True,"valid":False,"protected_or_black":True}
+        try:
+            source=bytes(rgb)
+        except Exception:
+            source=b""
+        if not source or len(source)%3:
+            return {"mean":0.0,"std":0.0,"spread":0,"black":True,"solid":True,"low_information":True,"valid":False,"protected_or_black":False}
         gray=[(source[index]*77+source[index+1]*150+source[index+2]*29)>>8 for index in range(0,len(source),3)]
         mean=sum(gray)/len(gray)
         variance=sum((value-mean)*(value-mean) for value in gray)/len(gray)
@@ -1126,7 +1230,7 @@ class WinBridge:
         spread=max(gray)-min(gray)
         black=max(gray)<10 or mean<2.5
         solid=std<0.9 or spread<3
-        return {"mean":mean,"std":std,"spread":spread,"black":black,"solid":solid,"low_information":bool(black or solid),"valid":True,"protected_or_black":bool(black)}
+        return {"mean":mean,"std":std,"spread":spread,"black":black,"solid":solid,"low_information":bool(black or solid),"valid":True,"protected_or_black":False}
     def feature_from_rgb(self,rgb,previous_rgb=None):
         source=rgb_bytes(rgb)
         if source is None:
@@ -1182,7 +1286,7 @@ class WinBridge:
     def _health(self,hwnd,method,rgb):
         now=time.time()
         digest=hashlib.sha256(rgb).digest()
-        key=(int(hwnd),str(method))
+        key=(int(hwnd),str(method),len(rgb))
         previous=self.capture_health.get(key)
         if previous and previous["digest"]==digest:
             unchanged_since=previous["unchanged_since"]
@@ -1191,63 +1295,91 @@ class WinBridge:
         stale=now-unchanged_since>4.0
         self.capture_health[key]={"digest":digest,"unchanged_since":unchanged_since,"last":now,"stale":stale}
         return stale
-    def capture_gray(self,target,require_foreground_for_desktop=True,validation_mode=False):
+    def capture_gray(self,target,require_foreground_for_desktop=True,validation_mode=False,need_preview=False):
         rect=self.validate_target(target,False)
         hwnd=int(target["hwnd"])
         x,y,width,height=rect
         if width<FEATURE_W or height<FEATURE_H:
             raise CaptureUnavailable("客户区尺寸异常，拒绝采集")
+        out_w=PREVIEW_W if need_preview else FEATURE_W
+        out_h=PREVIEW_H if need_preview else FEATURE_H
         attempts=[]
         candidates=[]
         calibration=self.calibrations.get(hwnd,{})
         validated_method=str(calibration.get("validated_backend",""))
-        backends=[("Windows Graphics Capture",lambda:self.wgc.capture(hwnd,rect),False),("PrintWindow客户区",lambda:self._capture_print(hwnd,width,height),True),("窗口DC",lambda:self._capture_dc(hwnd,0,0,width,height),True)]
+        backends=[("Windows Graphics Capture",lambda:self.wgc.capture(hwnd,rect,out_w,out_h),False),("PrintWindow客户区",lambda:self._capture_print(hwnd,width,height,out_w,out_h),True),("窗口DC",lambda:self._capture_dc(hwnd,0,0,width,height,out_w,out_h),True)]
         if not require_foreground_for_desktop or self.foreground_hwnd()==hwnd:
-            backends.append(("前台桌面裁剪",lambda:self._capture_dc(0,x,y,width,height),True))
+            backends.append(("前台桌面裁剪",lambda:self._capture_dc(0,x,y,width,height,out_w,out_h),True))
         else:
             attempts.append("前台桌面裁剪被跳过：目标窗口不在前台")
         if validated_method:
             backends.sort(key=lambda item:0 if item[0]==validated_method else 1)
+        identity_valid=bool(calibration.get("dynamic_passed") and int(calibration.get("validated_pid",-1))==self.pid(hwnd) and str(calibration.get("validated_class",""))==self.class_name(hwnd) and int(calibration.get("validated_dpi",0))==self.dpi_for_window(hwnd) and list(calibration.get("validated_rect",[0,0,0,0]))[2:4]==[int(width),int(height)])
+        need_comparison=bool(validation_mode)
         for priority,(name,callback,isolate) in enumerate(backends):
             try:
-                preview=preview_rgb_bytes(self._isolated_capture((hwnd,name),callback,0.35) if isolate else callback())
-                if preview is None:
+                raw=self._isolated_capture((hwnd,name,out_w,out_h),callback,0.35) if isolate else callback()
+                rgb=bytes(raw)
+                expected=int(out_w)*int(out_h)*3
+                if len(rgb)!=expected:
                     raise CaptureUnavailable("返回画面尺寸无效")
-                model_rgb=resize_rgb(preview,PREVIEW_W,PREVIEW_H,FEATURE_W,FEATURE_H)
-                quality=self._quality(preview)
-                stale=self._health(hwnd,name,preview)
-                validation_identity=bool(calibration.get("dynamic_passed") and int(calibration.get("validated_pid",-1))==self.pid(hwnd) and str(calibration.get("validated_class",""))==self.class_name(hwnd) and int(calibration.get("validated_dpi",0))==self.dpi_for_window(hwnd) and list(calibration.get("validated_rect",[0,0,0,0]))[2:4]==[int(width),int(height)])
-                backend_validated=bool(validation_mode or validated_method and name==validated_method and validation_identity)
-                backend_changed=bool(validated_method and (name!=validated_method or not validation_identity))
-                capture_valid=bool(quality["valid"] and not quality["low_information"] and not stale)
-                usable=bool(capture_valid and backend_validated and not backend_changed)
-                candidate={"rgb":model_rgb,"gray":self._rgb_to_gray(model_rgb),"preview_rgb":preview,"preview_width":PREVIEW_W,"preview_height":PREVIEW_H,"method":name,"quality":quality,"priority":priority,"stale":stale,"capture_valid":capture_valid,"backend_validated":backend_validated,"usable_for_learning":usable,"usable_for_training":usable,"usable_for_teaching":usable,"protected_or_black":bool(quality.get("protected_or_black")),"backend_changed":backend_changed}
+                preview=rgb if need_preview else None
+                model_rgb=resize_rgb(rgb,out_w,out_h,FEATURE_W,FEATURE_H) if (out_w,out_h)!=(FEATURE_W,FEATURE_H) else rgb
+                quality=self._quality(rgb)
+                stale=self._health(hwnd,name,rgb)
+                backend_validated=bool(validation_mode or validated_method and name==validated_method and identity_valid)
+                backend_changed=bool(validated_method and (name!=validated_method or not identity_valid))
+                candidate={"rgb":model_rgb,"gray":self._rgb_to_gray(model_rgb),"preview_rgb":preview,"preview_width":out_w if preview is not None else 0,"preview_height":out_h if preview is not None else 0,"method":name,"quality":quality,"priority":priority,"stale":stale,"capture_valid":bool(quality["valid"]),"backend_validated":backend_validated,"backend_changed":backend_changed,"static_feature":self.feature_from_rgb(model_rgb,None)}
                 candidates.append(candidate)
-                if usable or validation_mode and capture_valid:
-                    self.capture_reports[hwnd]="当前采集："+name+"；画面有效；后端"+("已验收" if backend_validated else "待验收")
-                    return candidate
-                reason=[]
-                if quality["low_information"]:
-                    reason.append("黑屏或纯色")
-                if stale:
-                    reason.append("长时间重复")
-                if backend_changed:
-                    reason.append("后端突然变化")
-                if not backend_validated:
-                    reason.append("后端未验收")
-                attempts.append(name+"："+"、".join(reason or ["不可用于自动输入"]))
+                if len(candidates)==1:
+                    need_comparison=bool(validation_mode or quality.get("low_information") or stale)
+                if not need_comparison and backend_validated and not backend_changed:
+                    break
+                if need_comparison and len(candidates)>=2 and not validation_mode:
+                    break
             except Exception as error:
                 attempts.append(name+"失败："+str(error))
-        if candidates:
-            chosen=min(candidates,key=lambda item:(not item["capture_valid"],item["backend_changed"],item["priority"]))
-            chosen=dict(chosen)
-            chosen.update({"usable_for_learning":False,"usable_for_training":False,"usable_for_teaching":False})
-            self.capture_reports[hwnd]="采集画面仅可预览，已拒绝学习/训练/请教："+"；".join(attempts)
-            return chosen
-        self.capture_reports[hwnd]="采集失败："+"；".join(attempts)
-        raise CaptureUnavailable("无法采集目标窗口："+"；".join(attempts))
+        if not candidates:
+            self.capture_reports[hwnd]="采集失败："+"；".join(attempts)
+            raise CaptureUnavailable("无法采集目标窗口："+"；".join(attempts))
+        chosen=next((item for item in candidates if item["method"]==validated_method and identity_valid),None)
+        if chosen is None:
+            chosen=min(candidates,key=lambda item:(not item["capture_valid"],item["priority"]))
+        protected=False
+        frozen=False
+        comparison_threshold=max(260.0,float(calibration.get("significant_change",60.0))*4.0)
+        for other in candidates:
+            if other is chosen or not other.get("capture_valid"):
+                continue
+            gap=visual_distance(chosen["static_feature"],other["static_feature"])
+            information_mismatch=bool(chosen["quality"].get("low_information")!=other["quality"].get("low_information") or chosen["quality"].get("black")!=other["quality"].get("black"))
+            if information_mismatch and gap>comparison_threshold:
+                protected=True
+            if chosen.get("stale") and not other.get("stale") and gap>max(20.0,float(calibration.get("freeze_change",1.5))*8.0):
+                frozen=True
+        usable=bool(chosen.get("capture_valid") and chosen.get("backend_validated") and not chosen.get("backend_changed") and not protected and not frozen)
+        result=dict(chosen)
+        result.pop("static_feature",None)
+        result.update({"usable_for_learning":usable,"usable_for_training":usable,"usable_for_teaching":usable,"protected_or_black":protected,"capture_frozen":frozen})
+        if usable:
+            mode="低信息稳定画面" if result["quality"].get("low_information") else "画面有效"
+            self.capture_reports[hwnd]="当前采集："+result["method"]+"；"+mode+"；后端已验收"
+        else:
+            reasons=[]
+            if not result.get("backend_validated"):
+                reasons.append("后端未验收")
+            if result.get("backend_changed"):
+                reasons.append("后端或窗口身份变化")
+            if protected:
+                reasons.append("不同后端结果显著不一致，疑似受保护黑屏")
+            if frozen:
+                reasons.append("当前后端冻结但其他后端仍变化")
+            if not result.get("capture_valid"):
+                reasons.append("画面数据无效")
+            self.capture_reports[hwnd]="采集仅可预览，拒绝自动处理："+"、".join(reasons or attempts or ["未知原因"])
+        return result
     def capture(self,target,require_foreground_for_desktop=True):
-        item=self.capture_gray(target,require_foreground_for_desktop)
+        item=self.capture_gray(target,require_foreground_for_desktop,False,False)
         item["f"]=self._features(item["rgb"],int(target["hwnd"]))
         item["motion_valid"]=True
         item["rect"]=self.validate_target(target,False)
@@ -1257,7 +1389,14 @@ class WinBridge:
         return self.capture_reports.get(int(hwnd),"尚未完成动态采集验收；未验收后端只能预览，不能学习或训练")
     def calibration_for(self,target):
         hwnd=int(target.get("hwnd",0)) if isinstance(target,dict) else int(target or 0)
-        return dict(self.calibrations.get(hwnd,{"noise":4.0,"visual_cluster":420.0,"significant_change":60.0,"post_action_change":45.0,"freeze_change":1.5,"freeze_frames":30,"confirm_frames":3,"duplicate":3.0,"fps":10.0,"input_delay":0.24,"validated_backend":"","dynamic_passed":False}))
+        defaults={"noise":4.0,"visual_cluster":420.0,"significant_change":60.0,"post_action_change":45.0,"freeze_change":1.5,"freeze_frames":30,"confirm_frames":3,"duplicate":3.0,"fps":10.0,"input_delay":0.24,"validated_backend":"","dynamic_passed":False,"static_passed":False,"backend_thresholds":{}}
+        result=dict(defaults)
+        result.update(self.calibrations.get(hwnd,{}))
+        method=str(result.get("validated_backend",""))
+        thresholds=result.get("backend_thresholds",{})
+        if method and isinstance(thresholds,dict) and isinstance(thresholds.get(method),dict):
+            result.update(thresholds[method])
+        return result
     def calibrate(self,target,duration=1.8,stop_event=None,progress=None):
         hwnd=int(target["hwnd"])
         self.validate_target(target,False)
@@ -1266,41 +1405,47 @@ class WinBridge:
             for key in [key for key in self.capture_health if key[0]==hwnd]:
                 self.capture_health.pop(key,None)
         deadline=time.monotonic()+max(1.2,min(3.0,float(duration)))
-        features=[]
-        methods=[]
-        stamps=[]
-        previous_rgb=None
+        records=[]
+        previous_by_method={}
         while time.monotonic()<deadline:
             if stop_event is not None and stop_event.is_set():
-                raise RuntimeError("窗口校准已取消")
+                raise RuntimeError("窗口采集验收已取消")
             self.validate_target(target,False)
-            captured=self.capture_gray(target,True,True)
-            if not captured.get("capture_valid"):
-                raise CaptureUnavailable("动态校准遇到无效画面")
-            feature=self.feature_from_rgb(captured["rgb"],previous_rgb)
-            previous_rgb=captured["rgb"]
-            features.append(feature)
-            methods.append(captured["method"])
-            stamps.append(time.time())
+            captured=self.capture_gray(target,True,True,False)
+            if not captured.get("capture_valid") or captured.get("protected_or_black") or captured.get("capture_frozen"):
+                raise CaptureUnavailable("采集验收遇到受保护黑屏、冻结或无效画面")
+            method=str(captured["method"])
+            feature=self.feature_from_rgb(captured["rgb"],previous_by_method.get(method))
+            previous_by_method[method]=captured["rgb"]
+            records.append({"feature":feature,"method":method,"stamp":time.time(),"quality":captured.get("quality",{})})
             if progress:
                 progress(min(1.0,1.0-max(0.0,deadline-time.monotonic())/max(0.1,float(duration))))
             time.sleep(0.06)
-        if len(features)<8:
-            raise CaptureUnavailable("动态校准有效帧不足")
-        if len(set(methods))!=1:
-            raise CaptureUnavailable("校准期间采集后端发生变化，拒绝确认窗口")
+        counts=Counter(record["method"] for record in records)
+        if not counts:
+            raise CaptureUnavailable("采集验收没有获得有效帧")
+        method=counts.most_common(1)[0][0]
+        selected=[record for record in records if record["method"]==method]
+        if len(selected)<8:
+            raise CaptureUnavailable("同一采集后端的有效帧不足")
+        features=[record["feature"] for record in selected]
+        stamps=[record["stamp"] for record in selected]
         changes=[visual_distance(a,b) for a,b in zip(features,features[1:])]
         unique=len({hashlib.sha256(bytes(feature[:PIXELS])).digest() for feature in features})
-        if unique<2 or not changes or max(changes)<1.0:
-            raise CaptureUnavailable("未检测到采集画面动态变化；请让目标窗口画面发生变化后重新确认")
-        noise=max(0.5,quantile(changes,0.5))
+        dynamic=bool(unique>=2 and changes and max(changes)>=1.0)
+        noise=max(0.35,quantile(changes,0.5) if changes else 0.35)
         fps=(len(stamps)-1)/max(0.01,stamps[-1]-stamps[0]) if len(stamps)>1 else 8.0
         rect=self.validate_target(target,False)
         dpi=self.dpi_for_window(hwnd)
-        method=methods[0]
-        result={"noise":noise,"visual_cluster":max(80.0,min(1400.0,noise*9.0+120.0)),"significant_change":max(18.0,min(260.0,noise*4.5+18.0)),"post_action_change":max(14.0,min(220.0,noise*3.2+14.0)),"freeze_change":max(0.4,noise*0.22),"freeze_frames":max(18,min(80,round(fps*3.0))),"confirm_frames":3 if fps>=12 else 4,"duplicate":max(1.0,min(18.0,noise*0.65)),"fps":fps,"input_delay":max(0.16,min(0.55,3.0/max(5.0,fps))),"method":method,"validated_backend":method,"dynamic_passed":True,"validated_at":time.time(),"validated_rect":list(rect),"validated_dpi":dpi,"validated_pid":int(target["pid"]),"validated_class":str(target["class"]),"integrity":integrity}
+        thresholds={"noise":noise,"visual_cluster":max(70.0,min(1400.0,noise*9.0+120.0)),"significant_change":max(16.0,min(260.0,noise*4.5+18.0)),"post_action_change":max(12.0,min(220.0,noise*3.2+14.0)),"freeze_change":max(0.35,noise*0.22),"freeze_frames":max(18,min(80,round(fps*3.0))),"confirm_frames":3 if fps>=12 else 4,"duplicate":max(1.0,min(18.0,noise*0.65)),"fps":fps,"input_delay":max(0.16,min(0.55,3.0/max(5.0,fps)))}
+        previous=self.calibrations.get(hwnd,{})
+        backend_thresholds=dict(previous.get("backend_thresholds",{})) if isinstance(previous.get("backend_thresholds",{}),dict) else {}
+        backend_thresholds[method]=dict(thresholds)
+        result=dict(thresholds)
+        result.update({"method":method,"validated_backend":method,"dynamic_passed":True,"static_passed":not dynamic,"calibration_mode":"dynamic" if dynamic else "stable","validated_at":time.time(),"validated_rect":list(rect),"validated_dpi":dpi,"validated_pid":int(target["pid"]),"validated_class":str(target["class"]),"integrity":integrity,"backend_thresholds":backend_thresholds})
         self.calibrations[hwnd]=result
-        self.capture_reports[hwnd]="当前采集："+method+"；动态检测通过；帧率"+str(round(fps,1))+"fps；后端已验收"
+        mode="动态校准" if dynamic else "稳定性校准"
+        self.capture_reports[hwnd]="当前采集："+method+"；"+mode+"通过；帧率"+str(round(fps,1))+"fps；后端已验收"
         return dict(result)
     def _send(self,flags,data=0,dx=0,dy=0,require_allowed=False):
         if require_allowed and not self.input_allowed():
@@ -1339,6 +1484,27 @@ class WinBridge:
             if not self.input_allowed():
                 raise InputStopped("停止标志已设置，拒绝滚轮事件")
             self._send(0x01000 if horizontal else 0x0800,int(delta),require_allowed=True)
+    def close(self):
+        self.block_input()
+        with self.capture_task_lock:
+            workers=list(self.capture_tasks.values())
+            self.capture_tasks.clear()
+        for worker in workers:
+            try:
+                worker.stop(True,0.5)
+            except Exception:
+                pass
+        try:
+            self.wgc.close()
+        except Exception:
+            pass
+        alive_threads={worker.thread.ident for worker in workers if worker.thread.is_alive()}
+        with self.capture_task_lock:
+            keys=[key for key in self.gdi_resources if key[0] not in alive_threads]
+            items=[self.gdi_resources.pop(key) for key in keys]
+        for item in items:
+            self._dispose_gdi_resource(item)
+        return not any(worker.thread.is_alive() for worker in workers)
     def release_all_buttons(self):
         with self.input_lock:
             for button in list(self.held):
@@ -1447,10 +1613,12 @@ class KeyboardMonitor:
             self.thread.join(max(0.0,float(timeout)))
         return not bool(self.thread and self.thread.is_alive())
 class MouseMonitor:
-    def __init__(self,bridge):
+    def __init__(self,bridge,on_input=None):
         self.bridge=bridge
+        self.on_input=on_input
         self.events=deque(maxlen=6000)
         self.lock=threading.Lock()
+        self.held=set()
         self.thread=None
         self.thread_id=0
         self.hook=None
@@ -1458,6 +1626,7 @@ class MouseMonitor:
         self.ready=threading.Event()
         self.error=None
         self.last_move=0.0
+        self.last_input_time=0.0
     def start(self):
         self.thread=threading.Thread(target=self._run,name="UniversalGameAI-MouseHook",daemon=True)
         self.thread.start()
@@ -1488,7 +1657,18 @@ class MouseMonitor:
                         if kind in {"wheel","hwheel"}:
                             raw=(int(data.mouseData)>>16)&0xffff
                             event["delta"]=raw-0x10000 if raw&0x8000 else raw
-                        self._append(event)
+                        with self.lock:
+                            if kind.endswith("_down"):
+                                self.held.add(kind.split("_",1)[0])
+                            elif kind.endswith("_up"):
+                                self.held.discard(kind.split("_",1)[0])
+                            self.last_input_time=now
+                            self.events.append(event)
+                        if self.on_input:
+                            try:
+                                self.on_input(event)
+                            except Exception:
+                                pass
                 return self.bridge.user32.CallNextHookEx(self.hook,code,wparam,lparam)
             self.callback=self.bridge.HOOKPROC(callback)
             module=self.bridge.kernel32.GetModuleHandleW(None)
@@ -1515,6 +1695,14 @@ class MouseMonitor:
             result=list(self.events)
             self.events.clear()
         return result
+    def all_released(self):
+        with self.lock:
+            return not self.held
+    def stable_for(self,seconds):
+        with self.lock:
+            last=self.last_input_time
+            released=not self.held
+        return released and time.time()-last>=max(0.0,float(seconds))
     def stop(self,timeout=1.0):
         if self.thread_id:
             try:
@@ -1525,15 +1713,18 @@ class MouseMonitor:
             self.thread.join(max(0.0,float(timeout)))
         return not bool(self.thread and self.thread.is_alive())
 class FrameBuffer:
-    def __init__(self,bridge,target,hz=20.0,seconds=2.0,motion_interval=0.1):
+    def __init__(self,bridge,target,hz=20.0,seconds=2.0,motion_interval=0.1,purpose=None):
         self.bridge=bridge
         self.target=dict(target)
         self.interval=1.0/max(5.0,float(hz))
         self.motion_interval=max(0.05,min(0.25,float(motion_interval)))
+        self.purpose=str(purpose or "")
+        self.need_preview=self.purpose=="teaching"
         self.frames=deque(maxlen=max(12,int(float(hz)*float(seconds))+4))
         self.lock=threading.RLock()
+        self.condition=threading.Condition(self.lock)
+        self.sequence=0
         self.stop_event=threading.Event()
-        self.ready=threading.Event()
         self.thread=None
         self.last_error=""
     def start(self):
@@ -1548,7 +1739,7 @@ class FrameBuffer:
         try:
             while not self.stop_event.is_set():
                 try:
-                    captured=self.bridge.capture_gray(self.target,True)
+                    captured=self.bridge.capture_gray(self.target,True,False,self.need_preview)
                     stamp=time.time()
                     rgb=captured["rgb"]
                     gray=captured["gray"]
@@ -1560,18 +1751,21 @@ class FrameBuffer:
                                 break
                     feature=self.bridge.feature_from_rgb(rgb,previous)
                     rect=self.bridge.validate_target(self.target,False)
-                    frame={"time":stamp,"f":feature,"coarse":coarse_feature(feature),"gray":gray,"rgb":rgb,"preview_rgb":captured.get("preview_rgb"),"preview_width":captured.get("preview_width",PREVIEW_W),"preview_height":captured.get("preview_height",PREVIEW_H),"method":captured["method"],"quality":captured["quality"],"motion_valid":previous is not None,"rect":rect,"dpi":self.bridge.dpi_for_window(int(self.target["hwnd"])),"capture_valid":bool(captured.get("capture_valid")),"backend_validated":bool(captured.get("backend_validated")),"usable_for_learning":bool(captured.get("usable_for_learning")),"usable_for_training":bool(captured.get("usable_for_training")),"usable_for_teaching":bool(captured.get("usable_for_teaching")),"stale":bool(captured.get("stale")),"protected_or_black":bool(captured.get("protected_or_black")),"backend_changed":bool(captured.get("backend_changed"))}
-                    with self.lock:
+                    frame={"time":stamp,"f":feature,"coarse":coarse_feature(feature),"gray":gray,"rgb":rgb,"preview_rgb":captured.get("preview_rgb"),"preview_width":captured.get("preview_width",0),"preview_height":captured.get("preview_height",0),"method":captured["method"],"quality":captured["quality"],"motion_valid":previous is not None,"rect":rect,"dpi":self.bridge.dpi_for_window(int(self.target["hwnd"])),"capture_valid":bool(captured.get("capture_valid")),"backend_validated":bool(captured.get("backend_validated")),"usable_for_learning":bool(captured.get("usable_for_learning")),"usable_for_training":bool(captured.get("usable_for_training")),"usable_for_teaching":bool(captured.get("usable_for_teaching")),"stale":bool(captured.get("stale")),"protected_or_black":bool(captured.get("protected_or_black")),"capture_frozen":bool(captured.get("capture_frozen")),"backend_changed":bool(captured.get("backend_changed"))}
+                    with self.condition:
                         self.frames.append(frame)
-                    self.last_error="" if frame["capture_valid"] else "画面无效或后端未验收"
-                    self.ready.set()
+                        self.sequence+=1
+                        self.last_error="" if frame.get("usable_for_"+self.purpose,frame["capture_valid"]) else "画面无效、冻结、受保护或后端未验收"
+                        self.condition.notify_all()
                 except Exception as error:
-                    self.last_error=str(error)
+                    with self.condition:
+                        self.last_error=str(error)
+                        self.condition.notify_all()
                 next_time=max(next_time+self.interval,time.monotonic())
                 self.stop_event.wait(max(0.001,next_time-time.monotonic()))
         finally:
             try:
-                self.bridge.wgc.release_thread(thread_id)
+                self.bridge.release_capture_thread_resources(thread_id)
             except Exception:
                 pass
     def latest(self,before=None,max_age=0.6,purpose=None):
@@ -1603,11 +1797,15 @@ class FrameBuffer:
             return [dict(frame) for frame in self.frames if frame["time"]>=cutoff]
     def stop(self,wait=True,timeout=1.0):
         self.stop_event.set()
+        with self.condition:
+            self.condition.notify_all()
         if wait and self.thread and self.thread.is_alive() and self.thread is not threading.current_thread():
             self.thread.join(max(0.0,float(timeout)))
         return not bool(self.thread and self.thread.is_alive())
     def wait_for_usable(self,purpose,timeout=3.0,external_stop=None):
         deadline=time.monotonic()+max(0.1,float(timeout))
+        with self.condition:
+            seen=self.sequence
         while time.monotonic()<deadline:
             if self.bridge.key_down(0x1B):
                 if external_stop is not None:
@@ -1621,7 +1819,12 @@ class FrameBuffer:
                 return frame
             if not self.thread or not self.thread.is_alive():
                 raise CaptureUnavailable(self.last_error or "画面线程已停止")
-            self.ready.wait(0.05)
+            remaining=max(0.0,deadline-time.monotonic())
+            with self.condition:
+                while self.sequence==seen and not self.stop_event.is_set() and remaining>0:
+                    self.condition.wait(min(0.2,remaining))
+                    remaining=max(0.0,deadline-time.monotonic())
+                seen=self.sequence
         raise CaptureUnavailable("未在限定时间内获得可用于"+str(purpose)+"的已验收画面："+(self.last_error or "未知原因"))
     def alive(self):
         return bool(self.thread and self.thread.is_alive())
@@ -1634,7 +1837,7 @@ class ModeSession:
         self.mouse_monitor=None
         self.keyboard_monitor=None
     def start_frames(self,hz,seconds,motion_interval,purpose):
-        buffer=FrameBuffer(self.app.api,self.target,hz,seconds,motion_interval)
+        buffer=FrameBuffer(self.app.api,self.target,hz,seconds,motion_interval,purpose)
         self.resources.append(("frame",buffer))
         buffer.start()
         buffer.wait_for_usable(purpose,3.0,self.app.stop_event)
@@ -1646,8 +1849,8 @@ class ModeSession:
         monitor.start()
         self.keyboard_monitor=monitor
         return monitor
-    def start_mouse(self):
-        monitor=MouseMonitor(self.app.api)
+    def start_mouse(self,on_input=None):
+        monitor=MouseMonitor(self.app.api,on_input)
         self.resources.append(("mouse",monitor))
         monitor.start()
         self.mouse_monitor=monitor
@@ -1676,15 +1879,64 @@ class DataStore:
         self.lock=threading.RLock()
         self.model_cache={}
         self.closed=False
-        self.db=sqlite3.connect(str(self.db_path),timeout=1.0,check_same_thread=False)
+        self.pending_samples=[]
+        self.pending_event=threading.Event()
+        self.writer_stop=threading.Event()
+        self.writer_error=None
+        self.writer_thread=None
+        self.db=sqlite3.connect(str(self.db_path),timeout=3.0,check_same_thread=False)
         self.db.row_factory=sqlite3.Row
         with self.db:
             self.db.execute("PRAGMA foreign_keys=ON")
-            self.db.execute("PRAGMA journal_mode=DELETE")
-            self.db.execute("PRAGMA synchronous=FULL")
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=NORMAL")
             self.db.execute("PRAGMA temp_store=MEMORY")
+            self.db.execute("PRAGMA busy_timeout=3000")
         self._initialize_schema()
         self._migrate_legacy()
+        self.writer_thread=threading.Thread(target=self._writer_loop,name="UniversalGameAI-SampleWriter",daemon=True)
+        self.writer_thread.start()
+    def _raise_writer_error(self):
+        if self.writer_error:
+            raise RuntimeError("样本批量写入失败："+str(self.writer_error))
+    def _flush_pending(self):
+        with self.lock:
+            if not self.pending_samples:
+                self.pending_event.clear()
+                self._raise_writer_error()
+                return 0
+            batch=self.pending_samples
+            self.pending_samples=[]
+            self.pending_event.clear()
+            rows=[item["row"] for item in batch]
+            review_games=sorted({item["gid"] for item in batch if item.get("mark_review")})
+            try:
+                with self.db:
+                    self.db.executemany("INSERT OR IGNORE INTO samples(game_id,created,kind,action_signature,action_family,repeat_policy,feature_algorithm_version,action_algorithm_version,feature,coarse,action,source,session_id,capture_method,context,thumbnail,weight,fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",rows)
+                    for gid in review_games:
+                        self.db.execute("UPDATE games SET needs_review=1 WHERE id=?",(gid,))
+            except Exception:
+                self.pending_samples=batch+self.pending_samples
+                self.writer_error=traceback.format_exc()
+                raise
+            return len(batch)
+    def flush_samples(self):
+        self._raise_writer_error()
+        return self._flush_pending()
+    def _writer_loop(self):
+        while not self.writer_stop.is_set():
+            self.pending_event.wait(0.35)
+            if self.writer_stop.is_set():
+                break
+            try:
+                self._flush_pending()
+            except Exception:
+                self.writer_stop.set()
+                break
+        try:
+            self._flush_pending()
+        except Exception:
+            pass
     def _table_exists(self,name):
         return bool(self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(str(name),)).fetchone())
     def _columns(self,name):
@@ -1700,7 +1952,7 @@ class DataStore:
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_samples_game_session ON samples(game_id,session_id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_samples_game_action ON samples(game_id,action_signature)")
         self.db.execute("CREATE TABLE IF NOT EXISTS models(game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,slot TEXT NOT NULL,saved REAL NOT NULL,created REAL NOT NULL,prototype_count INTEGER NOT NULL,validation TEXT NOT NULL,payload BLOB NOT NULL,checksum TEXT NOT NULL,PRIMARY KEY(game_id,slot))")
-        self.db.execute("CREATE TABLE IF NOT EXISTS model_backups(id INTEGER PRIMARY KEY AUTOINCREMENT,game_id TEXT NOT NULL,created REAL NOT NULL,prototype_count INTEGER NOT NULL,validation TEXT NOT NULL,payload BLOB NOT NULL,checksum TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS model_backups(id INTEGER PRIMARY KEY AUTOINCREMENT,game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,created REAL NOT NULL,prototype_count INTEGER NOT NULL,validation TEXT NOT NULL,payload BLOB NOT NULL,checksum TEXT NOT NULL)")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_model_backups_game_created ON model_backups(game_id,created DESC)")
         self.db.execute("CREATE TABLE IF NOT EXISTS rejections(id INTEGER PRIMARY KEY AUTOINCREMENT,game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,created REAL NOT NULL,feature_algorithm_version INTEGER NOT NULL,feature BLOB NOT NULL,coarse BLOB NOT NULL,thumbnail BLOB,candidates TEXT NOT NULL,source TEXT NOT NULL,session_id TEXT NOT NULL,capture_method TEXT NOT NULL)")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_rejections_game_created ON rejections(game_id,created DESC)")
@@ -1745,6 +1997,15 @@ class DataStore:
                         self._create_latest_schema()
                         self.db.execute("UPDATE samples SET action_family=kind WHERE action_family='' OR action_family IS NULL")
                         version=3
+                    elif version==3:
+                        self.db.execute("DROP TABLE IF EXISTS model_backups_v4")
+                        self.db.execute("CREATE TABLE model_backups_v4(id INTEGER PRIMARY KEY AUTOINCREMENT,game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,created REAL NOT NULL,prototype_count INTEGER NOT NULL,validation TEXT NOT NULL,payload BLOB NOT NULL,checksum TEXT NOT NULL)")
+                        if self._table_exists("model_backups"):
+                            self.db.execute("INSERT INTO model_backups_v4(id,game_id,created,prototype_count,validation,payload,checksum) SELECT b.id,b.game_id,b.created,b.prototype_count,b.validation,b.payload,b.checksum FROM model_backups b JOIN games g ON g.id=b.game_id")
+                            self.db.execute("DROP TABLE model_backups")
+                        self.db.execute("ALTER TABLE model_backups_v4 RENAME TO model_backups")
+                        self.db.execute("CREATE INDEX IF NOT EXISTS idx_model_backups_game_created ON model_backups(game_id,created DESC)")
+                        version=4
                     else:
                         raise RuntimeError("没有从数据库版本"+str(version)+"开始的迁移路径")
                     self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)",(str(version),))
@@ -1888,6 +2149,7 @@ class DataStore:
             return None
         return next((game for game in self.games() if game["id"]==row[0]),None)
     def replace_games(self,games,selected):
+        self.flush_samples()
         cleaned=[]
         names=set()
         for item in games:
@@ -1906,6 +2168,7 @@ class DataStore:
             keep={item["id"] for item in cleaned}
             existing={row[0] for row in self.db.execute("SELECT id FROM games")}
             for gid in existing-keep:
+                self.db.execute("DELETE FROM model_backups WHERE game_id=?",(gid,))
                 self.db.execute("DELETE FROM games WHERE id=?",(gid,))
                 self.model_cache.pop(gid,None)
             for item in cleaned:
@@ -1930,28 +2193,38 @@ class DataStore:
         return hashlib.sha256(feature_bytes(feature)+b"\0"+canonical_bytes(identity)).hexdigest()
     def _near_duplicate(self,gid,feature,signature,threshold,context=None):
         with self.lock:
-            rows=self.db.execute("SELECT feature,feature_algorithm_version,context FROM samples WHERE game_id=? AND action_signature=? ORDER BY created DESC,id DESC LIMIT 36",(gid,signature)).fetchall()
+            rows=self.db.execute("SELECT feature,coarse,feature_algorithm_version,context FROM samples WHERE game_id=? AND action_signature=? ORDER BY created DESC,id DESC LIMIT 36",(gid,signature)).fetchall()
+            pending=[item for item in self.pending_samples if item["gid"]==gid and item["signature"]==signature][-36:]
         query=feature_bytes(feature)
         query_coarse=coarse_feature(query)
         query_context=context if isinstance(context,dict) else {}
+        for item in pending:
+            try:
+                if temporal_distance(query_context,item["context"])<=0.08 and coarse_distance(query_coarse,item["coarse"])<=max(2.0,float(threshold)*2.5) and feature_distance(query,item["feature"])<=float(threshold):
+                    return True
+            except Exception:
+                pass
         for row in rows:
             try:
                 candidate=upgrade_feature(zlib.decompress(row["feature"]),row["feature_algorithm_version"])
                 candidate_context=json.loads(row["context"])
+                candidate_coarse=bytes(row["coarse"]) if row["coarse"] is not None and len(row["coarse"])==COARSE_LEN else coarse_feature(candidate)
                 if candidate is None or not isinstance(candidate_context,dict):
                     continue
                 if temporal_distance(query_context,candidate_context)>0.08:
                     continue
-                if coarse_distance(query_coarse,coarse_feature(candidate))<=max(2.0,float(threshold)*2.5) and feature_distance(query,candidate)<=float(threshold):
+                if coarse_distance(query_coarse,candidate_coarse)<=max(2.0,float(threshold)*2.5) and feature_distance(query,candidate)<=float(threshold):
                     return True
             except Exception:
                 continue
         return False
     def _insert_sample(self,gid,feature,action,source,context,thumbnail,weight,enforce_quota,mark_review,created=None):
+        self._raise_writer_error()
         clean=normalize_action(action)
         if not clean or not feature_valid(feature):
             raise RuntimeError("拒绝保存无效样本")
         fbytes=feature_bytes(feature)
+        coarse=coarse_feature(fbytes)
         signature=action_signature(clean)
         context=dict(context) if isinstance(context,dict) else {}
         session_id=str(context.get("session_id") or "unspecified")
@@ -1962,32 +2235,41 @@ class DataStore:
         duplicate_threshold=float(context.get("duplicate_threshold",3.0)) if finite_number(context.get("duplicate_threshold",3.0)) else 3.0
         fingerprint=self._sample_fingerprint(fbytes,clean,context)
         kind=clean["kind"]
+        created_value=float(time.time() if created is None else created)
+        need_compact=False
         with self.lock:
             if not self.db.execute("SELECT 1 FROM games WHERE id=?",(gid,)).fetchone():
                 raise RuntimeError("游戏不存在")
+            if any(item["gid"]==gid and item["fingerprint"]==fingerprint for item in self.pending_samples) or self.db.execute("SELECT 1 FROM samples WHERE game_id=? AND fingerprint=?",(gid,fingerprint)).fetchone():
+                return False
             if enforce_quota and kind=="no_op":
                 row=self.db.execute("SELECT SUM(CASE WHEN kind='no_op' THEN 1 ELSE 0 END) AS noops,SUM(CASE WHEN kind!='no_op' THEN 1 ELSE 0 END) AS actions FROM samples WHERE game_id=?",(gid,)).fetchone()
-                if int(row["noops"] or 0)>=max(1,int(row["actions"] or 0)//3):
+                pending_noops=sum(1 for item in self.pending_samples if item["gid"]==gid and item["kind"]=="no_op")
+                pending_actions=sum(1 for item in self.pending_samples if item["gid"]==gid and item["kind"]!="no_op")
+                if int(row["noops"] or 0)+pending_noops>=max(1,(int(row["actions"] or 0)+pending_actions)//3):
                     return False
             if enforce_quota and self._near_duplicate(gid,fbytes,signature,duplicate_threshold,context):
                 return False
-            try:
-                with self.db:
-                    cursor=self.db.execute("INSERT INTO samples(game_id,created,kind,action_signature,action_family,repeat_policy,feature_algorithm_version,action_algorithm_version,feature,coarse,action,source,session_id,capture_method,context,thumbnail,weight,fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(gid,float(created or time.time()),kind,signature,action_family_key(clean),repeat_policy,FEATURE_ALGORITHM_VERSION,ACTION_ALGORITHM_VERSION,sqlite3.Binary(zlib.compress(fbytes,6)),sqlite3.Binary(coarse_feature(fbytes)),json.dumps(clean,ensure_ascii=False,separators=(",",":")),str(source),session_id,capture_method,json.dumps(context,ensure_ascii=False,separators=(",",":")),sqlite3.Binary(zlib.compress(gray_bytes(thumbnail),6)) if gray_valid(thumbnail) else None,float(max(0.1,min(10.0,weight))),fingerprint))
-                    if mark_review:
-                        self.db.execute("UPDATE games SET needs_review=1 WHERE id=?",(gid,))
-            except sqlite3.IntegrityError:
-                return False
-            count=int(self.db.execute("SELECT COUNT(*) FROM samples WHERE game_id=?",(gid,)).fetchone()[0])
-        if count>MAX_SAMPLES:
+            row=(gid,created_value,kind,signature,action_family_key(clean),repeat_policy,FEATURE_ALGORITHM_VERSION,ACTION_ALGORITHM_VERSION,sqlite3.Binary(zlib.compress(fbytes,6)),sqlite3.Binary(coarse),json.dumps(clean,ensure_ascii=False,separators=(",",":")),str(source),session_id,capture_method,json.dumps(context,ensure_ascii=False,separators=(",",":")),sqlite3.Binary(zlib.compress(gray_bytes(thumbnail),6)) if gray_valid(thumbnail) else None,float(max(0.1,min(10.0,weight))),fingerprint)
+            self.pending_samples.append({"row":row,"gid":gid,"signature":signature,"coarse":coarse,"feature":fbytes,"context":context,"kind":kind,"fingerprint":fingerprint,"session_id":session_id,"created":created_value,"mark_review":bool(mark_review)})
+            if len(self.pending_samples)>=12:
+                self.pending_event.set()
+            count=int(self.db.execute("SELECT COUNT(*) FROM samples WHERE game_id=?",(gid,)).fetchone()[0])+sum(1 for item in self.pending_samples if item["gid"]==gid)
+            need_compact=count>MAX_SAMPLES+16
+        if need_compact:
+            self.flush_samples()
             self.compact_samples(gid,MAX_SAMPLES)
-        return cursor.rowcount>0
+        return True
     def discard_session_window(self,gid,session_id,start_time,end_time):
-        with self.lock,self.db:
-            cursor=self.db.execute("DELETE FROM samples WHERE game_id=? AND session_id=? AND created BETWEEN ? AND ?",(gid,str(session_id),float(start_time),float(end_time)))
-            removed=max(0,int(cursor.rowcount or 0))
-            if removed:
-                self.db.execute("UPDATE games SET needs_review=1 WHERE id=?",(gid,))
+        with self.lock:
+            before=len(self.pending_samples)
+            self.pending_samples=[item for item in self.pending_samples if not (item["gid"]==gid and item["session_id"]==str(session_id) and float(start_time)<=item["created"]<=float(end_time))]
+            pending_removed=before-len(self.pending_samples)
+            with self.db:
+                cursor=self.db.execute("DELETE FROM samples WHERE game_id=? AND session_id=? AND created BETWEEN ? AND ?",(gid,str(session_id),float(start_time),float(end_time)))
+                removed=pending_removed+max(0,int(cursor.rowcount or 0))
+                if removed:
+                    self.db.execute("UPDATE games SET needs_review=1 WHERE id=?",(gid,))
         self.model_cache.pop(gid,None)
         return removed
     def append_sample(self,gid,feature,action,source,context=None,thumbnail=None,weight=1.0):
@@ -2005,15 +2287,17 @@ class DataStore:
             self.db.execute("INSERT INTO rejections(game_id,created,feature_algorithm_version,feature,coarse,thumbnail,candidates,source,session_id,capture_method) VALUES(?,?,?,?,?,?,?,?,?,?)",(gid,time.time(),FEATURE_ALGORITHM_VERSION,sqlite3.Binary(zlib.compress(feature_bytes(feature),6)),sqlite3.Binary(coarse_feature(feature)),sqlite3.Binary(zlib.compress(gray_bytes(thumbnail),6)) if gray_valid(thumbnail) else None,json.dumps(candidate_data,ensure_ascii=False,separators=(",",":")),str(source),str(context.get("session_id") or "unspecified"),str(context.get("capture_method") or "unknown")))
             self.db.execute("UPDATE games SET needs_review=1 WHERE id=?",(gid,))
     def load_samples(self,gid,limit=MAX_SAMPLES):
+        self.flush_samples()
         with self.lock:
-            rows=self.db.execute("SELECT created,feature_algorithm_version,action_algorithm_version,feature,action,source,session_id,capture_method,context,thumbnail,weight,fingerprint,repeat_policy FROM samples WHERE game_id=? ORDER BY created DESC,id DESC LIMIT ?",(gid,int(limit))).fetchall()
+            rows=self.db.execute("SELECT created,feature_algorithm_version,action_algorithm_version,feature,coarse,action,source,session_id,capture_method,context,thumbnail,weight,fingerprint,repeat_policy FROM samples WHERE game_id=? ORDER BY created DESC,id DESC LIMIT ?",(gid,int(limit))).fetchall()
         result=[]
         invalid=0
         for row in reversed(rows):
             try:
                 feature=upgrade_feature(zlib.decompress(row["feature"]),row["feature_algorithm_version"])
                 action=normalize_action(json.loads(row["action"]))
-                if not feature_valid(feature) or not action:
+                coarse=bytes(row["coarse"]) if row["coarse"] is not None and len(row["coarse"])==COARSE_LEN else coarse_feature(feature)
+                if not feature_valid(feature) or len(coarse)!=COARSE_LEN or not action:
                     invalid+=1
                     continue
                 thumbnail=zlib.decompress(row["thumbnail"]) if row["thumbnail"] is not None else None
@@ -2022,26 +2306,28 @@ class DataStore:
                 if not isinstance(context,dict):
                     context={}
                 context.update({"session_id":row["session_id"],"capture_method":row["capture_method"],"repeat_policy":row["repeat_policy"]})
-                result.append({"format_version":FORMAT_VERSION,"feature_width":FEATURE_W,"feature_height":FEATURE_H,"feature_algorithm_version":FEATURE_ALGORITHM_VERSION,"action_algorithm_version":ACTION_ALGORITHM_VERSION,"created":row["created"],"game_id":gid,"f":feature,"a":action,"source":row["source"],"session_id":row["session_id"],"capture_method":row["capture_method"],"repeat_policy":row["repeat_policy"],"context":context,"thumbnail":thumbnail,"weight":row["weight"],"checksum":row["fingerprint"]})
+                result.append({"format_version":FORMAT_VERSION,"feature_width":FEATURE_W,"feature_height":FEATURE_H,"feature_algorithm_version":FEATURE_ALGORITHM_VERSION,"action_algorithm_version":ACTION_ALGORITHM_VERSION,"created":row["created"],"game_id":gid,"f":feature,"coarse":coarse,"a":action,"source":row["source"],"session_id":row["session_id"],"capture_method":row["capture_method"],"repeat_policy":row["repeat_policy"],"context":context,"thumbnail":thumbnail,"weight":row["weight"],"checksum":row["fingerprint"]})
             except Exception:
                 invalid+=1
         return result,{"valid":len(result),"invalid":invalid,"total":len(rows)}
     def load_rejections(self,gid,limit=500):
         with self.lock:
-            rows=self.db.execute("SELECT created,feature_algorithm_version,feature,thumbnail,candidates,source,session_id,capture_method FROM rejections WHERE game_id=? ORDER BY created DESC,id DESC LIMIT ?",(gid,int(limit))).fetchall()
+            rows=self.db.execute("SELECT created,feature_algorithm_version,feature,coarse,thumbnail,candidates,source,session_id,capture_method FROM rejections WHERE game_id=? ORDER BY created DESC,id DESC LIMIT ?",(gid,int(limit))).fetchall()
         result=[]
         for row in rows:
             try:
                 feature=upgrade_feature(zlib.decompress(row["feature"]),row["feature_algorithm_version"])
+                coarse=bytes(row["coarse"]) if row["coarse"] is not None and len(row["coarse"])==COARSE_LEN else coarse_feature(feature)
                 candidates=json.loads(row["candidates"])
                 thumbnail=zlib.decompress(row["thumbnail"]) if row["thumbnail"] is not None else None
                 thumbnail=upgrade_gray_image(thumbnail) if thumbnail is not None else None
-                if feature_valid(feature) and isinstance(candidates,list):
-                    result.append({"created":row["created"],"f":feature,"thumbnail":thumbnail,"candidates":candidates,"source":row["source"],"session_id":row["session_id"],"capture_method":row["capture_method"]})
+                if feature_valid(feature) and len(coarse)==COARSE_LEN and isinstance(candidates,list):
+                    result.append({"created":row["created"],"f":feature,"coarse":coarse,"thumbnail":thumbnail,"candidates":candidates,"source":row["source"],"session_id":row["session_id"],"capture_method":row["capture_method"]})
             except Exception:
                 pass
         return result
     def sample_stats(self,gid):
+        self.flush_samples()
         with self.lock:
             row=self.db.execute("SELECT COUNT(*) AS total,SUM(CASE WHEN feature_algorithm_version IN (3,?) THEN 1 ELSE 0 END) AS valid,COALESCE(SUM(length(feature)+length(coarse)+length(action)+length(context)+COALESCE(length(thumbnail),0)),0) AS bytes FROM samples WHERE game_id=?",(FEATURE_ALGORITHM_VERSION,gid)).fetchone()
         total=int(row["total"] or 0)
@@ -2061,6 +2347,7 @@ class DataStore:
             ordered.remove(best)
         return selected
     def compact_samples(self,gid,keep=MAX_SAMPLES):
+        self.flush_samples()
         keep=max(1,int(keep))
         with self.lock:
             rows=self.db.execute("SELECT id,kind,action_signature,action_family,coarse,weight,created FROM samples WHERE game_id=?",(gid,)).fetchall()
@@ -2102,6 +2389,7 @@ class DataStore:
                 self.db.execute("DELETE FROM samples WHERE game_id=?",(gid,))
         return {"kept":len(keep_ids),"removed":len(rows)-len(keep_ids),"invalid":0}
     def clear_game_data(self,gid):
+        self.flush_samples()
         with self.lock,self.db:
             self.db.execute("DELETE FROM samples WHERE game_id=?",(gid,))
             self.db.execute("DELETE FROM models WHERE game_id=?",(gid,))
@@ -2271,9 +2559,18 @@ class DataStore:
     def close(self):
         with self.lock:
             if self.closed:
-                return
+                return True
             self.closed=True
+        self.writer_stop.set()
+        self.pending_event.set()
+        if self.writer_thread and self.writer_thread.is_alive() and self.writer_thread is not threading.current_thread():
+            self.writer_thread.join(1.5)
+        if self.writer_thread and self.writer_thread.is_alive():
+            return False
+        with self.lock:
+            self._flush_pending()
             self.db.close()
+        return True
 class App:
     def __init__(self,root):
         self.root=root
@@ -2299,6 +2596,7 @@ class App:
         self.closing=False
         self.shutdown_started=False
         self.shutdown_deadline=None
+        self.review_distance_cache={}
         self.status=tk.StringVar(value="就绪")
         self.game_text=tk.StringVar(value="未选择")
         self.window_text=tk.StringVar(value="未选择")
@@ -2684,13 +2982,13 @@ class App:
             return
         win=tk.Toplevel(self.root)
         win.title("选择窗口")
-        win.geometry("820x590")
+        win.geometry("820x540")
         win.transient(self.root)
         win.grab_set()
         frame=ttk.Frame(win,padding=16)
         frame.pack(fill="both",expand=True)
         ttk.Label(frame,text="选择雷电模拟器窗口或其他窗口",font=("Microsoft YaHei UI",13,"bold")).pack(anchor="w",pady=(0,6))
-        ttk.Label(frame,text="确认后将在工作线程执行动态采集校准。请让目标窗口画面发生变化；校准失败、窗口消失、最小化、权限不足或后端切换时不会保存选择。",wraplength=760).pack(anchor="w",pady=(0,10))
+        ttk.Label(frame,text="确认按钮只保存窗口身份，不再要求画面变化。学习、训练或请教开始前，程序会单独执行动态采集验收；静态菜单、暂停画面和棋盘画面可通过稳定性校准。",wraplength=760).pack(anchor="w",pady=(0,10))
         list_frame=ttk.Frame(frame)
         list_frame.pack(fill="both",expand=True)
         box=tk.Listbox(list_frame,exportselection=False,font=("Microsoft YaHei UI",10))
@@ -2700,15 +2998,10 @@ class App:
         scroll.pack(side="right",fill="y")
         status=tk.StringVar(value="请选择窗口")
         ttk.Label(frame,textvariable=status,wraplength=760).pack(anchor="w",fill="x",pady=(8,2))
-        progress=ttk.Progressbar(frame,maximum=100)
-        progress.pack(fill="x",pady=(0,8))
         windows=[]
-        cancel_event=threading.Event()
-        state={"calibrating":False,"closed":False}
+        state={"closed":False}
         def refresh():
             nonlocal windows
-            if state["calibrating"]:
-                return
             try:
                 windows=self.api.enum_windows()
             except Exception as error:
@@ -2724,81 +3017,46 @@ class App:
             if selected_index is not None:
                 box.selection_set(selected_index)
                 box.see(selected_index)
-        def set_busy(value):
-            state["calibrating"]=bool(value)
-            confirm_button.configure(state="disabled" if value else "normal")
-            refresh_button.configure(state="disabled" if value else "normal")
-            box.configure(state="disabled" if value else "normal")
-        def finish_success(item,calibration):
-            if state["closed"] or cancel_event.is_set():
-                return
-            item=dict(item)
-            item["integrity"]=int(calibration["integrity"])
-            item["capture_backend"]=str(calibration["validated_backend"])
-            self.selected_window=item
-            self.api.reset_frame_history(item["hwnd"])
-            self._refresh_all()
-            self.status.set("已选择窗口："+item["title"]+"；后端"+str(calibration["validated_backend"])+"；动态校准"+str(round(float(calibration.get("fps",0.0)),1))+"fps")
-            state["closed"]=True
-            try:
-                win.grab_release()
-            except Exception:
-                pass
-            win.destroy()
-        def finish_error(message):
-            if state["closed"] or cancel_event.is_set():
-                return
-            set_busy(False)
-            progress["value"]=0
-            status.set("校准失败："+str(message))
         def confirm():
-            if state["calibrating"]:
-                return
             selection=box.curselection()
             if not selection:
                 self.show_error("请先选择一个窗口")
                 return
             item=dict(windows[selection[0]])
             try:
-                self.api.validate_target(item,False)
+                rect=self.api.validate_target(item,False)
                 item["integrity"]=self.api.validate_uipi(item)
+                item["selected_rect"]=list(rect)
+                item["selected_dpi"]=self.api.dpi_for_window(item["hwnd"])
             except Exception as error:
                 self.show_error(str(error))
                 return
-            cancel_event.clear()
-            set_busy(True)
-            status.set("正在动态检测采集后端、画面变化、窗口身份和权限；可点击取消")
-            progress["value"]=1
-            def update_progress(value):
-                self.ui(lambda:progress.configure(value=max(1,min(99,float(value)*100))) if not state["closed"] else None)
-            def work():
-                try:
-                    calibration=self.api.calibrate(item,1.8,cancel_event,update_progress)
-                    self.ui(lambda:finish_success(item,calibration))
-                except Exception as error:
-                    self.ui(lambda message=str(error):finish_error(message))
-                finally:
-                    try:
-                        self.api.wgc.release_thread(threading.get_ident())
-                    except Exception:
-                        pass
-            threading.Thread(target=work,name="UniversalGameAI-WindowCalibration",daemon=True).start()
+            previous=self.selected_window
+            self.selected_window=item
+            if not previous or any(previous.get(key)!=item.get(key) for key in ("hwnd","pid","class")):
+                self.api.calibrations.pop(int(item["hwnd"]),None)
+            self.api.reset_frame_history(item["hwnd"])
+            self._refresh_all()
+            self.status.set("已保存窗口身份："+item["title"]+"；采集动态或稳定性验收将在学习、训练或请教开始前执行")
+            state["closed"]=True
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            win.destroy()
         def cancel():
             if state["closed"]:
                 return
             state["closed"]=True
-            cancel_event.set()
             try:
                 win.grab_release()
             except Exception:
                 pass
             win.destroy()
         tools=ttk.Frame(frame)
-        tools.pack(fill="x",pady=(4,0))
-        refresh_button=ttk.Button(tools,text="刷新",command=refresh)
-        refresh_button.pack(side="left")
-        confirm_button=ttk.Button(tools,text="确认",command=confirm)
-        confirm_button.pack(side="right",padx=(6,0))
+        tools.pack(fill="x",pady=(8,0))
+        ttk.Button(tools,text="刷新",command=refresh).pack(side="left")
+        ttk.Button(tools,text="确认",command=confirm).pack(side="right",padx=(6,0))
         ttk.Button(tools,text="取消",command=cancel).pack(side="right")
         box.bind("<Double-Button-1>",lambda event:confirm())
         win.protocol("WM_DELETE_WINDOW",cancel)
@@ -2814,6 +3072,19 @@ class App:
             raise RuntimeError("请先点击“选择窗口”按钮选择目标窗口")
         self.api.validate_target(self.selected_window,foreground)
         return self.selected_window
+    def ensure_capture_calibration(self,target,purpose):
+        calibration=self.api.calibration_for(target)
+        try:
+            rect=self.api.validate_target(target,False)
+            identity_valid=bool(calibration.get("dynamic_passed") and calibration.get("validated_backend") and int(calibration.get("validated_pid",-1))==int(target.get("pid",-2)) and str(calibration.get("validated_class",""))==str(target.get("class","")) and int(calibration.get("validated_dpi",0))==self.api.dpi_for_window(int(target["hwnd"])) and list(calibration.get("validated_rect",[0,0,0,0]))[2:4]==[int(rect[2]),int(rect[3])])
+        except Exception:
+            identity_valid=False
+        if identity_valid:
+            return calibration
+        self.set_status(str(purpose)+"开始前正在验收采集后端；动态画面使用动态校准，静态画面使用稳定性校准")
+        def progress(value):
+            self.set_progress(max(0.0,min(8.0,float(value)*8.0)))
+        return self.api.calibrate(target,1.8,self.stop_event,progress)
     def set_controls(self,running):
         for button in self.controls:
             button.configure(state="disabled" if running else "normal")
@@ -2926,9 +3197,7 @@ class App:
         target=self.require_window(False)
         hwnd=target["hwnd"]
         session_id="learn|"+uuid.uuid4().hex
-        calibration=self.api.calibration_for(target)
-        if not calibration.get("dynamic_passed") or not calibration.get("validated_backend"):
-            raise RuntimeError("目标窗口尚未通过动态采集验收，请重新选择窗口")
+        calibration=self.ensure_capture_calibration(target,"学习")
         if not self.api.request_foreground(hwnd):
             self.set_status("无法自动切换到目标窗口，学习将等待目标窗口成为前台")
         self.wait_escape_release()
@@ -2981,6 +3250,12 @@ class App:
                 nonlocal learned,duplicates,last_action_signature,last_action_time,last_action_feature,last_action_changed,keyboard_discarded,state_since,invalid_frames
                 if frame is None or not frame.get("usable_for_learning"):
                     return False
+                clean_action=normalize_action(action)
+                if not clean_action:
+                    return False
+                if frame.get("quality",{}).get("low_information") and clean_action.get("kind") not in {"no_op","click","double_click"}:
+                    return False
+                action=clean_action
                 if paused():
                     keyboard_discarded+=1
                     return False
@@ -3198,22 +3473,39 @@ class App:
                     self.set_status("学习中：有效"+str(learned)+"  重复"+str(duplicates)+"  越界废弃"+str(discarded)+"  无效画面"+str(invalid_frames)+"  非ESC键"+str(keyboard_count)+"  键盘关联废弃"+str(keyboard_discarded))
                     last_update=now
                 time.sleep(0.012)
+        self.store.flush_samples()
         return "学习已结束：有效"+str(learned)+"，重复或配额抑制"+str(duplicates)+"，越界废弃"+str(discarded)+"，无效画面"+str(invalid_frames)+"，检测到非ESC键盘输入"+str(keyboard_count)+"次，因此废弃样本"+str(keyboard_discarded)+"个"
     def _prototype_medoid(self,members):
         if len(members)==1:
             return members[0]
-        candidates=members if len(members)<=28 else [members[round(index*(len(members)-1)/27)] for index in range(28)]
-        comparisons=members if len(members)<=72 else [members[round(index*(len(members)-1)/71)] for index in range(72)]
+        pool=members if len(members)<=32 else [members[round(index*(len(members)-1)/31)] for index in range(32)]
+        comparisons=members if len(members)<=80 else [members[round(index*(len(members)-1)/79)] for index in range(80)]
+        for item in pool+comparisons:
+            if not isinstance(item.get("coarse"),(bytes,bytearray)) or len(item.get("coarse"))!=COARSE_LEN:
+                item["coarse"]=coarse_feature(item["f"])
+        coarse_scores=[]
+        for candidate in pool:
+            total=sum(coarse_distance(candidate["coarse"],other["coarse"]) for other in comparisons)
+            coarse_scores.append((total,candidate))
+        candidates=[item for _,item in sorted(coarse_scores,key=lambda pair:pair[0])[:min(12,len(coarse_scores))]]
         best=candidates[0]
         best_total=float("inf")
         operations=0
+        cache=self.review_distance_cache
         for candidate in candidates:
             total=0.0
+            candidate_key=str(candidate.get("checksum") or candidate.get("created") or id(candidate))
             for other in comparisons:
                 operations+=1
                 if operations%32==0 and self.should_stop():
                     raise InputStopped("复习已停止")
-                total+=feature_distance(candidate["f"],other["f"])
+                other_key=str(other.get("checksum") or other.get("created") or id(other))
+                key=(candidate_key,other_key) if candidate_key<=other_key else (other_key,candidate_key)
+                distance=cache.get(key)
+                if distance is None:
+                    distance=feature_distance(candidate["f"],other["f"])
+                    cache[key]=distance
+                total+=distance
             if total<best_total:
                 best_total=total
                 best=candidate
@@ -3375,13 +3667,14 @@ class App:
             previous.pop("",None)
             prev=previous.most_common(1)[0][0] if previous else ""
             methods=sorted({str(item.get("capture_method") or item.get("context",{}).get("capture_method") or "unknown") for item in cluster})
-            result.append({"id":uuid.uuid4().hex,"cluster_id":cluster_id,"canonical_action_signature":canonical,"f":feature_bytes(medoid["f"]),"coarse":coarse_feature(medoid["f"]),"a":normalize_action(action),"support":len(cluster),"action_support":int(action_support),"mean_distance":round(mean,6),"std_distance":round(std,6),"limit95":round(limit95,6),"limit99":round(limit99,6),"intra_threshold":round(threshold_value,6),"threshold":round(threshold_value,6),"temporal":temporal,"temporal_threshold":round(temporal_threshold,6),"capture_methods":methods,"previous_action":prev,"repeat_policy":repeat_policy if repeat_policy in REPEAT_POLICIES else "one_shot","max_rate":max(0.25,min(12.0,float(max_rate))),"ambiguous":False,"created_from_sample_checksum":medoid.get("checksum","")})
+            result.append({"id":uuid.uuid4().hex,"cluster_id":cluster_id,"canonical_action_signature":canonical,"f":feature_bytes(medoid["f"]),"coarse":bytes(medoid.get("coarse")) if isinstance(medoid.get("coarse"),(bytes,bytearray)) and len(medoid.get("coarse"))==COARSE_LEN else coarse_feature(medoid["f"]),"a":normalize_action(action),"support":len(cluster),"action_support":int(action_support),"mean_distance":round(mean,6),"std_distance":round(std,6),"limit95":round(limit95,6),"limit99":round(limit99,6),"intra_threshold":round(threshold_value,6),"threshold":round(threshold_value,6),"temporal":temporal,"temporal_threshold":round(temporal_threshold,6),"capture_methods":methods,"previous_action":prev,"repeat_policy":repeat_policy if repeat_policy in REPEAT_POLICIES else "one_shot","max_rate":max(0.25,min(12.0,float(max_rate))),"ambiguous":False,"created_from_sample_checksum":medoid.get("checksum","")})
         return result
-    def rank_action_candidates(self,feature,prototypes,last_action_signature="",full_limit=16,temporal_context=None):
+    def rank_action_candidates(self,feature,prototypes,last_action_signature="",full_limit=16,temporal_context=None,query_coarse=None):
         if not feature_valid(feature):
             return []
         query_temporal=temporal_from_context(temporal_context or {})
-        query_coarse=coarse_feature(feature)
+        if not isinstance(query_coarse,(bytes,bytearray)) or len(query_coarse)!=COARSE_LEN:
+            query_coarse=coarse_feature(feature)
         coarse_rank=[]
         best_per_cluster={}
         for index,proto in enumerate(prototypes):
@@ -3399,7 +3692,7 @@ class App:
         coarse_rank.sort(key=lambda item:item[0])
         selected=[]
         selected_ids=set()
-        for distance,proto in coarse_rank[:max(8,int(full_limit))]:
+        for distance,proto in coarse_rank[:max(8,min(12,int(full_limit)))]:
             if proto["id"] not in selected_ids:
                 selected.append(proto)
                 selected_ids.add(proto["id"])
@@ -3480,6 +3773,78 @@ class App:
         if len(chosen)>limit:
             raise RuntimeError("原型限制执行失败")
         return chosen
+    def _split_review_samples(self,valid):
+        def session_of(item):
+            return str(item.get("session_id") or item.get("context",{}).get("session_id") or "legacy")
+        def method_of(item):
+            return str(item.get("capture_method") or item.get("context",{}).get("capture_method") or "unknown")
+        def stratum_of(item):
+            return (str(item.get("_action_cluster") or action_family_key(item["a"])),method_of(item))
+        session_groups=defaultdict(list)
+        for item in valid:
+            session_groups[session_of(item)].append(item)
+        sessions=sorted(session_groups,key=lambda key:hashlib.sha256(key.encode("utf-8","replace")).hexdigest())
+        target=max(20,round(len(valid)*0.25))
+        if len(sessions)==1:
+            groups=defaultdict(list)
+            for item in sorted(valid,key=lambda value:(float(value.get("created",0.0)),str(value.get("checksum","")))):
+                groups[stratum_of(item)].append(item)
+            if any(len(items)<2 for items in groups.values()):
+                return list(valid),[],{"complete":False,"mode":"time_block_stratified","holdout_sessions":[],"reason":"至少一个动作类型与采集后端分层只有一个样本","strata":len(groups)}
+            counts={key:max(1,min(len(items)-1,round(len(items)*0.25))) for key,items in groups.items()}
+            maximum=sum(len(items)-1 for items in groups.values())
+            desired=min(maximum,target)
+            while sum(counts.values())<desired:
+                candidates=[key for key,items in groups.items() if counts[key]<len(items)-1]
+                if not candidates:
+                    break
+                key=max(candidates,key=lambda value:(len(groups[value])-counts[value],len(groups[value])))
+                counts[key]+=1
+            holdout_ids=set()
+            for key,items in groups.items():
+                for item in items[-counts[key]:]:
+                    holdout_ids.add(id(item))
+            train=[item for item in valid if id(item) not in holdout_ids]
+            holdout=[item for item in valid if id(item) in holdout_ids]
+            complete=bool(train and holdout and all(any(stratum_of(item)==key for item in train) and any(stratum_of(item)==key for item in holdout) for key in groups))
+            return train,holdout,{"complete":complete,"mode":"time_block_stratified","holdout_sessions":[],"reason":"" if complete else "时间块分层无法同时覆盖训练集和验证集","strata":len(groups)}
+        totals=Counter(stratum_of(item) for item in valid)
+        session_counts={session:Counter(stratum_of(item) for item in items) for session,items in session_groups.items()}
+        session_sizes={session:len(items) for session,items in session_groups.items()}
+        best=None
+        best_score=None
+        def consider(chosen):
+            nonlocal best,best_score
+            if not chosen or len(chosen)>=len(sessions):
+                return
+            hold_counts=Counter()
+            hold_count=0
+            for session in chosen:
+                hold_counts.update(session_counts[session])
+                hold_count+=session_sizes[session]
+            if not all(0<hold_counts[key]<totals[key] for key in totals):
+                return
+            score=(0 if hold_count>=20 else 1,abs(hold_count-target),len(chosen))
+            if best_score is None or score<best_score:
+                best=set(chosen)
+                best_score=score
+        count=len(sessions)
+        if count<=16:
+            for mask in range(1,(1<<count)-1):
+                consider({sessions[index] for index in range(count) if mask&(1<<index)})
+        else:
+            orders=[sessions,sorted(sessions,key=lambda value:session_sizes[value]),sorted(sessions,key=lambda value:session_sizes[value],reverse=True),sorted(sessions,key=lambda value:hashlib.sha256((value+"|holdout").encode("utf-8","replace")).hexdigest())]
+            for order in orders:
+                for length in range(1,min(len(order),12)+1):
+                    consider(set(order[:length]))
+            generator=random.Random(int(hashlib.sha256("|".join(sessions).encode("utf-8","replace")).hexdigest()[:16],16))
+            for _ in range(2500):
+                consider({session for session in sessions if generator.random()<0.25})
+        if not best:
+            return list(valid),[],{"complete":False,"mode":"session_group_stratified","holdout_sessions":[],"reason":"无法找到按完整会话分组且覆盖所有动作类型与采集后端的留出集","strata":len(totals)}
+        train=[item for item in valid if session_of(item) not in best]
+        holdout=[item for item in valid if session_of(item) in best]
+        return train,holdout,{"complete":True,"mode":"session_group_stratified","holdout_sessions":sorted(best),"reason":"","strata":len(totals)}
     def review_worker(self):
         game=self.require_game()
         samples,stats=self.store.load_samples(game["id"])
@@ -3498,26 +3863,12 @@ class App:
         if not valid:
             raise RuntimeError("没有同时具备已验收采集后端和完整短时序上下文的学习数据；数据不足时只允许请教")
         self.wait_escape_release()
+        self.review_distance_cache={}
         action_clusters=self._cluster_action_samples(valid)
         if self.should_stop():
             return "复习已中断：旧完整模型未被覆盖"
-        session_groups=defaultdict(list)
-        for item in valid:
-            session_groups[str(item.get("session_id") or item.get("context",{}).get("session_id") or "legacy")].append(item)
-        sessions=sorted(session_groups,key=lambda key:hashlib.sha256(key.encode("utf-8","replace")).hexdigest())
-        holdout_sessions=set()
-        target=max(20,round(len(valid)*0.25))
-        selected_count=0
-        if len(sessions)>1:
-            for session_id in sessions:
-                if len(valid)-selected_count-len(session_groups[session_id])<1:
-                    continue
-                holdout_sessions.add(session_id)
-                selected_count+=len(session_groups[session_id])
-                if selected_count>=target:
-                    break
-        train=[item for item in valid if str(item.get("session_id") or item.get("context",{}).get("session_id") or "legacy") not in holdout_sessions]
-        holdout=[item for item in valid if item not in train]
+        train,holdout,split_info=self._split_review_samples(valid)
+        holdout_sessions=set(split_info.get("holdout_sessions",[]))
         cluster_map={cluster["id"]:cluster for cluster in action_clusters}
         groups=defaultdict(list)
         for sample in train:
@@ -3579,7 +3930,7 @@ class App:
                     return "复习已中断：旧完整模型未被覆盖"
                 candidate_actions=[normalize_action(item.get("a")) for item in rejection.get("candidates",[]) if isinstance(item,dict)]
                 if any(action and action_family_key(action)==action_family_key(proto["a"]) and action_geometry_distance(action,proto["a"])<=action_cluster_limit(proto["a"])*1.25 for action in candidate_actions):
-                    matching.append((coarse_distance(proto["coarse"],coarse_feature(rejection["f"])),rejection))
+                    matching.append((coarse_distance(proto["coarse"],rejection["coarse"]),rejection))
             if matching:
                 nearest_rejected=min(feature_distance(proto["f"],rejection["f"]) for _,rejection in sorted(matching,key=lambda item:item[0])[:8])
                 proto["nearest_rejected_distance"]=round(nearest_rejected,6)
@@ -3594,7 +3945,7 @@ class App:
         for index,sample in enumerate(holdout):
             if index%8==0 and self.should_stop():
                 return "复习已中断：旧完整模型未被覆盖"
-            ranked=self.rank_action_candidates(sample["f"],prototypes,str(sample.get("context",{}).get("previous_action","")),16,sample.get("context",{}))
+            ranked=self.rank_action_candidates(sample["f"],prototypes,str(sample.get("context",{}).get("previous_action","")),16,sample.get("context",{}),sample.get("coarse"))
             decision=self.evaluate_action_candidates(ranked)
             expected=sample["_action_cluster"]
             canonical=sample.get("_canonical_action_signature",action_signature(sample["a"]))
@@ -3654,18 +4005,20 @@ class App:
             row["passed"]=bool(row["total"]>=3 and row["accepted"]>=1 and row["accepted_error_rate"] is not None and row["accepted_error_rate"]<=0.02 and row["coverage"]>=0.80)
             method_rules_pass=method_rules_pass and row["passed"]
             per_method[method]=row
-        enough=holdout_count>=20 and len(holdout_sessions)>=1 and accepted>0 and bool(train_methods)
+        enough=holdout_count>=20 and bool(split_info.get("complete")) and accepted>0 and bool(train_methods)
         global_pass=coverage>=0.80 and overall_accuracy>=0.80 and accepted_error_rate is not None and accepted_error_rate<=0.02 and dangerous_false==0
         validation_status="passed" if enough and global_pass and action_rules_pass and method_rules_pass and prototypes and not any(proto.get("ambiguous") for proto in prototypes) else ("insufficient" if not enough or not action_rules_pass or not method_rules_pass else "failed")
-        validation={"status":validation_status,"split":"session_id","holdout_sessions":len(holdout_sessions),"minimum_holdout":20,"minimum_coverage":0.80,"maximum_accepted_error_rate":0.02,"minimum_overall_accuracy":0.80,"maximum_dangerous_false":0,"holdout":holdout_count,"accepted":accepted,"errors":errors,"correct":correct,"coverage":coverage,"accepted_error_rate":accepted_error_rate,"overall_accuracy":overall_accuracy,"dangerous_false":dangerous_false,"dangerous_false_rate":dangerous_false_rate,"per_action":per_action,"per_capture_method":per_method,"ambiguous_prototypes":sum(1 for proto in prototypes if proto.get("ambiguous"))}
+        validation={"status":validation_status,"split":str(split_info.get("mode","unknown")),"split_complete":bool(split_info.get("complete")),"split_reason":str(split_info.get("reason","")),"strata":int(split_info.get("strata",0)),"holdout_sessions":len(holdout_sessions),"minimum_holdout":20,"minimum_coverage":0.80,"maximum_accepted_error_rate":0.02,"minimum_overall_accuracy":0.80,"maximum_dangerous_false":0,"holdout":holdout_count,"accepted":accepted,"errors":errors,"correct":correct,"coverage":coverage,"accepted_error_rate":accepted_error_rate,"overall_accuracy":overall_accuracy,"dangerous_false":dangerous_false,"dangerous_false_rate":dangerous_false_rate,"per_action":per_action,"per_capture_method":per_method,"ambiguous_prototypes":sum(1 for proto in prototypes if proto.get("ambiguous"))}
         model={"created":time.time(),"samples":len(valid),"training_samples":len(train),"invalid_samples":stats["invalid"],"action_clusters":len(action_clusters),"rejection_constraints":rejection_constraints,"prototypes":prototypes,"capture_backends":train_methods,"validation":validation,"stopped":False}
         if not prototypes:
             raise RuntimeError("复习未生成可用原型")
         self.store.save_model(game["id"],model,validation_status=="passed")
+        self.review_distance_cache={}
         self.set_progress(100)
         label="通过验收" if validation_status=="passed" else ("验证不足，仅保存临时模型并禁止训练" if validation_status=="insufficient" else "验证失败，仅保存临时模型并禁止训练")
         error_text="无可计算值" if accepted_error_rate is None else str(round(accepted_error_rate*100,2))+"%"
-        lines=["复习完成，"+label+"：原型"+str(len(prototypes))+"，按会话留出"+str(holdout_count)+"，覆盖率"+str(round(coverage*100,2))+"%，接受错误率"+error_text+"，总体正确率"+str(round(overall_accuracy*100,2))+"%，危险动作误触"+str(dangerous_false)+"次","各动作独立留出验证："]
+        split_label="按完整会话分组留出" if split_info.get("mode")=="session_group_stratified" else "单会话按时间块分层留出"
+        lines=["复习完成，"+label+"：原型"+str(len(prototypes))+"，"+split_label+str(holdout_count)+"，覆盖率"+str(round(coverage*100,2))+"%，接受错误率"+error_text+"，总体正确率"+str(round(overall_accuracy*100,2))+"%，危险动作误触"+str(dangerous_false)+"次"+("；留出失败原因："+str(split_info.get("reason")) if split_info.get("reason") else ""),"各动作独立留出验证："]
         for signature,row in sorted(per_action.items()):
             lines.append(signature+"：留出"+str(row["total"])+"，接受"+str(row["accepted"])+"，错误"+str(row["errors"])+"，"+("通过" if row["passed"] else "未通过"))
         lines.append("各采集后端独立验证：")
@@ -3817,7 +4170,7 @@ class App:
     def start_training(self):
         try:
             game=self.require_game()
-            target=self.require_window(False)
+            self.require_window(False)
             model=self.store.load_model(game["id"])
             if not model or not model.get("prototypes"):
                 raise RuntimeError("没有可用完整模型，请先学习并完成复习")
@@ -3826,10 +4179,6 @@ class App:
             current=next((item for item in self.store.games() if item["id"]==game["id"]),{})
             if current.get("needs_review"):
                 raise RuntimeError("模型需要复习：请先点击“复习”完成离线优化")
-            calibration=self.api.calibration_for(target)
-            backend=str(calibration.get("validated_backend",""))
-            if not calibration.get("dynamic_passed") or backend not in set(model.get("capture_backends",[])):
-                raise RuntimeError("当前采集后端未在模型中独立验证；请使用该后端重新学习和复习")
         except Exception as error:
             self.show_error(str(error))
             return
@@ -3840,19 +4189,31 @@ class App:
         model=self.store.load_model(game["id"])
         prototypes=model["prototypes"]
         allowed_backends=set(model.get("capture_backends",[]))
-        calibration=self.api.calibration_for(target)
+        calibration=self.ensure_capture_calibration(target,"训练")
         validated_backend=str(calibration.get("validated_backend",""))
+        if validated_backend not in allowed_backends:
+            raise RuntimeError("当前采集后端未在完整模型中独立验证；请用该后端重新学习并复习")
         self.api.request_foreground(target["hwnd"])
         self.wait_escape_release()
         key_queue=queue.Queue()
+        mouse_queue=queue.Queue()
+        mouse_interrupt=threading.Event()
         def other_key(event):
             try:
                 key_queue.put_nowait(event)
             except Exception:
                 pass
             self.api.block_input()
+        def human_mouse(event):
+            mouse_interrupt.set()
+            try:
+                mouse_queue.put_nowait(event)
+            except Exception:
+                pass
+            self.api.block_input()
         actions=0
         keyboard_count=0
+        mouse_count=0
         recent_actions=deque(["<START>","<START>"],maxlen=4)
         candidate_id=None
         candidate_count=0
@@ -3863,15 +4224,16 @@ class App:
         last_action_feature=None
         state_unlocked=True
         no_change_count=0
-        frozen_count=0
         previous_feature=None
         previous_frame_stamp=0.0
         state_since=time.time()
         action_hits=defaultdict(deque)
         pause_until=0.0
+        mouse_pause_until=0.0
         with ModeSession(self,target) as session:
             frame_buffer=session.start_frames(max(8.0,float(calibration.get("fps",15.0))),2.5,0.1,"training")
             keyboard=session.start_keyboard(other_key)
+            mouse=session.start_mouse(human_mouse)
             while not self.should_stop():
                 while True:
                     try:
@@ -3883,11 +4245,29 @@ class App:
                     self.api.block_input()
                     candidate_id=None
                     candidate_count=0
+                while True:
+                    try:
+                        event=mouse_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    mouse_count+=1
+                    mouse_pause_until=max(mouse_pause_until,float(event["time"])+0.55)
+                    self.api.block_input()
+                    candidate_id=None
+                    candidate_count=0
+                    candidate_frame_stamp=0.0
+                    state_unlocked=True
                 if time.time()<pause_until or not keyboard.all_released():
                     self.api.block_input()
                     self.set_status("检测到非ESC键盘输入，训练已暂停；等待全部按键释放")
                     time.sleep(0.03)
                     continue
+                if time.time()<mouse_pause_until or not mouse.stable_for(0.45):
+                    self.api.block_input()
+                    self.set_status("检测到人工鼠标移动、点击或滚轮，已立即释放按键并清空连续确认；等待鼠标稳定")
+                    time.sleep(0.03)
+                    continue
+                mouse_interrupt.clear()
                 if not self.api.input_allowed():
                     self.api.allow_input(self.stop_event)
                 try:
@@ -3903,7 +4283,7 @@ class App:
                 captured=frame_buffer.latest(None,0.8)
                 if captured is None or not captured.get("usable_for_training"):
                     self.api.block_input()
-                    self.set_status("采集画面不可用于训练；等待已验收、非黑屏、非重复且后端稳定的最新帧；"+(frame_buffer.last_error or "尚无画面"))
+                    self.set_status("采集画面不可用于训练；等待已验收、非受保护黑屏且后端未冻结的最新帧；"+(frame_buffer.last_error or "尚无画面"))
                     time.sleep(0.08)
                     continue
                 if captured.get("method")!=validated_backend or captured.get("method") not in allowed_backends:
@@ -3916,14 +4296,13 @@ class App:
                 if captured["time"]!=previous_frame_stamp:
                     if previous_feature is not None:
                         frame_change=visual_distance(previous_feature,feature)
-                        frozen_count=frozen_count+1 if frame_change<float(calibration.get("freeze_change",1.5)) else 0
                         if frame_change>float(calibration.get("significant_change",60.0)):
                             state_since=time.time()
                     previous_feature=feature
                     previous_frame_stamp=captured["time"]
-                if frozen_count>=int(calibration.get("freeze_frames",30)) or captured.get("stale"):
+                if captured.get("capture_frozen"):
                     self.api.block_input()
-                    self.set_status("画面长时间重复，训练停止输入并等待画面变化")
+                    self.set_status("检测到采集后端冻结而其他后端仍变化，训练停止输入并等待恢复")
                     time.sleep(0.1)
                     continue
                 significant=last_action_feature is not None and visual_distance(last_action_feature,feature)>float(calibration.get("significant_change",60.0))
@@ -3938,7 +4317,7 @@ class App:
                     time.sleep(0.05)
                     continue
                 temporal["previous_action_changed_frame"]=bool(significant)
-                ranked=self.rank_action_candidates(feature,prototypes,last_action_signature,18,temporal)
+                ranked=self.rank_action_candidates(feature,prototypes,last_action_signature,18,temporal,captured.get("coarse"))
                 decision=self.evaluate_action_candidates(ranked)
                 if not decision.get("accepted"):
                     candidate_id=None
@@ -4002,7 +4381,11 @@ class App:
                     self.api.block_input()
                     candidate_id=None
                     candidate_count=0
-                    self.set_status("检测到非ESC键盘输入，动作已中止并等待全部按键释放")
+                    candidate_frame_stamp=0.0
+                    if mouse_interrupt.is_set():
+                        self.set_status("检测到人工鼠标干扰，动作已立即中止并释放全部鼠标键")
+                    else:
+                        self.set_status("检测到非ESC键盘输入，动作已中止并等待全部按键释放")
                     continue
                 except TargetUnavailable as error:
                     self.api.block_input()
@@ -4044,7 +4427,7 @@ class App:
                     state_unlocked=True
                     state_since=time.time()
                 time.sleep(0.05)
-        return "训练已结束，AI执行"+str(actions)+"个鼠标动作；检测到非ESC键盘输入"+str(keyboard_count)+"次；每次按下、滚轮和双击均复核前台、遮挡、客户区、DPI、PID、类名和完整性级别"
+        return "训练已结束，AI执行"+str(actions)+"个鼠标动作；检测到非ESC键盘输入"+str(keyboard_count)+"次，人工鼠标干扰"+str(mouse_count)+"次；每次干扰均立即释放鼠标键、清空连续确认并等待稳定"
     def basic_actions(self):
         result=[]
         for y in (0.18,0.35,0.5,0.68,0.84):
@@ -4081,12 +4464,10 @@ class App:
             for item in samples:
                 action=normalize_action(item.get("a"))
                 if feature_valid(item.get("f")) and action:
-                    historical.append({"id":str(item.get("checksum",uuid.uuid4().hex)),"f":item["f"],"coarse":coarse_feature(item["f"]),"a":action,"cluster_id":"history|"+action_signature(action),"canonical_action_signature":action_signature(action),"repeat_policy":str(item.get("repeat_policy","one_shot")),"source":"sample"})
-            calibration=self.api.calibration_for(target)
-            if not calibration.get("dynamic_passed") or not calibration.get("validated_backend"):
-                raise RuntimeError("目标窗口尚未通过动态采集验收，请重新选择窗口")
+                    historical.append({"id":str(item.get("checksum",uuid.uuid4().hex)),"f":item["f"],"coarse":item.get("coarse") if isinstance(item.get("coarse"),(bytes,bytearray)) and len(item.get("coarse"))==COARSE_LEN else coarse_feature(item["f"]),"a":action,"cluster_id":"history|"+action_signature(action),"canonical_action_signature":action_signature(action),"repeat_policy":str(item.get("repeat_policy","one_shot")),"source":"sample"})
+            calibration=self.ensure_capture_calibration(target,"请教")
             self.ask_session_id="teach|"+uuid.uuid4().hex
-            self.ask_buffer=FrameBuffer(self.api,target,20.0,2.5,0.1).start()
+            self.ask_buffer=FrameBuffer(self.api,target,20.0,2.5,0.1,"teaching").start()
         except Exception as error:
             if self.ask_buffer is not None:
                 self.ask_buffer.stop()
@@ -4198,12 +4579,12 @@ class App:
             selected=usable[-1]
             temporal=self.build_temporal_context(self.ask_buffer,selected,state["recent_actions"],state["state_since"])
             temporal["previous_action_changed_frame"]=True
-            selected_ranked=self.rank_action_candidates(selected["f"],prototypes,"",18,temporal)
+            selected_ranked=self.rank_action_candidates(selected["f"],prototypes,"",18,temporal,selected.get("coarse"))
             selected_priority=float("inf")
             for candidate_frame in usable[-28:]:
                 temporal=self.build_temporal_context(self.ask_buffer,candidate_frame,state["recent_actions"],state["state_since"])
                 temporal["previous_action_changed_frame"]=True
-                ranked=self.rank_action_candidates(candidate_frame["f"],prototypes,"",18,temporal)
+                ranked=self.rank_action_candidates(candidate_frame["f"],prototypes,"",18,temporal,candidate_frame.get("coarse"))
                 if not ranked:
                     priority=-2.0
                 else:
@@ -4480,6 +4861,10 @@ class App:
                 win.destroy()
             except Exception:
                 pass
+        try:
+            self.store.flush_samples()
+        except Exception:
+            pass
         summary="请教已结束"
         if isinstance(self.ask_counts,dict):
             summary+="：已保存"+str(self.ask_counts.get("saved",0))+"，重复未保存"+str(self.ask_counts.get("duplicates",0))+"，跳过"+str(self.ask_counts.get("skipped",0))+"，拒绝记录"+str(self.ask_counts.get("rejected",0))+"；模型需要复习"
@@ -4583,28 +4968,39 @@ class App:
         mode_alive=bool(self.mode_thread and self.mode_thread.is_alive())
         ask_alive=bool(self.ask_buffer and self.ask_buffer.alive())
         deadline_reached=bool(self.shutdown_deadline is not None and time.monotonic()>=self.shutdown_deadline)
-        if (mode_alive or ask_alive) and not deadline_reached:
+        if mode_alive or ask_alive:
+            if not deadline_reached:
+                try:
+                    self.root.after(50,self._poll_shutdown)
+                except Exception:
+                    pass
+                return
+            self.shutdown_started=True
             try:
-                self.root.after(50,self._poll_shutdown)
+                self.status.set("关闭等待超时：不再主动关闭WGC或SQLite，避免与仍运行的工作线程并发清理")
+            except Exception:
+                pass
+            try:
+                self.root.destroy()
             except Exception:
                 pass
             return
         self.shutdown_started=True
         try:
             if self.ask_buffer is not None:
-                self.ask_buffer.stop(False,0.0)
+                self.ask_buffer.stop(True,1.0)
+                if not self.ask_buffer.alive():
+                    self.ask_buffer=None
         except Exception:
             pass
-        def close_resources():
-            try:
-                self.api.wgc.close()
-            except Exception:
-                pass
-            try:
-                self.store.close()
-            except Exception:
-                pass
-        threading.Thread(target=close_resources,name="UniversalGameAI-FinalClose",daemon=True).start()
+        try:
+            self.api.close()
+        except Exception:
+            pass
+        try:
+            self.store.close()
+        except Exception:
+            pass
         try:
             self.root.destroy()
         except Exception:
