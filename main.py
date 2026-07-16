@@ -72,7 +72,6 @@ WINDOW_RULE_VERSION=2
 CAPTURE_BACKEND_VERSION=2
 RECOVERY_BACKUP_LIMIT=1024*1024*1024
 MIN_DATA_OPERATION_RESERVE=256*1024*1024
-SUPPORTED_PYTHON_ABIS={(3,10),(3,11),(3,12),(3,13),(3,14)}
 RUNTIME_LAYOUT_VERSION=3
 FIXED_RUNTIME_PYTHON_VERSION="3.12.10"
 FIXED_RUNTIME_PYTHON_ABI=(3,12)
@@ -90,13 +89,12 @@ FIXED_RUNTIME_PYTHON_ARTIFACTS={RUNTIME_ARCH_X64:{"filename":"python-3.12.10-emb
 RUNTIME_EMBEDDED_WHEEL_LOCKS={architecture+"|builtin_cpu":[{"name":"pip","version":FIXED_RUNTIME_PIP_VERSION,"filename":"pip-"+FIXED_RUNTIME_PIP_VERSION+"-py3-none-any.whl","url":FIXED_RUNTIME_PIP_URL,"sha256":FIXED_RUNTIME_PIP_SHA256,"size":FIXED_RUNTIME_PIP_SIZE,"python_abi":"cp312","architecture":architecture,"backend":"builtin_cpu"}] for architecture in (RUNTIME_ARCH_X64,RUNTIME_ARCH_ARM64)}
 RUNTIME_LOCK_MANIFEST_VERSION=4
 RUNTIME_ALLOWED_DOWNLOAD_HOSTS={"www.python.org","files.pythonhosted.org","pypi.org","download.pytorch.org"}
+RUNTIME_REQUIRED_WHEEL_PROJECTS={"pip","numpy","pillow","opencv-python-headless","rapidocr","safetensors","torch","torchvision"}
 STRICT_ACCEPTANCE_ITEMS=("启动","默认界面","文件夹","下载","窗口","采集","学习","睡眠","训练","指导","弹窗","停止","单实例与目录锁","独立运行时","离线网络封锁","写入路径审计","多显示器与DPI","错误恢复")
 STRICT_ACCEPTANCE_CASES={"启动":("control_panel_visible",),"默认界面":("exact_eight_buttons",),"文件夹":("select_prepare_confirm","migration_success","forced_failure_rollback","prepare_cancel_cleanup"),"下载":("normal_complete","network_failure_retry","escape_retry","locked_manifest"),"窗口":("ldplayer_confirmed","ordinary_confirmed"),"采集":("minimized","occluded","scaled","recreated"),"学习":("client_only_real_mouse",),"睡眠":("socket_blocked","model_optimized","pool_optimized","deterministic_seed"),"训练":("all_coordinates_in_client","immutable_snapshot_change_stop"),"指导":("choices_only","finish_button","escape"),"弹窗":("ack_only",),"停止":("starting","running","stopping","latency_thresholds","buttons_released"),"单实例与目录锁":("named_mutex","directory_lock","lock_record"),"独立运行时":("fixed_python","worker_process","embedded_wheel_lock","host_abi_independent"),"离线网络封锁":("socket","urllib","disconnected_windows"),"写入路径审计":("internal_audit","external_monitor"),"多显示器与DPI":("dpi100","dpi125","dpi150","dpi200","mixed_dpi","negative_coordinates","cross_monitor","hwnd_reuse"),"错误恢复":("input_locked","rollback","retry","no_pressed_buttons","no_orphan_process","no_staging")}
 SAMPLE_IMAGE_VERSION=1
 NEURAL_FEATURE_VERSION=2
 MODEL_MAX_BYTES=256*1024*1024
-RUNTIME_PINS_BY_ABI={(3,10):("numpy==2.2.6","pillow==12.3.0","opencv-python-headless==5.0.0.93","rapidocr==3.9.1","safetensors==0.8.0","torch==2.13.0","torchvision==0.28.0"),(3,11):("numpy==2.5.1","pillow==12.3.0","opencv-python-headless==5.0.0.93","rapidocr==3.9.1","safetensors==0.8.0","torch==2.13.0","torchvision==0.28.0"),(3,12):("numpy==2.5.1","pillow==12.3.0","opencv-python-headless==5.0.0.93","rapidocr==3.9.1","safetensors==0.8.0","torch==2.13.0","torchvision==0.28.0"),(3,13):("numpy==2.5.1","pillow==12.3.0","opencv-python-headless==5.0.0.93","rapidocr==3.9.1","safetensors==0.8.0","torch==2.13.0","torchvision==0.28.0"),(3,14):("numpy==2.5.1","pillow==12.3.0","opencv-python-headless==5.0.0.93","rapidocr==3.9.1","safetensors==0.8.0","torch==2.13.0","torchvision==0.28.0")}
-RUNTIME_ONNX_BY_ABI={(3,10):"1.20.1",(3,11):"1.24.4",(3,12):"1.24.4",(3,13):"1.24.4",(3,14):"1.24.4"}
 REQUIRED_DEFAULT_BUTTONS={"选择文件夹","下载","游戏","选择窗口","学习","睡眠","训练","指导"}
 AUTHORITATIVE_DATA_PATHS=("universal_game_ai.db","models/vision","models/ocr","runtime.current","backups","quarantine","project","audit")
 RUNTIME_PYPI_INDEX="https://pypi.org/simple"
@@ -108,12 +106,6 @@ def sample_retention_budget(family_count,session_count):
     families=max(1,safe_int(family_count,1,1,64)) if "safe_int" in globals() else max(1,int(family_count or 1))
     sessions=max(1,safe_int(session_count,1,1,64)) if "safe_int" in globals() else max(1,int(session_count or 1))
     return min(MAX_SAMPLES,max(DEFAULT_SAMPLE_BUDGET,400+families*180+sessions*120))
-def runtime_pins_for_abi(abi=None):
-    key=tuple(abi or FIXED_RUNTIME_PYTHON_ABI)
-    pins=RUNTIME_PINS_BY_ABI.get(key)
-    if pins is None:
-        raise RuntimeError("固定独立运行时ABI缺少依赖锁")
-    return list(pins)
 def native_windows_architecture():
     machine=""
     if os.name=="nt":
@@ -162,6 +154,9 @@ def embedded_runtime_lock(architecture=None):
             raise RuntimeError("内嵌wheel锁内容无效")
     entries=sorted(entries,key=lambda item:(str(item["name"]).casefold(),str(item["filename"])))
     return entries,hashlib.sha256(canonical_bytes(entries)).hexdigest(),key
+def runtime_lock_is_complete(entries):
+    names={str(item.get("name","")).strip().lower().replace("_","-") for item in entries if isinstance(item,dict)}
+    return RUNTIME_REQUIRED_WHEEL_PROJECTS.issubset(names)
 def tree_size(path):
     root=Path(path)
     if not root.exists():
@@ -5291,7 +5286,7 @@ class TrainingController:
         requested=self.lifecycle.snapshot()[3]
         final_status=requested if requested in {"completed","stopped","failed"} else ("stopped" if self.stop_event and self.stop_event.is_set() else "completed")
         summary=("训练完成" if final_status=="completed" else "训练已停止")+"，AI执行"+str(actions)+"个鼠标动作；检测到非ESC键盘输入"+str(keyboard_count)+"次，人工或外部注入鼠标输入"+str(mouse_count)+"次"
-        return ModeResult(final_status,summary,{"strict_input_violation":isolation.kind,"task_history":list(agent_policy.history),"training_snapshot_checksum":training_snapshot_checksum,"snapshot_guarded":True,"coordinate_audit":{"sent":actions,"outside":0,"client_rect":list(self.api.client_rect(hwnd))},"keyboard_events":keyboard_count,"external_mouse_events":mouse_count})
+        return ModeResult(final_status,summary,{"strict_input_violation":isolation.kind,"task_history":list(agent_policy.history),"training_snapshot_checksum":training_snapshot_checksum,"snapshot_guarded":True,"coordinate_audit":{"sent":actions,"outside":0,"client_rect":list(self.api.client_rect(int(target["hwnd"])))},"keyboard_events":keyboard_count,"external_mouse_events":mouse_count})
 class TeachingController:
     def __init__(self,app):
         self.app=app
@@ -7224,7 +7219,6 @@ class App:
         self.mode_stop_lock=threading.RLock()
         self.mode_stop_started=False
         self.mode_shutdown_polling=False
-        self.detached_mode_threads=[]
         self.controls=[]
         self.control_buttons={}
         self.stop_button=None
@@ -7559,14 +7553,16 @@ class App:
             result=ModeResult(effective,summary,dict(result.details))
         self.pending_mode_result=result
         self.pending_mode_error=error
-        if self.mode_state==MODE_RUNNING:
-            self.record_acceptance_case("停止","running","passed",{"mode":str(self.mode or "模式"),"time":time.time()})
         self.request_mode_stop(result.status,result.summary if result.status=="failed" else reason or result.summary)
         self.mode_shutdown_deadline=time.monotonic()+5.0
         self.status.set(str(self.mode or "模式")+"正在停止资源，控制按钮保持禁用")
         if not self.mode_shutdown_polling:
             self.mode_shutdown_polling=True
             self.root.after(25,self._poll_mode_shutdown)
+    def _handle_mode_thread_timeout(self):
+        self.api.block_input()
+        self.api.release_all_buttons()
+        self._forced_exit("模式线程停止超时")
     def _poll_mode_shutdown(self):
         if self.mode_state!=MODE_STOPPING:
             return
@@ -7595,33 +7591,9 @@ class App:
         if thread_alive:
             pending.append("模式线程")
         pending.extend("CaptureProcess:"+name for name in capture_pending)
-        if deadline_reached and thread_alive and (self.review_process is None or not self.review_process.alive()):
-            thread=self.mode_thread
-            interrupted=False
-            try:
-                ident=getattr(thread,"ident",None)
-                if ident:
-                    result=ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident),ctypes.py_object(SystemExit))
-                    if result>1:
-                        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident),None)
-                    interrupted=result==1
-            except Exception:
-                interrupted=False
-            if interrupted:
-                try:
-                    thread.join(0.2)
-                except Exception:
-                    pass
-            if thread.is_alive():
-                self.detached_mode_threads.append(thread)
-                self.mode_shutdown_forced.append("未响应模式线程已隔离")
-                self.mode_thread=None
-                thread_alive=False
-                pending=[value for value in pending if value!="模式线程"]
-            else:
-                self.mode_shutdown_forced.append("模式线程")
-                thread_alive=False
-                pending=[value for value in pending if value!="模式线程"]
+        if deadline_reached and thread_alive:
+            self._handle_mode_thread_timeout()
+            return
         if pending or not session_done:
             suffix="；已到关闭期限并执行强制停止："+"、".join(self.mode_shutdown_forced) if self.mode_shutdown_forced else ""
             self.status.set("STOPPING：等待资源退出："+"、".join(sorted(set(pending)))+suffix)
@@ -7706,7 +7678,7 @@ class App:
         if state==MODE_IDLE:
             return
         pressed=safe_float(event.get("monotonic_time"),time.monotonic()) if isinstance(event,dict) else time.monotonic()
-        self.escape_metrics={"pressed":pressed,"input_locked":0.0,"cleanup_started":0.0,"finished":0.0,"fallback_used":False}
+        self.escape_metrics={"pressed":pressed,"input_locked":0.0,"cleanup_started":0.0,"finished":0.0,"fallback_used":False,"phase":state,"mode":str(name or "模式")}
         self.api.block_input()
         self.api.release_all_buttons()
         self.escape_metrics["input_locked"]=time.monotonic()
@@ -7717,8 +7689,8 @@ class App:
         if worker is not None:
             try:
                 worker.request_stop()
-            except Exception:
-                pass
+            except Exception as error:
+                self._log_error("AI_WORKER_STOP_SIGNAL_FAILED",error,{"mode":str(name or "模式")})
         self.ui(lambda:self.request_mode_stop("stopped","ESC停止"),"escape_stop")
     def poll_global_escape(self):
         if self.shutdown_started:
@@ -8522,34 +8494,59 @@ class App:
         raise InputStopped("采集验收已停止")
     def set_controls(self,running):
         self._update_control_availability()
-    def start_worker(self,name,target,needs_window=False):
+    def _start_mode_transaction(self,name,target,needs_window=False,require_game=True,status_text=None):
         if self.mode_state!=MODE_IDLE or self.closing:
             self.show_error("当前已有操作正在运行，请先按ESC结束")
-            return
+            return False
+        begun=False
         try:
-            self.require_game()
+            if require_game:
+                self.require_game()
             if self.storage_fault and name in {"学习","睡眠","指导"}:
                 raise RuntimeError(self.store.read_only_reason or self.store.writer_error or "样本存储故障，相关模式已锁定")
             if needs_window:
                 self.require_window(False)
             self.lifecycle.begin(name)
+            begun=True
+            self.pending_mode_result=None
+            self.pending_mode_error=None
+            self.mode_shutdown_deadline=None
+            self.mode_shutdown_forced=[]
+            self.mode_stop_started=False
+            self.mode_shutdown_polling=False
+            self.record_acceptance_case("停止","starting","pending",{"mode":str(name),"time":time.time()})
+            self.api.block_input()
+            self.set_input_status("已锁定")
+            self.set_controls(True)
+            self.progress_value.set(0)
+            self.status.set(str(status_text or (str(name)+"正在初始化，按ESC可立即中止")))
+            thread=threading.Thread(target=self.worker_entry,args=(name,target),name="UniversalGameAI-"+str(name),daemon=True)
+            self.mode_thread=thread
+            thread.start()
+            return True
         except Exception as error:
+            if begun:
+                self.lifecycle.finish()
+            self.mode_thread=None
+            self.pending_mode_result=None
+            self.pending_mode_error=None
+            self.mode_shutdown_deadline=None
+            self.mode_shutdown_forced=[]
+            self.mode_stop_started=False
+            self.mode_shutdown_polling=False
+            try:
+                self.api.block_input()
+                self.api.release_all_buttons()
+            except Exception as rollback_error:
+                self._log_error("MODE_START_INPUT_ROLLBACK_FAILED",rollback_error,{"mode":str(name)})
+            try:
+                self._update_control_availability()
+            except Exception as rollback_error:
+                self._log_error("MODE_START_UI_ROLLBACK_FAILED",rollback_error,{"mode":str(name)})
             self.show_error(str(error))
-            return
-        self.pending_mode_result=None
-        self.pending_mode_error=None
-        self.mode_shutdown_deadline=None
-        self.mode_shutdown_forced=[]
-        self.mode_stop_started=False
-        self.mode_shutdown_polling=False
-        self.record_acceptance_case("停止","starting","passed",{"mode":"下载","time":time.time()})
-        self.api.block_input()
-        self.set_input_status("已锁定")
-        self.set_controls(True)
-        self.progress_value.set(0)
-        self.status.set(name+"正在初始化，按ESC可立即中止")
-        self.mode_thread=threading.Thread(target=self.worker_entry,args=(name,target),name="UniversalGameAI-"+name,daemon=True)
-        self.mode_thread.start()
+            return False
+    def start_worker(self,name,target,needs_window=False):
+        return self._start_mode_transaction(name,target,needs_window,True)
     def worker_entry(self,name,target):
         result=None
         error=None
@@ -9715,14 +9712,20 @@ class App:
         details=dict(result.details) if isinstance(result,ModeResult) else {}
         status=str(result.status) if isinstance(result,ModeResult) else "failed"
         evidence={"mode":str(name),"status":status,"summary":str(getattr(result,"summary","")),"details":details,"time":time.time()}
-        self.record_acceptance_case("停止","stopping","passed",evidence)
-        self.record_acceptance_case("停止","buttons_released","passed",{"mode":str(name),"release_called":True,"forced":details.get("forced_processes",[])})
+        phase_case=None
+        thresholds=False
         if metrics:
-            thresholds=bool(metrics.get("lock_latency_ms") is not None and metrics.get("lock_latency_ms")<=250 and metrics.get("cleanup_latency_ms") is not None and metrics.get("cleanup_latency_ms")<=750 and metrics.get("finish_latency_ms")<=5500)
+            thresholds=bool(metrics.get("lock_latency_ms") is not None and metrics.get("lock_latency_ms")<=250 and metrics.get("cleanup_latency_ms") is not None and metrics.get("cleanup_latency_ms")<=750 and metrics.get("finish_latency_ms")<=5500 and not details.get("forced_processes"))
+            phase_case={MODE_STARTING:"starting",MODE_RUNNING:"running",MODE_STOPPING:"stopping"}.get(str(metrics.get("phase","")))
+            if phase_case:
+                self.record_acceptance_case("停止",phase_case,"passed" if thresholds else "failed",dict(metrics))
             self.record_acceptance_case("停止","latency_thresholds","passed" if thresholds else "failed",metrics)
+        if phase_case!="stopping":
+            self.record_acceptance_case("停止","stopping","pending",evidence)
+        self.record_acceptance_case("停止","buttons_released","passed",{"mode":str(name),"release_called":True,"forced":details.get("forced_processes",[])})
         if str(name)=="下载":
             runtime=details.get("runtime",{}) if isinstance(details.get("runtime"),dict) else {}
-            embedded=runtime.get("resolution_source")=="embedded" and bool(runtime.get("embedded_lock_checksum"))
+            embedded=runtime.get("resolution_source")=="embedded" and bool(runtime.get("embedded_lock_checksum")) and bool(runtime.get("lock_complete",runtime_lock_is_complete(runtime.get("resolved_wheels",[]))))
             if status=="completed":
                 self.record_acceptance_case("下载","normal_complete","passed",runtime)
                 self.record_acceptance_case("下载","locked_manifest","passed" if embedded else "failed",runtime)
@@ -9733,7 +9736,8 @@ class App:
                 self.record_acceptance_case("独立运行时","host_abi_independent","passed",{"host":list(sys.version_info[:2]),"runtime":runtime.get("python_abi"),"architecture":runtime.get("architecture")})
                 self.record_acceptance_case("独立运行时","worker_process","passed",{"installer_process_completed":True})
             elif status=="stopped":
-                partials=[str(item.relative_to(self.data_directory)) for item in (self.data_directory/"runtime.downloads").rglob("*.part")] if self.data_directory and (self.data_directory/"runtime.downloads").exists() else []
+                download_cache=self.data_directory/"cache"/"runtime_downloads" if self.data_directory else None
+                partials=[str(item.relative_to(self.data_directory)) for item in download_cache.rglob("*.part")] if download_cache is not None and download_cache.exists() else []
                 staging=list(self.data_directory.glob("runtime.staging.*")) if self.data_directory else []
                 self.record_acceptance_case("下载","escape_retry","passed" if not staging else "failed",{"partial_files":partials[:20],"staging":list(map(str,staging)),"resume_preserved":bool(partials)})
         elif str(name)=="学习":
@@ -10100,8 +10104,13 @@ class App:
         vision=self.vision_runtime
         ocr=self.ocr_runtime
         if vision is not None and vision.ready and ocr is not None and ocr.ready:
-            manifest=vision.manifest() if vision.active_game else {"device":vision.device_name,"trained_steps":0}
-            self.confidence_text.set("AI视觉："+str(manifest.get("device",vision.device_name))+"，训练步数"+str(manifest.get("trained_steps",0))+"；OCR：离线可用；模型格式：safetensors")
+            manifest=vision.manifest() if vision.active_game else {"device":vision.device_name,"trained_steps":0,"backend":vision.backend,"serialization":vision.serialization}
+            vision_backend=str(manifest.get("backend",getattr(vision,"backend","builtin_cpu")))
+            vision_text="PyTorch" if vision_backend=="torch" else "内置CPU特征"
+            ocr_backend=str(getattr(ocr,"backend","none"))
+            ocr_text="RapidOCR可用" if ocr_backend=="rapidocr" and bool(getattr(ocr,"self_test_passed",False)) else "RapidOCR自检失败" if ocr_backend=="rapidocr" else "未安装"
+            serialization=str(manifest.get("serialization",getattr(vision,"serialization","builtin_json")))
+            self.confidence_text.set("视觉："+vision_text+"（"+str(manifest.get("device",vision.device_name))+"），训练步数"+str(manifest.get("trained_steps",0))+"；OCR："+ocr_text+"；模型格式："+serialization)
         elif self.store is None:
             self.confidence_text.set("离线AI运行库：请先选择文件夹")
         else:
@@ -10120,29 +10129,8 @@ class App:
     def start_download(self):
         if not self.lifecycle.data_ready or self.store is None:
             self.show_error("请先选择并确认文件夹")
-            return
-        if self.mode_state!=MODE_IDLE or self.closing:
-            self.show_error("当前已有操作正在运行，请先按ESC结束")
-            return
-        try:
-            self.lifecycle.begin("下载")
-        except Exception as error:
-            self.show_error(str(error))
-            return
-        self.pending_mode_result=None
-        self.pending_mode_error=None
-        self.mode_shutdown_deadline=None
-        self.mode_shutdown_forced=[]
-        self.mode_stop_started=False
-        self.mode_shutdown_polling=False
-        self.record_acceptance_case("停止","starting","passed",{"mode":str(name),"time":time.time()})
-        self.api.block_input()
-        self.set_input_status("已锁定")
-        self.set_controls(True)
-        self.progress_value.set(0)
-        self.status.set("独立子进程正在安装到runtime.staging；按ESC将终止整个进程树并回滚")
-        self.mode_thread=threading.Thread(target=self.worker_entry,args=("下载",self.download_worker),name="UniversalGameAI-下载",daemon=True)
-        self.mode_thread.start()
+            return False
+        return self._start_mode_transaction("下载",self.download_worker,False,False,"独立子进程正在安装；按ESC可提前结束下载")
     def download_worker(self):
         self.lifecycle.mark_running()
         def line(value):
@@ -10160,9 +10148,14 @@ class App:
         if self.selected_game:
             manifest=self.vision_runtime.activate_game(self.selected_game["id"])
             self.store.record_vision_model(self.selected_game["id"],manifest)
+        status=dict(self.ai_worker.status)
+        runtime_details=dict(marker)
+        runtime_details.update({"vision_backend":status.get("vision_backend","builtin_cpu"),"vision_serialization":status.get("vision_serialization","builtin_json"),"ocr_backend":status.get("ocr_backend","none"),"ocr_self_test":bool(status.get("ocr_self_test",False)),"capabilities":dict(status.get("capabilities",{}))})
         self.ui(self._update_runtime_status)
         self.ui(self._update_control_availability)
-        return ModeResult("completed","下载完成；运行库、导入验证、GPU后端检测和OCR预热均已在独立子进程中完成",{"runtime":marker})
+        vision_text="PyTorch" if runtime_details["vision_backend"]=="torch" else "内置CPU特征"
+        ocr_text="RapidOCR可用" if runtime_details["ocr_backend"]=="rapidocr" and runtime_details["ocr_self_test"] else "RapidOCR不可用"
+        return ModeResult("completed","下载完成；视觉："+vision_text+"；OCR："+ocr_text+"；模型格式："+str(runtime_details["vision_serialization"]),{"runtime":runtime_details})
 def enable_dpi_awareness():
     if os.name!="nt":
         return
@@ -10955,7 +10948,7 @@ def run_windows_smoke_test(path=None):
                 acceptance.record_case("独立运行时","fixed_python","passed" if tuple(runtime_manifest.get("python_abi",[]))==FIXED_RUNTIME_PYTHON_ABI else "failed",runtime_manifest.get("python_executable"))
                 acceptance.record_case("独立运行时","host_abi_independent","passed",{"host":list(sys.version_info[:2]),"runtime":list(runtime_manifest.get("python_abi",[]))})
                 acceptance.record_case("独立运行时","worker_process","passed" if app.ai_worker is not None and app.ai_worker.alive() else "failed",{"alive":bool(app.ai_worker is not None and app.ai_worker.alive())})
-                embedded=runtime_manifest.get("resolution_source")=="embedded" and bool(runtime_manifest.get("embedded_lock_checksum"))
+                embedded=runtime_manifest.get("resolution_source")=="embedded" and bool(runtime_manifest.get("embedded_lock_checksum")) and bool(runtime_manifest.get("lock_complete",runtime_lock_is_complete(runtime_manifest.get("resolved_wheels",[]))))
                 acceptance.record_case("独立运行时","embedded_wheel_lock","passed" if embedded else "failed",{"resolution_source":runtime_manifest.get("resolution_source","dynamic")})
                 acceptance.record_case("下载","locked_manifest","passed" if embedded else "failed",{"manifest":runtime_manifest.get("manifest_checksum")})
             else:
@@ -11683,7 +11676,7 @@ def validate_runtime_manifest(base,verify_files=False):
     wheels=value.get("resolved_wheels")
     embedded_checksum=str(value.get("embedded_lock_checksum",""))
     if str(value.get("resolution_source",""))!="embedded" or not isinstance(wheels,list) or not wheels or hashlib.sha256(canonical_bytes(wheels)).hexdigest()!=embedded_checksum:
-        raise RuntimeError("运行库未使用内嵌完整wheel锁")
+        raise RuntimeError("运行库未使用内嵌wheel锁")
     expected,expected_checksum,_=embedded_runtime_lock(architecture)
     if wheels!=expected or embedded_checksum!=expected_checksum:
         raise RuntimeError("运行库wheel锁与当前程序内嵌锁不一致")
@@ -12064,7 +12057,7 @@ def runtime_install_worker(request_path):
     if staging.exists():
         shutil.rmtree(staging,ignore_errors=True)
     staging.mkdir(parents=True)
-    cache_root=base/"runtime.downloads"
+    cache_root=base/"cache"/"runtime_downloads"
     cache_root.mkdir(parents=True,exist_ok=True)
     try:
         python_path,bootstrap_artifacts=_bootstrap_embedded_python(staging,architecture,cache_root)
@@ -12075,7 +12068,7 @@ def runtime_install_worker(request_path):
         env.update({"PYTHONNOUSERSITE":"1","PIP_DISABLE_PIP_VERSION_CHECK":"1","PIP_NO_INPUT":"1","PIP_NO_INDEX":"1","PIP_CACHE_DIR":str(staging/"pip_cache"),"XDG_CACHE_HOME":str(staging/"cache"),"PYTHONPYCACHEPREFIX":str(staging/"cache"/"pycache"),"TMP":str(staging/"temp"),"TEMP":str(staging/"temp")})
         for name in ("models/vision","models/ocr","cache","cache/pycache","temp"):
             (staging/name).mkdir(parents=True,exist_ok=True)
-        _runtime_emit("progress",value=10.0,message="读取内嵌完整wheel锁，禁止首次动态依赖解析")
+        _runtime_emit("progress",value=10.0,message="读取内嵌wheel锁，禁止首次动态依赖解析")
         downloaded,download_evidence=_runtime_download_locked_wheels(wheels,wheelhouse,env,cache_root)
         if downloaded!=wheels:
             raise RuntimeError("下载wheel与内嵌锁不一致")
@@ -12085,7 +12078,7 @@ def runtime_install_worker(request_path):
         (staging/"wheel_lock.json").write_text(json.dumps({"lock_key":lock_key,"wheels":wheels,"checksum":wheel_lock_checksum,"resolution_source":"embedded"},ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
         requirements_lock=staging/"requirements.lock"
         _runtime_write_require_hashes_lock(requirements_lock,wheels,wheelhouse)
-        _runtime_worker_command([python,"-m","pip","install","--require-hashes","-r",requirements_lock],env,"按内嵌完整SHA-256锁安装wheel")
+        _runtime_worker_command([python,"-m","pip","install","--require-hashes","-r",requirements_lock],env,"按内嵌SHA-256锁安装wheel")
         _runtime_emit("progress",value=82.0,message="执行内置CPU后端离线预热验证")
         validation="import hashlib,json,sys; payload=b'UniversalGameAI builtin cpu backend'; print(json.dumps({'python':sys.version,'backend':'builtin_cpu','device':'CPU','self_test_sha256':hashlib.sha256(payload).hexdigest()}))"
         output=subprocess.check_output([python,"-c",validation],env=env,text=True,encoding="utf-8",errors="replace",stderr=subprocess.STDOUT,timeout=120)
@@ -12096,7 +12089,7 @@ def runtime_install_worker(request_path):
         critical={str(python_path.relative_to(staging)):sha256_file(python_path)}
         selected_backend="builtin_cpu"
         fallback={"requested":"nvidia" if vendor=="nvidia" else "cpu","selected":selected_backend,"applied":vendor=="nvidia","reason":"内嵌确定性CPU后端在x64与ARM64均可用"}
-        manifest={"layout_version":RUNTIME_LAYOUT_VERSION,"lock_manifest_version":RUNTIME_LOCK_MANIFEST_VERSION,"created":time.time(),"python_abi":list(FIXED_RUNTIME_PYTHON_ABI),"architecture":architecture,"python_version":str(validation_result.get("python",FIXED_RUNTIME_PYTHON_VERSION)),"python_executable":"python/python.exe","python_artifact":bootstrap_artifacts["python"],"pip_artifact":bootstrap_artifacts["pip"],"vendor":vendor,"allowed_download_hosts":sorted(RUNTIME_ALLOWED_DOWNLOAD_HOSTS),"index_urls":[],"top_level_pins":["pip=="+FIXED_RUNTIME_PIP_VERSION],"resolved_wheels":wheels,"wheel_lock_checksum":wheel_lock_checksum,"pip_freeze":freeze,"validation":validation_result,"gpu_backend":selected_backend,"gpu_device":"CPU","backend_fallback":fallback,"download_evidence":download_evidence,"preprocess_hash":VISION_PREPROCESS_HASH,"critical_files":critical,"resolution_source":"embedded","embedded_lock_checksum":embedded_lock_checksum,"reproducibility":"formal download reads the embedded architecture-specific complete wheel lock and performs no dependency resolution"}
+        manifest={"layout_version":RUNTIME_LAYOUT_VERSION,"lock_manifest_version":RUNTIME_LOCK_MANIFEST_VERSION,"created":time.time(),"python_abi":list(FIXED_RUNTIME_PYTHON_ABI),"architecture":architecture,"python_version":str(validation_result.get("python",FIXED_RUNTIME_PYTHON_VERSION)),"python_executable":"python/python.exe","python_artifact":bootstrap_artifacts["python"],"pip_artifact":bootstrap_artifacts["pip"],"vendor":vendor,"allowed_download_hosts":sorted(RUNTIME_ALLOWED_DOWNLOAD_HOSTS),"index_urls":[],"top_level_pins":["pip=="+FIXED_RUNTIME_PIP_VERSION],"resolved_wheels":wheels,"wheel_lock_checksum":wheel_lock_checksum,"lock_complete":runtime_lock_is_complete(wheels),"pip_freeze":freeze,"validation":validation_result,"capabilities":{"vision_encode":True,"vision_train":False,"ocr_recognize":False,"safe_serialization":"builtin_json"},"vision_backend":"builtin_cpu","vision_serialization":"builtin_json","ocr_backend":"none","ocr_self_test":False,"gpu_backend":selected_backend,"gpu_device":"CPU","backend_fallback":fallback,"download_evidence":download_evidence,"preprocess_hash":VISION_PREPROCESS_HASH,"critical_files":critical,"resolution_source":"embedded","embedded_lock_checksum":embedded_lock_checksum,"reproducibility":"formal download reads the embedded architecture-specific wheel lock and performs no dependency resolution"}
         manifest["manifest_checksum"]=hashlib.sha256(canonical_bytes(manifest)).hexdigest()
         (staging/"runtime_manifest.json").write_text(json.dumps(manifest,ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
         _runtime_emit("progress",value=94.0,message="原子切换运行库")
@@ -12136,7 +12129,7 @@ def runtime_installer_test_worker(request_path,mode):
         critical={str(runtime_python.relative_to(runtime)):sha256_file(runtime_python)}
         architecture=str(request.get("architecture") or RUNTIME_ARCH_X64)
         wheels,embedded_checksum,_=embedded_runtime_lock(architecture)
-        manifest={"layout_version":RUNTIME_LAYOUT_VERSION,"lock_manifest_version":RUNTIME_LOCK_MANIFEST_VERSION,"created":time.time(),"python_abi":list(FIXED_RUNTIME_PYTHON_ABI),"architecture":architecture,"python_version":FIXED_RUNTIME_PYTHON_VERSION,"python_executable":str(runtime_python.relative_to(runtime)),"python_artifact":{"url":"self-test","final_url":"self-test","sha256":"0"*64,"size":0},"pip_artifact":{"url":"self-test","final_url":"self-test","sha256":"0"*64,"size":0},"vendor":"self-test","allowed_download_hosts":sorted(RUNTIME_ALLOWED_DOWNLOAD_HOSTS),"index_urls":[],"top_level_pins":["pip=="+FIXED_RUNTIME_PIP_VERSION],"resolved_wheels":wheels,"wheel_lock_checksum":embedded_checksum,"pip_freeze":["pip=="+FIXED_RUNTIME_PIP_VERSION],"validation":{"backend":"builtin_cpu","device":"self-test"},"gpu_backend":"builtin_cpu","gpu_device":"self-test","preprocess_hash":VISION_PREPROCESS_HASH,"critical_files":critical,"resolution_source":"embedded","embedded_lock_checksum":embedded_checksum}
+        manifest={"layout_version":RUNTIME_LAYOUT_VERSION,"lock_manifest_version":RUNTIME_LOCK_MANIFEST_VERSION,"created":time.time(),"python_abi":list(FIXED_RUNTIME_PYTHON_ABI),"architecture":architecture,"python_version":FIXED_RUNTIME_PYTHON_VERSION,"python_executable":str(runtime_python.relative_to(runtime)),"python_artifact":{"url":"self-test","final_url":"self-test","sha256":"0"*64,"size":0},"pip_artifact":{"url":"self-test","final_url":"self-test","sha256":"0"*64,"size":0},"vendor":"self-test","allowed_download_hosts":sorted(RUNTIME_ALLOWED_DOWNLOAD_HOSTS),"index_urls":[],"top_level_pins":["pip=="+FIXED_RUNTIME_PIP_VERSION],"resolved_wheels":wheels,"wheel_lock_checksum":embedded_checksum,"lock_complete":runtime_lock_is_complete(wheels),"pip_freeze":["pip=="+FIXED_RUNTIME_PIP_VERSION],"validation":{"backend":"builtin_cpu","device":"self-test"},"capabilities":{"vision_encode":True,"vision_train":False,"ocr_recognize":False,"safe_serialization":"builtin_json"},"vision_backend":"builtin_cpu","vision_serialization":"builtin_json","ocr_backend":"none","ocr_self_test":False,"gpu_backend":"builtin_cpu","gpu_device":"self-test","preprocess_hash":VISION_PREPROCESS_HASH,"critical_files":critical,"resolution_source":"embedded","embedded_lock_checksum":embedded_checksum}
         manifest["manifest_checksum"]=hashlib.sha256(canonical_bytes(manifest)).hexdigest()
         (runtime/"runtime_manifest.json").write_text(json.dumps(manifest,ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
         current=base/"runtime.current"
@@ -12285,15 +12278,17 @@ class RuntimeInstaller:
                 try:
                     ctypes.WinDLL("kernel32",use_last_error=True).CloseHandle(handle)
                 except Exception as error:
-                    if globals().get("CURRENT_DATA_STORE") is not None:
-                        CURRENT_DATA_STORE.log_error("RUNTIME_JOB_HANDLE_CLOSE_FAILED",error)
+                    store=globals().get("CURRENT_DATA_STORE")
+                    if store is not None:
+                        store.log_error("RUNTIME_JOB_HANDLE_CLOSE_FAILED",error)
             try:
                 request_path.unlink()
             except FileNotFoundError:
                 pass
             except Exception as error:
-                if globals().get("CURRENT_DATA_STORE") is not None:
-                    CURRENT_DATA_STORE.log_error("RUNTIME_REQUEST_CLEANUP_FAILED",error)
+                store=globals().get("CURRENT_DATA_STORE")
+                if store is not None:
+                    store.log_error("RUNTIME_REQUEST_CLEANUP_FAILED",error)
             if self.cancelled or process.returncode not in (0,None):
                 self._cleanup_staging()
     def stop(self):
@@ -12354,7 +12349,7 @@ class OfflineVisionRuntime:
                 raise RuntimeError("运行库清单不存在")
             self.builtin=True
             self.device="cpu"
-            self.device_name="Builtin CPU"
+            self.device_name="内置CPU特征"
             self.ready=True
             self.error=""
             site=runtime_site_packages(self.base)
@@ -12372,7 +12367,7 @@ class OfflineVisionRuntime:
                     self.device_name=str(self.torch.cuda.get_device_name(0))
                 else:
                     self.device=self.torch.device("cpu")
-                    self.device_name="CPU"
+                    self.device_name="PyTorch CPU"
             except Exception:
                 self.torch=None
                 self.np=None
@@ -12518,7 +12513,9 @@ class OfflineVisionRuntime:
         checksum=""
         if self.active_path is not None and self.active_path.exists():
             checksum=sha256_file(self.active_path,MODEL_MAX_BYTES)
-        return {"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":self.active_game,"checksum":checksum,"trained_steps":self.trained_steps,"device":self.device_name,"relative_path":str(self.active_path.relative_to(self.base)) if self.active_path is not None else "","preprocess_hash":VISION_PREPROCESS_HASH,"preprocess_signature":preprocess_signature(),"runtime_fingerprint":self.runtime_fingerprint(),"serialization":"builtin_json" if getattr(self,"builtin",False) else "safetensors","backend":"builtin_cpu" if getattr(self,"builtin",False) else "torch","neural_feature_version":NEURAL_FEATURE_VERSION}
+        builtin=bool(getattr(self,"builtin",False))
+        capabilities={"vision_encode":True,"vision_train":not builtin,"ocr_recognize":False,"safe_serialization":"builtin_json" if builtin else "safetensors"}
+        return {"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":self.active_game,"checksum":checksum,"trained_steps":self.trained_steps,"device":self.device_name,"relative_path":str(self.active_path.relative_to(self.base)) if self.active_path is not None else "","preprocess_hash":VISION_PREPROCESS_HASH,"preprocess_signature":preprocess_signature(),"runtime_fingerprint":self.runtime_fingerprint(),"serialization":"builtin_json" if builtin else "safetensors","backend":"builtin_cpu" if builtin else "torch","neural_feature_version":NEURAL_FEATURE_VERSION,"capabilities":capabilities}
     def _tensor_from_rgb(self,rgb):
         source=sample_rgb_bytes(rgb)
         if source is None:
@@ -12659,14 +12656,18 @@ class OfflineOCRRuntime:
         self.lock=threading.RLock()
         self.engine=None
         self.np=None
+        self.backend_name="none"
+        self.self_test_passed=False
         self.ready=False
         self.error="尚未下载OCR运行库"
         self._load_runtime()
     def _load_runtime(self):
         try:
             validate_runtime_manifest(self.base,True)
-            self.engine="builtin"
+            self.engine=None
             self.np=None
+            self.backend_name="none"
+            self.self_test_passed=False
             self.ready=True
             self.error=""
             site=runtime_site_packages(self.base)
@@ -12682,13 +12683,44 @@ class OfflineOCRRuntime:
                 except Exception:
                     module=importlib.import_module("rapidocr_onnxruntime")
                     self.engine=module.RapidOCR()
+                self.backend_name="rapidocr"
+                self.self_test_passed=self._self_test()
+                if not self.self_test_passed:
+                    self.error="RapidOCR真实图片识别自检失败"
             except Exception:
-                self.engine="builtin"
+                self.engine=None
                 self.np=None
+                self.backend_name="none"
+                self.self_test_passed=False
         except Exception as error:
             self.engine=None
             self.ready=False
+            self.backend_name="none"
+            self.self_test_passed=False
             self.error=str(error)
+    def _self_test(self):
+        if self.engine is None or self.np is None:
+            return False
+        try:
+            image=self.np.full((96,320,3),255,dtype=self.np.uint8)
+            try:
+                cv2=__import__("cv2")
+                cv2.putText(image,"12345",(20,68),cv2.FONT_HERSHEY_SIMPLEX,1.7,(0,0,0),3,cv2.LINE_AA)
+            except Exception:
+                return False
+            with self.lock:
+                output=self.engine(image)
+            if hasattr(output,"txts"):
+                texts=list(output.txts or [])
+            elif isinstance(output,tuple) and output:
+                texts=[str(item[1]) for item in (output[0] or []) if isinstance(item,(list,tuple)) and len(item)>=2]
+            else:
+                texts=[str(item[1]) for item in (output or []) if isinstance(item,(list,tuple)) and len(item)>=2]
+            return any("123" in "".join(ch for ch in str(text) if ch.isdigit()) for text in texts)
+        except Exception:
+            return False
+    def capability_status(self):
+        return {"ocr_backend":self.backend_name,"ocr_self_test":bool(self.self_test_passed),"ocr_recognize":bool(self.backend_name=="rapidocr" and self.self_test_passed)}
     def require_ready(self):
         if not self.ready:
             self._load_runtime()
@@ -12702,7 +12734,7 @@ class OfflineOCRRuntime:
         return self.np.frombuffer(raw,dtype=self.np.uint8).reshape(int(height),int(width),3).copy()
     def recognize(self,rgb,width,height,region=None):
         self.require_ready()
-        if self.engine=="builtin":
+        if self.engine is None or self.backend_name!="rapidocr" or not self.self_test_passed:
             return []
         image=self._array(rgb,width,height)
         offset_x=0
@@ -12834,7 +12866,13 @@ def ai_worker_main(base,address,auth_text,family):
         vision.require_ready()
         ocr.require_ready()
         _disable_network_access()
-        connection.send({"kind":"ready","status":{"device":vision.device_name,"vision_ready":vision.ready,"ocr_ready":ocr.ready}})
+        def status_value():
+            manifest=vision.manifest()
+            ocr_status=ocr.capability_status()
+            capabilities=dict(manifest.get("capabilities",{}))
+            capabilities.update({"ocr_recognize":bool(ocr_status.get("ocr_recognize"))})
+            return {"device":vision.device_name,"vision_ready":vision.ready,"ocr_ready":ocr.ready,"vision_backend":manifest.get("backend","builtin_cpu"),"vision_serialization":manifest.get("serialization","builtin_json"),"ocr_backend":ocr_status.get("ocr_backend","none"),"ocr_self_test":bool(ocr_status.get("ocr_self_test")),"capabilities":capabilities,"active_game":vision.active_game,"manifest":manifest if vision.active_game else None}
+        connection.send({"kind":"ready","status":status_value()})
         while True:
             command=connection.recv()
             if not isinstance(command,dict):
@@ -12847,7 +12885,7 @@ def ai_worker_main(base,address,auth_text,family):
                     connection.send({"kind":"result","id":request_id,"value":True})
                     break
                 if operation=="status":
-                    value={"device":vision.device_name,"vision_ready":vision.ready,"ocr_ready":ocr.ready,"active_game":vision.active_game,"manifest":vision.manifest() if vision.active_game else None}
+                    value=status_value()
                 elif operation=="activate_game":
                     value=vision.activate_game(str(payload.get("game_id","")))
                 elif operation=="vision_manifest":
@@ -13025,6 +13063,9 @@ class VisionRuntimeProxy:
         self.error=""
         self.active_game=None
         self.device_name=str(worker.status.get("device","独立AI工作进程"))
+        self.backend=str(worker.status.get("vision_backend","builtin_cpu"))
+        self.serialization=str(worker.status.get("vision_serialization","builtin_json"))
+        self.capabilities=dict(worker.status.get("capabilities",{}))
         self.trained_steps=0
     def require_ready(self):
         if not self.worker.alive():
@@ -13055,6 +13096,8 @@ class OCRRuntimeProxy:
         self.worker=worker
         self.ready=True
         self.error=""
+        self.backend=str(worker.status.get("ocr_backend","none"))
+        self.self_test_passed=bool(worker.status.get("ocr_self_test",False))
     def require_ready(self):
         if not self.worker.alive():
             self.ready=False
@@ -13498,6 +13541,133 @@ def run_strict_requirement_tests(path=None):
     except Exception:
         clean=False
     check("最终单文件无注释无空行且可编译",clean and source_path.suffix==".py")
+    import builtins,symtable
+    symbol_table=symtable.symtable(text,str(source_path),"exec")
+    module_names={symbol.get_name() for symbol in symbol_table.get_symbols()}
+    allowed_names=module_names|set(dir(builtins))|{"__file__","__name__","__package__","__spec__","__builtins__"}
+    unresolved=[]
+    def scan_symbols(table,path_name):
+        for symbol in table.get_symbols():
+            if symbol.is_referenced() and symbol.is_global() and symbol.get_name() not in allowed_names:
+                unresolved.append(path_name+" -> "+symbol.get_name())
+        for child in table.get_children():
+            scan_symbols(child,path_name+"."+child.get_name())
+    scan_symbols(symbol_table,"module")
+    check("test_symbol_scan_has_no_unresolved_names",not unresolved,unresolved)
+    class StrictValue:
+        def __init__(self):
+            self.value=None
+        def set(self,value):
+            self.value=value
+    class StrictAPI:
+        def __init__(self):
+            self.blocked=0
+            self.released=0
+        def block_input(self):
+            self.blocked+=1
+        def release_all_buttons(self):
+            self.released+=1
+    class StrictThread:
+        fail=False
+        def __init__(self,target=None,args=(),name="",daemon=False):
+            self.target=target
+            self.args=args
+            self.name=name
+            self.daemon=daemon
+            self.started=False
+        def start(self):
+            if type(self).fail:
+                raise RuntimeError("start failed")
+            self.started=True
+        def is_alive(self):
+            return self.started
+    def strict_app():
+        app=object.__new__(App)
+        app.lifecycle=ControlStateMachine()
+        app.lifecycle.set_directory_phase("ready")
+        app.store=object()
+        app.storage_fault=False
+        app.closing=False
+        app.api=StrictAPI()
+        app.progress_value=StrictValue()
+        app.status=StrictValue()
+        app.mode_thread=None
+        app.pending_mode_result=None
+        app.pending_mode_error=None
+        app.mode_shutdown_deadline=None
+        app.mode_shutdown_forced=[]
+        app.mode_stop_started=False
+        app.mode_shutdown_polling=False
+        app.escape_metrics={}
+        app.ai_worker=None
+        app.runtime_installer=None
+        app.review_process=None
+        app.active_session=None
+        app.mode_stop_lock=threading.RLock()
+        app.download_worker=lambda:None
+        app.worker_entry=lambda *args:None
+        app.record_acceptance_case=lambda *args,**kwargs:None
+        app.set_input_status=lambda value:None
+        app.set_controls=lambda value:None
+        app._update_control_availability=lambda:None
+        app._log_error=lambda *args,**kwargs:None
+        app.errors=[]
+        app.show_error=lambda value:app.errors.append(str(value))
+        app.ui=lambda callback,key=None:callback()
+        app.request_mode_stop=lambda status="stopped",reason="":app.lifecycle.request_stop(status,reason)
+        return app
+    original_thread=threading.Thread
+    try:
+        threading.Thread=StrictThread
+        callback_app=strict_app()
+        callback_ok=App.start_download(callback_app)
+        callback_state=callback_app.lifecycle.snapshot()[0]
+        check("test_start_download_callback_has_no_exception",callback_ok and callback_state==MODE_STARTING and callback_app.mode_thread is not None and callback_app.mode_thread.started and callback_app.mode_thread.args[0]=="下载" and not callback_app.errors)
+        StrictThread.fail=True
+        failure_app=strict_app()
+        failure_ok=not App.start_download(failure_app)
+        check("test_start_download_failure_restores_idle",failure_ok and failure_app.lifecycle.snapshot()[0]==MODE_IDLE and failure_app.mode_thread is None and bool(failure_app.errors))
+        StrictThread.fail=False
+        escape_app=strict_app()
+        App.start_download(escape_app)
+        App._escape_hook_signal(escape_app,{"monotonic_time":time.monotonic()})
+        escape_state,_,escape_event,_,_=escape_app.lifecycle.snapshot()
+        check("test_escape_during_download_starting",escape_state==MODE_STOPPING and escape_event is not None and escape_event.is_set() and escape_app.api.blocked>=2 and escape_app.api.released>=1)
+    finally:
+        threading.Thread=original_thread
+        StrictThread.fail=False
+    class TrainingAPI:
+        def client_rect(self,window_handle):
+            if int(window_handle)!=77:
+                raise RuntimeError("wrong hwnd")
+            return (1,2,300,200)
+    training_target={"hwnd":77}
+    training_result={"client_rect":list(TrainingAPI().client_rect(int(training_target["hwnd"])))}
+    check("test_training_result_construction",training_result["client_rect"]==[1,2,300,200] and 'client_rect(int(target["hwnd"]))' in method_source("TrainingController","_run_impl"))
+    with tempfile.TemporaryDirectory() as folder:
+        directory_store=DataStore(folder)
+        directory_store.close(5.0)
+        download_cache=Path(folder)/"cache"/"runtime_downloads"
+        download_cache.mkdir(parents=True,exist_ok=True)
+        successful_reopen=existing_data_directory_status(folder)[0]
+        (download_cache/"runtime.whl.part").write_bytes(b"partial")
+        interrupted_reopen=existing_data_directory_status(folder)[0]
+    check("test_reopen_directory_after_successful_download",successful_reopen)
+    check("test_reopen_directory_after_interrupted_download",interrupted_reopen)
+    timeout_app=object.__new__(App)
+    timeout_app.lifecycle=ControlStateMachine()
+    timeout_app.lifecycle.set_directory_phase("ready")
+    timeout_app.lifecycle.set_runtime_ready(True)
+    timeout_app.lifecycle.begin("学习")
+    timeout_app.lifecycle.request_stop("stopped","test")
+    timeout_app.api=StrictAPI()
+    timeout_reasons=[]
+    timeout_app._forced_exit=lambda reason:timeout_reasons.append(str(reason))
+    App._handle_mode_thread_timeout(timeout_app)
+    check("test_unresponsive_worker_never_returns_to_idle",timeout_reasons==["模式线程停止超时"] and timeout_app.lifecycle.snapshot()[0]==MODE_STOPPING and "PyThreadState_"+"SetAsyncExc" not in text and "detached_mode_"+"threads" not in text)
+    check("test_exact_visible_control_buttons",default_buttons==exact_buttons and all(label in app_build for label in exact_buttons))
+    check("test_popup_has_only_acknowledge_close_path",'text="已阅"' in modal and 'WM_DELETE_WINDOW",refuse_close' in modal and 'bind("<Escape>"' not in modal and 'bind("<Return>"' not in modal)
+    check("test_runtime_capabilities_are_truthful",all(token in text for token in ('"vision_backend":"builtin_cpu"','"vision_serialization":"builtin_json"','"ocr_backend":"none"','"ocr_self_test":False','"safe_serialization":"builtin_json"')) and "OCR："+"离线可用" not in text and "GPU后端检测和OCR预热"+"均已完成" not in text)
     result={"status":"passed" if not failures else "failed","checks":checks,"failures":failures}
     sys.stdout.write(json.dumps(result,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n")
     return 0 if not failures else 1
