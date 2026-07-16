@@ -73,7 +73,20 @@ CAPTURE_BACKEND_VERSION=2
 RECOVERY_BACKUP_LIMIT=1024*1024*1024
 MIN_DATA_OPERATION_RESERVE=256*1024*1024
 SUPPORTED_PYTHON_ABIS={(3,10),(3,11),(3,12),(3,13),(3,14)}
-RUNTIME_LAYOUT_VERSION=2
+RUNTIME_LAYOUT_VERSION=3
+FIXED_RUNTIME_PYTHON_VERSION="3.12.10"
+FIXED_RUNTIME_PYTHON_ABI=(3,12)
+FIXED_RUNTIME_PYTHON_URL="https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip"
+FIXED_RUNTIME_PYTHON_SHA256="4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
+FIXED_RUNTIME_PYTHON_MAX_BYTES=16*1024*1024
+FIXED_RUNTIME_PIP_VERSION="26.1.2"
+FIXED_RUNTIME_PIP_URL="https://files.pythonhosted.org/packages/5d/95/6b5cb3461ea5673ba0995989746db58eb18b91b54dbf331e72f569540946/pip-26.1.2-py3-none-any.whl"
+FIXED_RUNTIME_PIP_SHA256="382ff9f685ee3bc25864f820aa50505825f10f5458ffff07e30a6d96e5715cab"
+FIXED_RUNTIME_PIP_MAX_BYTES=3*1024*1024
+RUNTIME_LOCK_MANIFEST_VERSION=3
+RUNTIME_ALLOWED_DOWNLOAD_HOSTS={"www.python.org","files.pythonhosted.org","pypi.org","download.pytorch.org"}
+STRICT_ACCEPTANCE_ITEMS=("启动","默认界面","文件夹","下载","窗口","采集","学习","睡眠","训练","指导","弹窗","停止","单实例与目录锁","独立运行时","离线网络封锁","写入路径审计","多显示器与DPI","错误恢复")
+STRICT_ACCEPTANCE_CASES={"启动":("control_panel_visible",),"默认界面":("exact_eight_buttons",),"文件夹":("select_prepare_confirm","migration_success","forced_failure_rollback","prepare_cancel_cleanup"),"下载":("normal_complete","network_failure_retry","escape_retry","locked_manifest"),"窗口":("ldplayer_confirmed","ordinary_confirmed"),"采集":("minimized","occluded","scaled","recreated"),"学习":("client_only_real_mouse",),"睡眠":("socket_blocked","model_optimized","pool_optimized","deterministic_seed"),"训练":("all_coordinates_in_client","immutable_snapshot_change_stop"),"指导":("choices_only","finish_button","escape"),"弹窗":("ack_only",),"停止":("starting","running","stopping","latency_thresholds","buttons_released"),"单实例与目录锁":("named_mutex","directory_lock","lock_record"),"独立运行时":("fixed_python","worker_process","embedded_wheel_lock","host_abi_independent"),"离线网络封锁":("socket","urllib","disconnected_windows"),"写入路径审计":("internal_audit","external_monitor"),"多显示器与DPI":("dpi100","dpi125","dpi150","dpi200","mixed_dpi","negative_coordinates","cross_monitor","hwnd_reuse"),"错误恢复":("input_locked","rollback","retry","no_pressed_buttons","no_orphan_process","no_staging")}
 SAMPLE_IMAGE_VERSION=1
 NEURAL_FEATURE_VERSION=2
 MODEL_MAX_BYTES=256*1024*1024
@@ -91,10 +104,10 @@ def sample_retention_budget(family_count,session_count):
     sessions=max(1,safe_int(session_count,1,1,64)) if "safe_int" in globals() else max(1,int(session_count or 1))
     return min(MAX_SAMPLES,max(DEFAULT_SAMPLE_BUDGET,400+families*180+sessions*120))
 def runtime_pins_for_abi(abi=None):
-    key=tuple(abi or sys.version_info[:2])
+    key=tuple(abi or FIXED_RUNTIME_PYTHON_ABI)
     pins=RUNTIME_PINS_BY_ABI.get(key)
     if pins is None:
-        raise RuntimeError("仅支持64位Python 3.10至3.14")
+        raise RuntimeError("固定独立运行时ABI缺少依赖锁")
     return list(pins)
 def tree_size(path):
     root=Path(path)
@@ -469,6 +482,7 @@ class ControlStateMachine:
         self.lock=threading.RLock()
         self.state=MODE_IDLE
         self.name=None
+        self.shared_stop_event=threading.Event()
         self.stop_event=None
         self.requested_status="stopped"
         self.reason=""
@@ -497,7 +511,8 @@ class ControlStateMachine:
                 raise RuntimeError("请先完成下载")
             self.state=MODE_STARTING
             self.name=str(name)
-            self.stop_event=threading.Event()
+            self.shared_stop_event.clear()
+            self.stop_event=self.shared_stop_event
             self.requested_status="completed"
             self.reason=""
             return self.stop_event
@@ -767,6 +782,23 @@ def bounded_decompress(data,maximum):
     return result
 def canonical_bytes(data):
     return json.dumps(data,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")
+def immutable_digest(value):
+    def normalize(item):
+        if isinstance(item,(bytes,bytearray,memoryview)):
+            raw=bytes(item)
+            return {"bytes":len(raw),"sha256":hashlib.sha256(raw).hexdigest()}
+        if isinstance(item,dict):
+            return {str(key):normalize(item[key]) for key in sorted(item,key=lambda key:str(key))}
+        if isinstance(item,(list,tuple)):
+            return [normalize(entry) for entry in item]
+        if isinstance(item,(set,frozenset)):
+            return sorted((normalize(entry) for entry in item),key=lambda entry:json.dumps(entry,ensure_ascii=False,sort_keys=True,separators=(",",":")))
+        if isinstance(item,Path):
+            return str(item)
+        if isinstance(item,(str,int,float,bool)) or item is None:
+            return item
+        return str(item)
+    return hashlib.sha256(canonical_bytes(normalize(value))).hexdigest()
 def add_checksum(data):
     result=dict(data)
     result.pop("checksum",None)
@@ -1185,11 +1217,11 @@ def upgrade_sample_rgb(value):
     return bytes(channel for pixel in gray for channel in (pixel,pixel,pixel))
 def preprocess_signature():
     return dict(VISION_PREPROCESS_SIGNATURE)
+def runtime_python_path(base):
+    root=Path(base)/"runtime.current"/"python"
+    return root/("python.exe" if os.name=="nt" else "python")
 def runtime_site_packages(base):
-    root=Path(base)/"runtime.current"/"venv"
-    if os.name=="nt":
-        return root/"Lib"/"site-packages"
-    return root/"lib"/("python"+str(sys.version_info.major)+"."+str(sys.version_info.minor))/"site-packages"
+    return Path(base)/"runtime.current"/"python"/"Lib"/"site-packages"
 def runtime_manifest_path(base):
     return Path(base)/"runtime.current"/"runtime_manifest.json"
 def sha256_file(path,maximum=None):
@@ -1620,6 +1652,251 @@ class WindowsGraphicsCapture:
             self.sessions.clear()
         for item in items:
             self._dispose_session(item)
+def process_start_wall_time(pid=None):
+    value=os.getpid() if pid is None else safe_int(pid,os.getpid(),1)
+    if os.name=="nt":
+        kernel=ctypes.WinDLL("kernel32",use_last_error=True)
+        kernel.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
+        kernel.OpenProcess.restype=wintypes.HANDLE
+        kernel.GetProcessTimes.argtypes=[wintypes.HANDLE,ctypes.POINTER(FILETIME),ctypes.POINTER(FILETIME),ctypes.POINTER(FILETIME),ctypes.POINTER(FILETIME)]
+        kernel.GetProcessTimes.restype=wintypes.BOOL
+        kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+        handle=kernel.OpenProcess(0x1000,False,value)
+        if handle:
+            created=FILETIME(); exited=FILETIME(); kernel_time=FILETIME(); user_time=FILETIME()
+            try:
+                if kernel.GetProcessTimes(handle,ctypes.byref(created),ctypes.byref(exited),ctypes.byref(kernel_time),ctypes.byref(user_time)):
+                    ticks=(int(created.dwHighDateTime)<<32)|int(created.dwLowDateTime)
+                    return ticks/10000000.0-11644473600.0
+            finally:
+                kernel.CloseHandle(handle)
+    try:
+        stat=(Path("/proc")/str(value)/"stat").read_text(encoding="ascii",errors="ignore").split()
+        ticks=os.sysconf("SC_CLK_TCK")
+        boot=time.time()-float(Path("/proc/uptime").read_text(encoding="ascii").split()[0])
+        return boot+safe_float(stat[21],0.0)/max(1.0,float(ticks))
+    except Exception:
+        return time.time()-time.monotonic()
+class ProcessInstanceLock:
+    ERROR_ALREADY_EXISTS=183
+    def __init__(self):
+        self.handle=None
+        self.name="Local\\UniversalGameAI-"+hashlib.sha256(os.path.normcase(str(Path.home())).encode("utf-8","replace")).hexdigest()[:24]
+    def acquire(self):
+        if os.name!="nt":
+            return self
+        kernel32=ctypes.WinDLL("kernel32",use_last_error=True)
+        kernel32.CreateMutexW.argtypes=[ctypes.c_void_p,wintypes.BOOL,wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype=wintypes.HANDLE
+        kernel32.CloseHandle.argtypes=[wintypes.HANDLE]
+        kernel32.CloseHandle.restype=wintypes.BOOL
+        handle=kernel32.CreateMutexW(None,False,self.name)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if ctypes.get_last_error()==self.ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            raise RuntimeError("已有通用游戏AI实例正在运行")
+        self.handle=handle
+        return self
+    def close(self):
+        handle=self.handle
+        self.handle=None
+        if handle and os.name=="nt":
+            try:
+                ctypes.WinDLL("kernel32",use_last_error=True).CloseHandle(handle)
+            except Exception:
+                pass
+class DataDirectoryLock:
+    def __init__(self,base):
+        self.base=Path(base).expanduser().resolve()
+        self.path=self.base/".ugai.lock"
+        self.handle=None
+        self.locked=False
+        self.record={}
+    def acquire(self):
+        self.base.mkdir(parents=True,exist_ok=True)
+        handle=self.path.open("a+b")
+        try:
+            handle.seek(0)
+            if handle.read(1)==b"":
+                handle.seek(0)
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name=="nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            raise RuntimeError("该文件夹正被另一个通用游戏AI实例占用")
+        self.handle=handle
+        self.locked=True
+        self.record={"pid":os.getpid(),"process_started_wall":round(process_start_wall_time(),6),"acquired":time.time(),"build_hash":current_build_hash(),"directory":str(self.base),"nonce":uuid.uuid4().hex}
+        payload=json.dumps(self.record,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")
+        handle.seek(0)
+        handle.truncate()
+        handle.write(payload)
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except OSError:
+            pass
+        return self
+    def close(self):
+        handle=self.handle
+        self.handle=None
+        if handle is None:
+            return
+        try:
+            handle.seek(0)
+            if os.name=="nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(),msvcrt.LK_UNLCK,1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            handle.close()
+        finally:
+            self.locked=False
+class WritePathAudit:
+    def __init__(self,base):
+        self.base=Path(base).resolve()
+        self.path=self.base/"audit"/"write_paths.jsonl"
+        self.lock=threading.RLock()
+    def record(self,operation,path,allowed=True,details=None):
+        target=Path(path).expanduser().resolve()
+        inside=False
+        try:
+            target.relative_to(self.base)
+            inside=True
+        except ValueError:
+            inside=False
+        value={"time":time.time(),"operation":str(operation),"path":str(target),"inside_confirmed_directory":inside,"allowed":bool(allowed and inside),"details":details if isinstance(details,dict) else {}}
+        self.path.parent.mkdir(parents=True,exist_ok=True)
+        with self.lock,self.path.open("a",encoding="utf-8") as handle:
+            handle.write(json.dumps(value,ensure_ascii=False,separators=(",",":"))+"\n")
+        if not value["allowed"]:
+            raise RuntimeError("写入路径超出用户确认目录："+str(target))
+        return value
+class AcceptanceReport:
+    def __init__(self,base):
+        self.base=Path(base).resolve()
+        self.path=self.base/"audit"/"acceptance_report.json"
+        self.lock=threading.RLock()
+        self.data={"schema_version":3,"build_hash":current_build_hash(),"updated":time.time(),"strict_pass":False,"items":{},"environment":{},"failures":[],"invalidated_reason":""}
+        self.load()
+    def _fresh_item(self,name):
+        return {"status":"pending","updated":0.0,"evidence":[],"cases":{case:{"status":"pending","updated":0.0,"evidence":[]} for case in STRICT_ACCEPTANCE_CASES[name]}}
+    def load(self):
+        current=current_build_hash()
+        loaded=None
+        try:
+            value=json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(value,dict) and isinstance(value.get("items"),dict):
+                loaded=value
+        except Exception:
+            loaded=None
+        if loaded is not None and str(loaded.get("build_hash",""))==current and safe_int(loaded.get("schema_version"),0)==3:
+            self.data=loaded
+        elif loaded is not None:
+            self.data["invalidated_reason"]="构建哈希或验收schema变化，旧证据已失效"
+        self.data["schema_version"]=3
+        self.data["build_hash"]=current
+        self.data.setdefault("environment",{})
+        self.data.setdefault("items",{})
+        for name in STRICT_ACCEPTANCE_ITEMS:
+            item=self.data["items"].setdefault(name,self._fresh_item(name))
+            item.setdefault("status","pending")
+            item.setdefault("updated",0.0)
+            item.setdefault("evidence",[])
+            cases=item.setdefault("cases",{})
+            for case in STRICT_ACCEPTANCE_CASES[name]:
+                cases.setdefault(case,{"status":"pending","updated":0.0,"evidence":[]})
+            for extra in list(cases):
+                if extra not in STRICT_ACCEPTANCE_CASES[name]:
+                    cases.pop(extra,None)
+        self._evaluate_locked()
+        return self.data
+    def record_case(self,name,case,status,evidence=None):
+        if name not in STRICT_ACCEPTANCE_CASES or case not in STRICT_ACCEPTANCE_CASES[name]:
+            raise ValueError("未知验收用例："+str(name)+"/"+str(case))
+        value=str(status)
+        if value not in {"passed","failed","pending","not_run"}:
+            raise ValueError("验收状态无效")
+        with self.lock:
+            item=self.data["items"].setdefault(name,self._fresh_item(name))
+            target=item["cases"].setdefault(case,{"status":"pending","updated":0.0,"evidence":[]})
+            target["status"]=value
+            target["updated"]=time.time()
+            target["evidence"]=list(evidence) if isinstance(evidence,(list,tuple)) else ([evidence] if evidence is not None else [])
+            self._save_locked()
+        return value
+    def record(self,name,status,evidence=None):
+        if name not in STRICT_ACCEPTANCE_ITEMS:
+            raise ValueError("未知验收项目："+str(name))
+        value=str(status)
+        if value=="passed":
+            with self.lock:
+                cases=self.data["items"].setdefault(name,self._fresh_item(name))["cases"]
+                if not all(cases.get(case,{}).get("status")=="passed" for case in STRICT_ACCEPTANCE_CASES[name]):
+                    raise RuntimeError("不能跳过真实验收用例直接标记严格通过："+str(name))
+                self._save_locked()
+            return value
+        if value not in {"failed","pending","not_run"}:
+            raise ValueError("验收状态无效")
+        with self.lock:
+            item=self.data["items"].setdefault(name,self._fresh_item(name))
+            for case in STRICT_ACCEPTANCE_CASES[name]:
+                if item["cases"][case].get("status")!="passed":
+                    item["cases"][case]={"status":value,"updated":time.time(),"evidence":list(evidence) if isinstance(evidence,(list,tuple)) else ([evidence] if evidence is not None else [])}
+            self._save_locked()
+        return value
+    def set_environment(self,**values):
+        with self.lock:
+            self.data.setdefault("environment",{}).update(values)
+            self._save_locked()
+    def _evaluate_locked(self):
+        failures=[]
+        for name in STRICT_ACCEPTANCE_ITEMS:
+            item=self.data["items"].setdefault(name,self._fresh_item(name))
+            states=[item["cases"].get(case,{}).get("status","pending") for case in STRICT_ACCEPTANCE_CASES[name]]
+            if states and all(value=="passed" for value in states):
+                status="passed"
+            elif any(value=="failed" for value in states):
+                status="failed"
+            elif any(value=="not_run" for value in states):
+                status="not_run"
+            else:
+                status="pending"
+            item["status"]=status
+            item["updated"]=max([safe_float(item["cases"].get(case,{}).get("updated"),0.0) for case in STRICT_ACCEPTANCE_CASES[name]] or [0.0])
+            item["evidence"]=[{"case":case,"status":item["cases"].get(case,{}).get("status","pending"),"evidence":item["cases"].get(case,{}).get("evidence",[])} for case in STRICT_ACCEPTANCE_CASES[name]]
+            if status!="passed":
+                failures.append(name)
+        environment=self.data.setdefault("environment",{})
+        windows_ok=safe_int(environment.get("windows_build"),0)>=22000
+        build_ok=str(self.data.get("build_hash",""))==current_build_hash()
+        self.data["failures"]=failures+([] if windows_ok else ["Windows 11真实环境未证明"])+([] if build_ok else ["构建哈希不匹配"])
+        self.data["strict_pass"]=bool(not self.data["failures"] and all(self.data["items"][name].get("status")=="passed" for name in STRICT_ACCEPTANCE_ITEMS))
+        return self.data["strict_pass"]
+    def _save_locked(self):
+        self.data["updated"]=time.time()
+        self._evaluate_locked()
+        self.path.parent.mkdir(parents=True,exist_ok=True)
+        temporary=self.path.with_suffix(".json.tmp."+uuid.uuid4().hex)
+        temporary.write_text(json.dumps(self.data,ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
+        os.replace(temporary,self.path)
+    def strict_passed(self):
+        with self.lock:
+            self._save_locked()
+            return bool(self.data.get("strict_pass"))
+PROGRAM_INSTANCE_LOCK=None
 class WinBridge:
     def __init__(self):
         if os.name!="nt":
@@ -2771,6 +3048,8 @@ def _capture_process_main(connection):
 class KeyboardMonitor:
     def __init__(self,bridge,on_escape=None,on_other=None):
         self.bridge=bridge
+        self.on_escape=on_escape
+        self.on_other=on_other
         self.events=queue.Queue(maxsize=2048)
         self.escape_event=threading.Event()
         self.other_event=threading.Event()
@@ -2819,7 +3098,13 @@ class KeyboardMonitor:
                         self.escape_down=down
                         if first:
                             self.escape_event.set()
-                            self._put({"kind":"escape","down":True,"time":stamp,"wall_time":wall_time,"monotonic_time":monotonic_time,"injected":injected})
+                            event={"kind":"escape","down":True,"time":stamp,"wall_time":wall_time,"monotonic_time":monotonic_time,"injected":injected}
+                            self._put(event)
+                            if self.on_escape is not None:
+                                try:
+                                    self.on_escape(dict(event))
+                                except Exception:
+                                    pass
                     else:
                         with self.key_lock:
                             first=down and vk not in self.pressed_non_escape
@@ -2832,7 +3117,13 @@ class KeyboardMonitor:
                             if first:
                                 self.non_escape_count+=1
                             self.other_event.set()
-                            self._put({"kind":"other","down":True,"time":stamp,"wall_time":wall_time,"monotonic_time":monotonic_time,"vk":vk,"injected":injected})
+                            event={"kind":"other","down":True,"time":stamp,"wall_time":wall_time,"monotonic_time":monotonic_time,"vk":vk,"injected":injected}
+                            self._put(event)
+                            if self.on_other is not None:
+                                try:
+                                    self.on_other(dict(event))
+                                except Exception:
+                                    pass
                         else:
                             self._put({"kind":"other","down":False,"time":stamp,"wall_time":wall_time,"monotonic_time":monotonic_time,"vk":vk,"injected":injected})
                             if not active:
@@ -3193,11 +3484,6 @@ class FrameBuffer:
         with self.condition:
             seen=self.sequence
         while time.monotonic()<deadline:
-            if self.bridge.key_down(0x1B):
-                if external_stop is not None:
-                    external_stop.set()
-                self.bridge.block_input()
-                raise InputStopped("初始化期间收到ESC停止请求")
             if external_stop is not None and external_stop.is_set():
                 raise InputStopped("初始化期间收到停止请求")
             frame=self.latest(None,1.0,purpose)
@@ -3245,9 +3531,9 @@ class ModeSession:
                 self.app.store.log_error("OCR_MONITOR_START_FAILED",error,mode=self.app.mode)
         return buffer
     def start_keyboard(self,on_other=None):
-        monitor=KeyboardMonitor(self.app.api)
-        self.barrier.add("KeyboardHook",monitor.stop,monitor.alive)
-        monitor.start()
+        monitor=getattr(self.app,"keyboard_monitor",None)
+        if monitor is None or not monitor.alive():
+            raise RuntimeError("常驻低级键盘钩子不可用")
         self.keyboard_monitor=monitor
         return monitor
     def start_mouse(self,on_input=None):
@@ -3555,9 +3841,11 @@ def review_process_send(connection,kind,payload):
         return False
 def review_process_main(connection,stop_event,payload):
     try:
+        _disable_network_access()
         app=object.__new__(App)
         app.selected_game=dict(payload["game"])
         app.store=ReviewProcessStore(payload)
+        app.sleep_seed=safe_int(payload.get("sleep_seed"),0,0,2**63-1)
         app.lifecycle=ReviewProcessLifecycle(stop_event)
         app.review_distance_cache=BoundedLRU(payload.get("cache_capacity",50000))
         app.candidate_cache=BoundedLRU(64)
@@ -4246,7 +4534,9 @@ class ReviewController:
         samples,stats=app.store.load_samples(game["id"],MAX_SAMPLES)
         rgb_samples=[item for item in samples if sample_rgb_valid(item.get("rgb"))]
         app.set_status("睡眠阶段：正在用RGB样本执行动作条件对比学习和时序一致性优化")
-        manifest=app.vision_runtime.train(game["id"],rgb_samples,app.stop_event,app.set_progress)
+        sleep_seed=int.from_bytes(os.urandom(8),"big")&0x7fffffffffffffff
+        app.sleep_seed=sleep_seed
+        manifest=app.vision_runtime.train(game["id"],rgb_samples,app.stop_event,app.set_progress,sleep_seed)
         app.store.record_vision_model(game["id"],manifest)
         app.set_status("睡眠阶段：正在生成神经特征，原始视觉特征保持不变")
         app.store.reencode_samples(game["id"],app.vision_runtime,app.stop_event,app.set_progress)
@@ -4549,7 +4839,8 @@ class ReviewController:
         ocr_events=self.store.load_ocr_experience_events(game["id"],5000)
         experiences,experience_model=self.review_controller.build_experiences(train,ocr_events,profile)
         binding=model_binding_from_samples(train)
-        model={"created":time.time(),"samples":len(decorrelated),"training_samples":len(train),"holdout_samples":len(holdout),"invalid_samples":stats["invalid"],"action_clusters":len(action_clusters),"rejection_constraints":rejection_constraints,"prototypes":prototypes,"capture_backends":train_methods,"validation":validation,"training_checksums":train_checksums,"holdout_checksums":holdout_checksums,"sequence_model":sequence_model,"experiences":experiences,"experience_model":experience_model,"model_binding":binding,"safety_profile_checksum":profile_checksum(profile),"stopped":False}
+        sleep_seed=safe_int(getattr(self,"sleep_seed",0),0,0,2**63-1)
+        model={"created":time.time(),"sleep_seed":sleep_seed,"determinism":{"seed":sleep_seed,"build_hash":current_build_hash(),"training_checksums_hash":hashlib.sha256(canonical_bytes(train_checksums)).hexdigest(),"holdout_checksums_hash":hashlib.sha256(canonical_bytes(holdout_checksums)).hexdigest()},"samples":len(decorrelated),"training_samples":len(train),"holdout_samples":len(holdout),"invalid_samples":stats["invalid"],"action_clusters":len(action_clusters),"rejection_constraints":rejection_constraints,"prototypes":prototypes,"capture_backends":train_methods,"validation":validation,"training_checksums":train_checksums,"holdout_checksums":holdout_checksums,"sequence_model":sequence_model,"experiences":experiences,"experience_model":experience_model,"model_binding":binding,"safety_profile_checksum":profile_checksum(profile),"stopped":False}
         if not prototypes:
             raise RuntimeError("睡眠未生成可用原型")
         self.store.save_model(game["id"],model,validation_status=="passed")
@@ -4607,6 +4898,35 @@ class TrainingController:
         validated_backend=str(calibration.get("validated_backend",""))
         if validated_backend not in allowed_backends:
             raise RuntimeError("当前采集后端未被当前可训练模型授权；请用该后端重新学习并睡眠")
+        def model_table_token():
+            with self.store.lock:
+                rows=self.store.db.execute("SELECT slot,saved,checksum FROM models WHERE game_id=? ORDER BY slot",(game["id"],)).fetchall()
+            return immutable_digest([[str(row["slot"]),float(row["saved"]),str(row["checksum"])] for row in rows])
+        initial_identity=self.api.target_identity(target)
+        initial_rect=tuple(self.api.validate_target(target,False))
+        initial_dpi=self.api.dpi_for_window(int(target["hwnd"]))
+        snapshot_payload={"game_id":str(game["id"]),"model_table_token":model_table_token(),"model_digest":immutable_digest(model),"safety_profile_checksum":profile_checksum(profile),"window":{"hwnd":safe_int(initial_identity.get("hwnd"),0),"pid":safe_int(initial_identity.get("pid"),0),"process_created":safe_int(initial_identity.get("process_created"),0),"window_thread_id":safe_int(initial_identity.get("window_thread_id"),0),"class":str(initial_identity.get("class","")),"process_path":os.path.normcase(str(initial_identity.get("process_path",""))),"integrity":safe_int(initial_identity.get("integrity"),0)},"content_rect":list(initial_rect),"dpi":initial_dpi,"capture_backend":validated_backend,"allowed_actions":sorted({action_signature(proto.get("a")) for proto in prototypes})}
+        training_snapshot_checksum=immutable_digest(snapshot_payload)
+        snapshot_last_check=0.0
+        def assert_training_snapshot(force=False):
+            nonlocal snapshot_last_check
+            now=time.monotonic()
+            if not force and now-snapshot_last_check<0.25:
+                return True
+            snapshot_last_check=now
+            current_game=self.require_game()
+            current_identity=self.api.target_identity(target)
+            current_rect=tuple(self.api.validate_target(target,False))
+            current_dpi=self.api.dpi_for_window(int(target["hwnd"]))
+            current_backend=str(self.api.calibration_for(target).get("validated_backend",validated_backend))
+            current_profile=self.store.load_game_profile(game["id"])
+            current_payload={"game_id":str(current_game.get("id","")),"model_table_token":model_table_token(),"model_digest":snapshot_payload["model_digest"],"safety_profile_checksum":profile_checksum(current_profile),"window":{"hwnd":safe_int(current_identity.get("hwnd"),0),"pid":safe_int(current_identity.get("pid"),0),"process_created":safe_int(current_identity.get("process_created"),0),"window_thread_id":safe_int(current_identity.get("window_thread_id"),0),"class":str(current_identity.get("class","")),"process_path":os.path.normcase(str(current_identity.get("process_path",""))),"integrity":safe_int(current_identity.get("integrity"),0)},"content_rect":list(current_rect),"dpi":current_dpi,"capture_backend":current_backend,"allowed_actions":snapshot_payload["allowed_actions"]}
+            if immutable_digest(current_payload)!=training_snapshot_checksum:
+                self.api.block_input()
+                self.api.release_all_buttons()
+                self.request_mode_stop("stopped","训练不可变运行快照发生变化")
+                raise InputStopped("游戏、模型、安全配置、窗口身份、内容区域、DPI、采集后端或动作集合在训练期间发生变化")
+            return True
         self.api.request_foreground(target["hwnd"])
         self.wait_escape_release()
         isolation=StrictInputIsolation(self.stop_event)
@@ -4638,6 +4958,7 @@ class TrainingController:
             mouse_interrupt=mouse.input_event
             def execute_profile_restart(frame):
                 nonlocal actions
+                assert_training_snapshot(True)
                 restart=normalize_action(profile.get("restart_action"))
                 if not restart:
                     return False
@@ -4661,6 +4982,7 @@ class TrainingController:
                     self.api.block_input()
                     self.api.release_all_buttons()
             while not self.should_stop():
+                assert_training_snapshot(False)
                 key_events=[event for event in keyboard.drain() if event.get("kind")=="other" and event.get("down")]
                 mouse_events=mouse.drain()
                 if self.training_controller.interference(mouse_interrupt,keyboard_interrupt) or key_events or mouse_events:
@@ -4830,6 +5152,7 @@ class TrainingController:
                         raise InputStopped("动作前模型判断已变化")
                     if not self.training_controller.confirmed(candidate_count,confirmations):
                         raise InputStopped("动作前连续帧确认不足")
+                    assert_training_snapshot(True)
                     before=fresh["f"]
                     needs_input=action.get("kind")!="no_op"
                     if needs_input:
@@ -4910,7 +5233,7 @@ class TrainingController:
         requested=self.lifecycle.snapshot()[3]
         final_status=requested if requested in {"completed","stopped","failed"} else ("stopped" if self.stop_event and self.stop_event.is_set() else "completed")
         summary=("训练完成" if final_status=="completed" else "训练已停止")+"，AI执行"+str(actions)+"个鼠标动作；检测到非ESC键盘输入"+str(keyboard_count)+"次，人工或外部注入鼠标输入"+str(mouse_count)+"次"
-        return ModeResult(final_status,summary,{"strict_input_violation":isolation.kind,"task_history":list(agent_policy.history)})
+        return ModeResult(final_status,summary,{"strict_input_violation":isolation.kind,"task_history":list(agent_policy.history),"training_snapshot_checksum":training_snapshot_checksum})
 class TeachingController:
     def __init__(self,app):
         self.app=app
@@ -6815,7 +7138,11 @@ class App:
         self.api=WinBridge()
         self.store=None
         self.data_directory=None
+        self.data_directory_lock=None
+        self.write_audit=None
+        self.acceptance_report=None
         self.runtime_installer=None
+        self.ai_worker=None
         self.vision_runtime=None
         self.ocr_runtime=None
         self.active_ocr_monitor=None
@@ -6858,6 +7185,10 @@ class App:
         self.background_lock=threading.RLock()
         self.background_generations=defaultdict(int)
         self.background_threads=set()
+        self.directory_prepare_thread=None
+        self.directory_prepare_stop=None
+        self.directory_prepare_candidate=None
+        self.directory_prepare_generation=0
         self.refresh_signature=None
         self.closing=False
         self.shutdown_started=False
@@ -6884,12 +7215,19 @@ class App:
         self.confidence_text=tk.StringVar(value="离线AI运行库：未下载")
         self.input_text=tk.StringVar(value="自动输入：已锁定")
         self.progress_value=tk.DoubleVar(value=0.0)
+        self.escape_metrics={"pressed":0.0,"input_locked":0.0,"cleanup_started":0.0,"finished":0.0,"fallback_used":False}
+        self.keyboard_monitor=None
+        self.keyboard_hook_error=""
+        try:
+            self.keyboard_monitor=KeyboardMonitor(self.api,on_escape=self._escape_hook_signal).start()
+        except Exception as error:
+            self.keyboard_hook_error=str(error)
         self.root.report_callback_exception=self.tk_exception
         self._build()
         self._update_control_availability()
         self.root.protocol("WM_DELETE_WINDOW",self.close)
         self.root.after(25,self.process_ui_queue)
-        self.root.after(35,self.poll_global_escape)
+        self.root.after(100,self.poll_global_escape)
         self.root.after(1200,self.periodic_refresh)
     def _writer_status_changed(self,error):
         def apply():
@@ -6931,6 +7269,21 @@ class App:
         try:
             if self.runtime_installer is not None:
                 self.runtime_installer.stop()
+        except Exception:
+            pass
+        try:
+            if self.ai_worker is not None:
+                self.ai_worker.close(0.2)
+        except Exception:
+            pass
+        try:
+            if self.keyboard_monitor is not None:
+                self.keyboard_monitor.stop(0.2)
+        except Exception:
+            pass
+        try:
+            if self.data_directory_lock is not None:
+                self.data_directory_lock.close()
         except Exception:
             pass
         try:
@@ -7233,6 +7586,19 @@ class App:
         self.set_controls(False)
         self.progress_value.set(0)
         self.status.set(result.summary)
+        if self.escape_metrics.get("pressed"):
+            self.escape_metrics["finished"]=time.monotonic()
+            metrics=dict(self.escape_metrics)
+            metrics["lock_latency_ms"]=round(max(0.0,metrics.get("input_locked",0.0)-metrics.get("pressed",0.0))*1000.0,3) if metrics.get("input_locked") else None
+            metrics["cleanup_latency_ms"]=round(max(0.0,metrics.get("cleanup_started",0.0)-metrics.get("pressed",0.0))*1000.0,3) if metrics.get("cleanup_started") else None
+            metrics["finish_latency_ms"]=round(max(0.0,metrics.get("finished",0.0)-metrics.get("pressed",0.0))*1000.0,3)
+            if self.write_audit is not None:
+                try:
+                    self.write_audit.record("escape_stop_latency",self.data_directory/"audit"/"escape_latency.jsonl",True,metrics)
+                    with (self.data_directory/"audit"/"escape_latency.jsonl").open("a",encoding="utf-8") as handle:
+                        handle.write(json.dumps(metrics,ensure_ascii=False,separators=(",",":"))+"\n")
+                except Exception:
+                    pass
         self._refresh_all()
         if self.closing:
             self._poll_shutdown()
@@ -7269,21 +7635,44 @@ class App:
         result=self.ensure_capture_calibration(target,"重新测试采集后端")
         self.lifecycle.mark_running()
         return ModeResult("completed","采集后端重新测试完成："+str(result.get("validated_backend","未知")),{"validated_backends":list(result.get("validated_backends",[]))})
+    def _escape_hook_signal(self,event):
+        state,name,stop_event,_,_=self.lifecycle.snapshot()
+        if state==MODE_IDLE:
+            return
+        pressed=safe_float(event.get("monotonic_time"),time.monotonic()) if isinstance(event,dict) else time.monotonic()
+        self.escape_metrics={"pressed":pressed,"input_locked":0.0,"cleanup_started":0.0,"finished":0.0,"fallback_used":False}
+        self.api.block_input()
+        self.api.release_all_buttons()
+        self.escape_metrics["input_locked"]=time.monotonic()
+        self.lifecycle.request_stop("stopped","ESC停止")
+        if stop_event is not None:
+            stop_event.set()
+        worker=getattr(self,"ai_worker",None)
+        if worker is not None:
+            try:
+                worker.request_stop()
+            except Exception:
+                pass
+        self.ui(lambda:self.request_mode_stop("stopped","ESC停止"),"escape_stop")
     def poll_global_escape(self):
         if self.shutdown_started:
             return
-        try:
-            down=self.api.key_down(0x1B)
-            if not down:
-                self.global_escape_armed=True
-            elif self.lifecycle.snapshot()[0]!=MODE_IDLE and self.global_escape_armed:
-                self.global_escape_armed=False
-                self._keyboard_escape()
-        except Exception:
-            pass
+        monitor=self.keyboard_monitor
+        hook_ok=bool(monitor is not None and monitor.alive() and not monitor.error)
+        if not hook_ok:
+            try:
+                down=self.api.key_down(0x1B)
+                if not down:
+                    self.global_escape_armed=True
+                elif self.lifecycle.snapshot()[0]!=MODE_IDLE and self.global_escape_armed:
+                    self.global_escape_armed=False
+                    self.escape_metrics["fallback_used"]=True
+                    self._escape_hook_signal({"monotonic_time":time.monotonic()})
+            except Exception:
+                pass
         if not self.shutdown_started:
             try:
-                self.root.after(35,self.poll_global_escape)
+                self.root.after(100,self.poll_global_escape)
             except Exception:
                 pass
     def set_status(self,text):
@@ -8127,6 +8516,13 @@ class App:
                 event.set()
         self.api.block_input()
         self.api.release_all_buttons()
+        if self.escape_metrics.get("pressed") and not self.escape_metrics.get("cleanup_started"):
+            self.escape_metrics["cleanup_started"]=time.monotonic()
+        if self.ai_worker is not None:
+            try:
+                self.ai_worker.request_stop()
+            except Exception:
+                pass
         if name=="下载" and self.runtime_installer is not None:
             try:
                 self.runtime_installer.stop()
@@ -8155,14 +8551,18 @@ class App:
     def _keyboard_escape(self,event=None):
         self.request_mode_stop("stopped","ESC停止")
     def wait_escape_release(self):
-        while self.api.key_down(0x1B) and self.stop_event and not self.stop_event.is_set():
-            time.sleep(0.04)
+        monitor=self.keyboard_monitor
+        deadline=time.monotonic()+1.5
+        while monitor is not None and monitor.escape_down and time.monotonic()<deadline and self.stop_event and not self.stop_event.is_set():
+            time.sleep(0.01)
     def should_stop(self):
         if self.stop_event is None or self.stop_event.is_set():
             self.api.block_input()
             return True
-        if self.api.key_down(0x1B):
-            self.request_mode_stop("stopped","ESC停止")
+        monitor=self.keyboard_monitor
+        if (monitor is None or not monitor.alive()) and self.api.key_down(0x1B):
+            self.escape_metrics["fallback_used"]=True
+            self._escape_hook_signal({"monotonic_time":time.monotonic()})
             return True
         return False
     def inside(self,x,y,rect):
@@ -8215,7 +8615,8 @@ class App:
         samples,stats=self.store.load_samples(game["id"])
         rejections=self.store.load_rejections(game["id"],500)
         ocr_events=self.store.load_ocr_experience_events(game["id"],5000)
-        worker=ReviewProcessWorker({"game":game,"samples":samples,"stats":stats,"rejections":rejections,"ocr_events":ocr_events,"profile":self.store.load_game_profile(game["id"]),"cache_capacity":50000})
+        sleep_seed=safe_int(getattr(self,"sleep_seed",0),0,0,2**63-1)
+        worker=ReviewProcessWorker({"game":game,"samples":samples,"stats":stats,"rejections":rejections,"ocr_events":ocr_events,"profile":self.store.load_game_profile(game["id"]),"sleep_seed":sleep_seed,"cache_capacity":50000})
         self.review_process=worker
         packet=None
         try:
@@ -9018,6 +9419,8 @@ class App:
         if self.closing:
             return
         self.closing=True
+        if self.directory_prepare_stop is not None:
+            self.directory_prepare_stop.set()
         with self.background_lock:
             for key in list(self.background_generations):
                 self.background_generations[key]+=1
@@ -9106,6 +9509,29 @@ class App:
             self.status.set("正在安全关闭：等待采集子进程退出："+"、".join(capture_pending))
             self.root.after(50,self._poll_shutdown)
             return
+        prepare_thread=self.directory_prepare_thread
+        if prepare_thread is not None and prepare_thread.is_alive():
+            if self.directory_prepare_stop is not None:
+                self.directory_prepare_stop.set()
+            try:
+                prepare_thread.join(0.02)
+            except Exception:
+                pass
+            if prepare_thread.is_alive():
+                if deadline_reached:
+                    self._forced_exit("文件夹准备线程未在关闭期限内退出")
+                    return
+                self.status.set("正在安全关闭：等待文件夹准备线程退出")
+                self.root.after(50,self._poll_shutdown)
+                return
+        self.directory_prepare_thread=None
+        self.directory_prepare_stop=None
+        if self.directory_prepare_candidate is not None:
+            try:
+                self.directory_prepare_candidate.close()
+            except Exception:
+                pass
+            self.directory_prepare_candidate=None
         with self.background_lock:
             background=[thread for thread in self.background_threads if thread.is_alive()]
         for thread in background:
@@ -9139,6 +9565,19 @@ class App:
             self.status.set("正在安全关闭：等待样本写入线程退出")
             self.root.after(100,self._poll_shutdown)
             return
+        self.status.set("正在安全关闭：停止AI工作进程与常驻键盘钩子")
+        if self.ai_worker is not None:
+            try:
+                self.ai_worker.close(2.0)
+            except Exception:
+                pass
+            self.ai_worker=None
+        if self.keyboard_monitor is not None:
+            try:
+                self.keyboard_monitor.stop(1.0)
+            except Exception:
+                pass
+            self.keyboard_monitor=None
         self.status.set("正在安全关闭：释放WGC、GDI和系统资源")
         try:
             if not self.api.close():
@@ -9155,6 +9594,16 @@ class App:
             self.status.set("采集资源关闭失败："+str(error))
             self.root.after(200,self._poll_shutdown)
             return
+        if self.data_directory_lock is not None:
+            try:
+                self.data_directory_lock.close()
+            except Exception:
+                pass
+            self.data_directory_lock=None
+        global PROGRAM_INSTANCE_LOCK
+        if PROGRAM_INSTANCE_LOCK is not None:
+            PROGRAM_INSTANCE_LOCK.close()
+            PROGRAM_INSTANCE_LOCK=None
         self.shutdown_started=True
         try:
             self.root.destroy()
@@ -9190,6 +9639,8 @@ class App:
         def discard():
             prepared=state.get("prepared")
             state["prepared"]=None
+            if self.directory_prepare_candidate is prepared:
+                self.directory_prepare_candidate=None
             if prepared is not None:
                 try:
                     prepared.close()
@@ -9200,6 +9651,9 @@ class App:
                 return
             state["closed"]=True
             state["generation"]+=1
+            self.directory_prepare_generation+=1
+            if self.directory_prepare_stop is not None:
+                self.directory_prepare_stop.set()
             discard()
             self.lifecycle.set_directory_phase("ready" if self.store is not None else "unselected")
             self._update_control_availability()
@@ -9210,6 +9664,9 @@ class App:
                 return
             discard()
             state["prepared"]=candidate
+            self.directory_prepare_candidate=candidate
+            self.directory_prepare_thread=None
+            self.directory_prepare_stop=None
             progress_var.set(100.0)
             status_var.set("数据库结构升级、原数据迁移、SHA-256清单、WAL/锁、quick_check、外键、schema和运行库清单全部通过。现在可以点击“确认”。")
             confirm.configure(state="normal")
@@ -9219,6 +9676,9 @@ class App:
         def prepared_failed(error,generation):
             if state["closed"] or generation!=state["generation"]:
                 return
+            self.directory_prepare_thread=None
+            self.directory_prepare_stop=None
+            self.directory_prepare_candidate=None
             status_var.set("目录初始化失败，当前已确认目录未改变："+str(error))
             confirm.configure(state="disabled")
             select.configure(state="normal")
@@ -9243,16 +9703,35 @@ class App:
             select.configure(state="disabled")
             self.lifecycle.set_directory_phase("preparing")
             self._update_control_availability()
+            if self.directory_prepare_stop is not None:
+                self.directory_prepare_stop.set()
             stop=threading.Event()
-            def task():
-                return prepare_data_directory(value,stop,lambda amount:self.ui(lambda amount=amount:progress_var.set(amount),"prepare_progress"),self.store,self.data_directory)
+            self.directory_prepare_stop=stop
+            self.directory_prepare_generation=generation
             def worker():
+                directory_lock=None
+                candidate=None
                 try:
-                    candidate=task()
+                    if self.data_directory is not None and same_directory(value,self.data_directory):
+                        directory_lock=self.data_directory_lock
+                    else:
+                        directory_lock=DataDirectoryLock(value).acquire()
+                    candidate=prepare_data_directory(value,stop,lambda amount:self.ui(lambda amount=amount:progress_var.set(amount),"prepare_progress"),self.store,self.data_directory)
+                    candidate.directory_lock=directory_lock
+                    candidate.directory_lock_owned=directory_lock is not self.data_directory_lock
                     self.ui(lambda candidate=candidate,generation=generation:prepared_ok(candidate,generation))
                 except Exception as error:
+                    if candidate is not None:
+                        try:
+                            candidate.close()
+                        except Exception:
+                            pass
+                    elif directory_lock is not None and directory_lock is not self.data_directory_lock:
+                        directory_lock.close()
                     self.ui(lambda error=error,generation=generation:prepared_failed(error,generation))
-            threading.Thread(target=worker,name="UniversalGameAI-PrepareDataDirectory",daemon=True).start()
+            thread=threading.Thread(target=worker,name="UniversalGameAI-PrepareDataDirectory",daemon=False)
+            self.directory_prepare_thread=thread
+            thread.start()
         def commit():
             candidate=state.get("prepared")
             if candidate is None:
@@ -9283,16 +9762,22 @@ class App:
             raise RuntimeError("候选文件夹无效")
         old_store=self.store
         old_base=self.data_directory
+        old_directory_lock=self.data_directory_lock
+        candidate_directory_lock=getattr(candidate,"directory_lock",None)
+        if candidate_directory_lock is None:
+            raise RuntimeError("候选文件夹未持有目录独占锁")
         old_selected=globals().get("SELECTED_DATA_DIR")
         old_env={key:os.environ.get(key) for key in ("UGAI_DATA_DIR","PIP_CACHE_DIR","TORCH_HOME","HF_HOME","HUGGINGFACE_HUB_CACHE","TRANSFORMERS_CACHE","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","TORCH_EXTENSIONS_DIR","CUDA_CACHE_PATH","NUMBA_CACHE_DIR","MPLCONFIGDIR","TMP","TEMP")}
         old_temp=tempfile.tempdir
         old_path=list(sys.path)
-        old_runtime=(self.runtime_installer,self.vision_runtime,self.ocr_runtime,globals().get("CURRENT_VISION_RUNTIME"),globals().get("CURRENT_OCR_RUNTIME"),getattr(self.api,"ai_runtime",None))
+        old_runtime=(self.runtime_installer,self.ai_worker,self.vision_runtime,self.ocr_runtime,globals().get("CURRENT_VISION_RUNTIME"),globals().get("CURRENT_OCR_RUNTIME"),getattr(self.api,"ai_runtime",None))
         old_selection=(self.selected_game,self.selected_window,self.window_recommendation,self.storage_fault)
         if candidate.same:
             candidate.closed=True
             candidate.store=None
             candidate.source_paused=False
+            candidate.directory_lock=None
+            candidate.directory_lock_owned=False
             self.lifecycle.set_directory_phase("ready")
             self._update_control_availability()
             return True
@@ -9310,7 +9795,7 @@ class App:
             verify_data_tree_manifest(staging,candidate.sha_manifest)
             (staging/".ugai_migration_manifest.json").write_text(json.dumps({"source":str(candidate.source_base) if candidate.source_base is not None else None,"destination":str(destination),"inventory":candidate.target_inventory,"sha256":candidate.sha_manifest,"confirmed":time.time()},ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
             for item in list(destination.iterdir()):
-                if item==staging or item==rollback:
+                if item==staging or item==rollback or item.name==".ugai.lock":
                     continue
                 os.replace(item,rollback/item.name)
             for item in list(staging.iterdir()):
@@ -9329,14 +9814,27 @@ class App:
                     raise RuntimeError("确认后迁移校验不一致："+str(key))
             base=configure_data_directory(destination)
             installer=RuntimeInstaller(base)
-            vision=OfflineVisionRuntime(base)
-            ocr=OfflineOCRRuntime(base)
+            worker=None
+            vision=None
+            ocr=None
+            if validate_runtime_manifest(base,False) is not None:
+                worker=AIWorkerClient(base,self._ai_worker_failed)
+                vision=VisionRuntimeProxy(worker)
+                ocr=OCRRuntimeProxy(worker)
             new_store.set_writer_error_callback(self._writer_status_changed)
             selected_game=new_store.selected_game()
             recommendation=new_store.load_window_descriptor()
             self.store=new_store
             self.data_directory=base
+            self.data_directory_lock=candidate_directory_lock
+            candidate.directory_lock=None
+            candidate.directory_lock_owned=False
+            self.write_audit=WritePathAudit(base)
+            self.acceptance_report=AcceptanceReport(base)
+            self.acceptance_report.set_environment(host_python=sys.version,host_bits=ctypes.sizeof(ctypes.c_void_p)*8,windows_build=int(sys.getwindowsversion().build) if os.name=="nt" else 0,fixed_runtime_python=FIXED_RUNTIME_PYTHON_VERSION)
+            self.write_audit.record("confirm_data_directory",base,True,{"build_hash":current_build_hash()})
             self.runtime_installer=installer
+            self.ai_worker=worker
             self.vision_runtime=vision
             self.ocr_runtime=ocr
             CURRENT_VISION_RUNTIME=vision
@@ -9347,7 +9845,7 @@ class App:
             self.window_recommendation=recommendation
             self.storage_fault=bool(new_store.read_only)
             self.lifecycle.set_directory_phase("ready")
-            self.lifecycle.set_runtime_ready(bool(vision.ready and ocr.ready))
+            self.lifecycle.set_runtime_ready(bool(vision is not None and vision.ready and ocr is not None and ocr.ready))
             self.data_dir_text.set(str(base))
             materialize_project_layout(base)
             self._update_runtime_status()
@@ -9365,7 +9863,20 @@ class App:
                     pass
             self.store=old_store
             self.data_directory=old_base
-            self.runtime_installer,self.vision_runtime,self.ocr_runtime,CURRENT_VISION_RUNTIME,CURRENT_OCR_RUNTIME,old_api_runtime=old_runtime
+            self.data_directory_lock=old_directory_lock
+            if candidate_directory_lock is not old_directory_lock:
+                try:
+                    candidate_directory_lock.close()
+                except Exception:
+                    pass
+            candidate.directory_lock=None
+            candidate.directory_lock_owned=False
+            if self.ai_worker is not None and self.ai_worker is not old_runtime[1]:
+                try:
+                    self.ai_worker.close(1.0)
+                except Exception:
+                    pass
+            self.runtime_installer,self.ai_worker,self.vision_runtime,self.ocr_runtime,CURRENT_VISION_RUNTIME,CURRENT_OCR_RUNTIME,old_api_runtime=old_runtime
             self.api.ai_runtime=old_api_runtime
             self.selected_game,self.selected_window,self.window_recommendation,self.storage_fault=old_selection
             SELECTED_DATA_DIR=old_selected
@@ -9378,7 +9889,7 @@ class App:
             tempfile.tempdir=old_temp
             if promoted:
                 for item in list(destination.iterdir()):
-                    if item==rollback:
+                    if item==rollback or item.name==".ugai.lock":
                         continue
                     if item.is_dir():
                         shutil.rmtree(item,ignore_errors=True)
@@ -9408,11 +9919,36 @@ class App:
         if old_store is not None and old_store is not new_store:
             if not old_store.close(5.0):
                 old_store.emergency_checkpoint("migration_source_close_timeout")
+        old_worker=old_runtime[1]
+        if old_worker is not None and old_worker is not self.ai_worker:
+            old_worker.close(2.0)
+        if old_directory_lock is not None and old_directory_lock is not self.data_directory_lock:
+            old_directory_lock.close()
         if any(rollback.iterdir()):
             pass
         else:
             rollback.rmdir()
         return True
+    def _ai_worker_failed(self,error):
+        self.api.block_input()
+        self.api.release_all_buttons()
+        self.lifecycle.set_runtime_ready(False)
+        message="AI工作进程异常，自动输入已立即锁定："+str(error)
+        if self.store is not None:
+            self.store.log_error("AI_WORKER_FAILED",error,mode=self.mode)
+        if self.mode_state!=MODE_IDLE:
+            self.ui(lambda:self.request_mode_stop("failed",message),"ai_worker_failed")
+        else:
+            self.ui(lambda:self.status.set(message),"ai_worker_failed_status")
+    def _start_ai_worker(self,base):
+        old=self.ai_worker
+        worker=AIWorkerClient(base,self._ai_worker_failed)
+        self.ai_worker=worker
+        self.vision_runtime=VisionRuntimeProxy(worker)
+        self.ocr_runtime=OCRRuntimeProxy(worker)
+        if old is not None and old is not worker:
+            old.close(2.0)
+        return self.vision_runtime,self.ocr_runtime
     def _update_runtime_status(self):
         vision=self.vision_runtime
         ocr=self.ocr_runtime
@@ -9466,8 +10002,7 @@ class App:
                 self.set_status("下载中："+value[-180:])
         marker=self.runtime_installer.run(self.stop_event,self.set_progress,line)
         global CURRENT_VISION_RUNTIME,CURRENT_OCR_RUNTIME
-        self.vision_runtime=OfflineVisionRuntime(self.data_directory)
-        self.ocr_runtime=OfflineOCRRuntime(self.data_directory)
+        self._start_ai_worker(self.data_directory)
         self.vision_runtime.require_ready()
         self.ocr_runtime.require_ready()
         CURRENT_VISION_RUNTIME=self.vision_runtime
@@ -10128,7 +10663,7 @@ def run_self_test(path=None):
     result={"status":"passed" if not failures else "failed","checks":checks,"failures":failures}
     sys.stdout.write(json.dumps(result,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n")
     return 0 if not failures else 1
-def run_windows_smoke_test():
+def run_windows_smoke_test(path=None):
     report={"status":"failed","checks":{},"details":{},"manual_required":[]}
     def record(name,value,detail=None):
         report["checks"][str(name)]=bool(value)
@@ -10146,13 +10681,26 @@ def run_windows_smoke_test():
     try:
         version=sys.getwindowsversion()
         record("Windows 11系统",int(version.major)==10 and int(version.build)>=22000,{"major":int(version.major),"build":int(version.build)})
-        with tempfile.TemporaryDirectory() as folder:
-            os.environ["LOCALAPPDATA"]=folder
+        persistent=Path(path).expanduser().resolve() if path else None
+        workspace=tempfile.TemporaryDirectory() if persistent is None else None
+        folder=Path(workspace.name) if workspace is not None else persistent.parent/(".ugai_acceptance_workspace_"+uuid.uuid4().hex)
+        folder.mkdir(parents=True,exist_ok=True)
+        try:
+            os.environ["LOCALAPPDATA"]=str(folder)
             enable_dpi_awareness()
             root=tk.Tk()
             app=App(root)
-            candidate=prepare_data_directory(Path(folder)/"data")
-            app._commit_prepared_directory(candidate)
+            data_path=persistent if persistent is not None else folder/"data"
+            directory_lock=DataDirectoryLock(data_path).acquire()
+            try:
+                candidate=prepare_data_directory(data_path)
+                candidate.directory_lock=directory_lock
+                candidate.directory_lock_owned=True
+                app._commit_prepared_directory(candidate)
+                directory_lock=None
+            finally:
+                if directory_lock is not None:
+                    directory_lock.close()
             root.deiconify()
             root.update_idletasks()
             root.update()
@@ -10213,7 +10761,60 @@ def run_windows_smoke_test():
                     except Exception as error:
                         identity_changes.append({"error":str(error)})
                 record("真实窗口移动缩放最小化重启观察",observe<=0 or bool(identity_changes),{"observe_seconds":observe,"changes":identity_changes})
-            report["manual_required"]=["按真实顺序完成：选择并确认文件夹、真实下载、游戏增删改选确认、选择雷电与普通窗口确认、学习、睡眠、训练、指导、结果已阅","在STARTING、RUNNING、STOPPING阶段分别按ESC并确认停止延迟","使用真实外部鼠标注入与非ESC键盘输入确认立即停机且学习session变为invalid","在100%、125%、150%缩放环境分别运行并确认DPI观测包含96、120、144"]
+            report["manual_required"]=["按真实顺序完成：选择并确认文件夹、真实下载、游戏增删改选确认、选择雷电与普通窗口确认、学习、睡眠、训练、指导、结果已阅","在STARTING、RUNNING、STOPPING阶段分别按ESC并确认停止延迟","使用真实外部鼠标和非ESC键盘输入确认立即停机且学习session变为invalid","在100%、125%、150%、200%及混合DPI、负坐标、跨屏环境完成验收"]
+            acceptance=app.acceptance_report or AcceptanceReport(app.data_directory)
+            acceptance.set_environment(windows_build=int(version.build),windows_major=int(version.major),host_python=sys.version,host_bits=ctypes.sizeof(ctypes.c_void_p)*8,fixed_runtime_python=FIXED_RUNTIME_PYTHON_VERSION,smoke_run=time.time())
+            acceptance.record_case("启动","control_panel_visible","passed" if visible else "failed",report["details"].get("控制面板真实可见",{}))
+            exact_buttons=set(app.control_buttons)==REQUIRED_DEFAULT_BUTTONS and len(app.control_buttons)==8
+            acceptance.record_case("默认界面","exact_eight_buttons","passed" if exact_buttons else "failed",{"buttons":sorted(app.control_buttons)})
+            folder_ok=bool(app.store is not None and app.lifecycle.data_ready and app.data_directory_lock is not None and app.data_directory_lock.locked)
+            acceptance.record_case("文件夹","select_prepare_confirm","passed" if folder_ok else "failed",{"directory":str(app.data_directory)})
+            migration_ok,migration_evidence=data_migration_contract_test()
+            acceptance.record_case("文件夹","migration_success","passed" if migration_ok else "failed",migration_evidence)
+            acceptance.record_case("文件夹","forced_failure_rollback","passed" if migration_evidence.get("failure_preserved") else "failed",migration_evidence)
+            acceptance.record_case("文件夹","prepare_cancel_cleanup","pending",{"reason":"必须在复制数据库、SHA-256、schema升级和原子替换各阶段强制退出"})
+            process_first=None
+            named_ok=False
+            try:
+                process_first=ProcessInstanceLock().acquire()
+                try:
+                    ProcessInstanceLock().acquire()
+                except RuntimeError:
+                    named_ok=True
+            finally:
+                if process_first is not None:
+                    process_first.close()
+            acceptance.record_case("单实例与目录锁","named_mutex","passed" if named_ok else "failed",{"name":"per-user named mutex"})
+            lock_second_failed=False
+            probe_lock=None
+            try:
+                probe_lock=DataDirectoryLock(app.data_directory).acquire()
+            except RuntimeError:
+                lock_second_failed=True
+            finally:
+                if probe_lock is not None:
+                    probe_lock.close()
+            acceptance.record_case("单实例与目录锁","directory_lock","passed" if lock_second_failed else "failed",{"path":str(app.data_directory/".ugai.lock")})
+            lock_record_ok=False
+            try:
+                lock_value=json.loads((app.data_directory/".ugai.lock").read_text(encoding="utf-8"))
+                lock_record_ok=all(lock_value.get(key) for key in ("pid","process_started_wall","build_hash","directory","nonce"))
+            except Exception:
+                lock_value={}
+            acceptance.record_case("单实例与目录锁","lock_record","passed" if lock_record_ok else "failed",lock_value)
+            runtime_manifest=validate_runtime_manifest(app.data_directory,True)
+            if runtime_manifest is not None:
+                acceptance.record_case("独立运行时","fixed_python","passed" if tuple(runtime_manifest.get("python_abi",[]))==FIXED_RUNTIME_PYTHON_ABI else "failed",runtime_manifest.get("python_executable"))
+                acceptance.record_case("独立运行时","host_abi_independent","passed",{"host":list(sys.version_info[:2]),"runtime":list(runtime_manifest.get("python_abi",[]))})
+                acceptance.record_case("独立运行时","worker_process","passed" if app.ai_worker is not None and app.ai_worker.alive() else "failed",{"alive":bool(app.ai_worker is not None and app.ai_worker.alive())})
+                embedded=runtime_manifest.get("resolution_source")=="embedded" and bool(runtime_manifest.get("embedded_lock_checksum"))
+                acceptance.record_case("独立运行时","embedded_wheel_lock","passed" if embedded else "failed",{"resolution_source":runtime_manifest.get("resolution_source","dynamic")})
+                acceptance.record_case("下载","locked_manifest","passed" if embedded else "failed",{"manifest":runtime_manifest.get("manifest_checksum")})
+            else:
+                for item,case in (("独立运行时","fixed_python"),("独立运行时","worker_process"),("独立运行时","embedded_wheel_lock"),("独立运行时","host_abi_independent"),("下载","locked_manifest")):
+                    acceptance.record_case(item,case,"not_run",{"reason":"尚未下载运行库"})
+            report["acceptance_report"]=str(acceptance.path)
+            report["strict_pass"]=acceptance.strict_passed()
             app.api.block_input()
             app.api.release_all_buttons()
             if app.store is not None:
@@ -10223,6 +10824,11 @@ def run_windows_smoke_test():
             app=None
             bridge=None
             root=None
+        finally:
+            if workspace is not None:
+                workspace.cleanup()
+            elif folder.exists():
+                shutil.rmtree(folder,ignore_errors=True)
         automated=[value for key,value in report["checks"].items() if key!="真实窗口移动缩放最小化重启观察"]
         report["status"]="passed" if automated and all(automated) else "needs_attention"
     except Exception as error:
@@ -10264,13 +10870,28 @@ def data_migration_contract_test():
             self.value=value
     class Api:
         ai_runtime=None
+    class FakeLock:
+        def __init__(self,path):
+            self.path=Path(path)/".ugai.lock"
+            self.closed=False
+        def close(self):
+            self.closed=True
+    def prepare_locked(path,**kwargs):
+        candidate=prepare_data_directory(path,**kwargs)
+        candidate.directory_lock=FakeLock(path)
+        candidate.directory_lock_owned=True
+        return candidate
     def fake_app(store,base):
         app=object.__new__(App)
         app.store=store
         app.data_directory=Path(base)
         app.runtime_installer=None
+        app.ai_worker=None
         app.vision_runtime=None
         app.ocr_runtime=None
+        app.data_directory_lock=FakeLock(base)
+        app.write_audit=None
+        app.acceptance_report=None
         app.lifecycle=ControlStateMachine()
         app.lifecycle.set_directory_phase("ready")
         app.api=Api()
@@ -10312,7 +10933,7 @@ def data_migration_contract_test():
             ocr_path.write_bytes(b"migration-ocr-file")
             source_inventory=database_inventory(source.db_path,source_path)
             configure_data_directory(source_path)
-            candidate=prepare_data_directory(target_path,source_store=source,source_base=source_path)
+            candidate=prepare_locked(target_path,source_store=source,source_base=source_path)
             unconfirmed=Path(SELECTED_DATA_DIR)==source_path and source.sample_writes_paused and not (target_path/"universal_game_ai.db").exists() and candidate.staging is not None and candidate.staging.exists()
             candidate.close()
             cancel_preserved=Path(SELECTED_DATA_DIR)==source_path and not source.sample_writes_paused and source.db.execute("SELECT COUNT(*) FROM games").fetchone()[0]==1 and not target_path.exists()
@@ -10320,10 +10941,10 @@ def data_migration_contract_test():
             (conflict_path/"foreign.txt").write_text("foreign",encoding="utf-8")
             conflict_rejected=False
             try:
-                prepare_data_directory(conflict_path,source_store=source,source_base=source_path)
+                prepare_locked(conflict_path,source_store=source,source_base=source_path)
             except RuntimeError:
                 conflict_rejected=True
-            failed_candidate=prepare_data_directory(failed_path,source_store=source,source_base=source_path)
+            failed_candidate=prepare_locked(failed_path,source_store=source,source_base=source_path)
             (failed_candidate.staging/"models"/"vision"/"migration.safetensors").write_bytes(b"tampered")
             failed_app=fake_app(source,source_path)
             failed=False
@@ -10332,7 +10953,7 @@ def data_migration_contract_test():
             except RuntimeError:
                 failed=True
             failure_preserved=failed and failed_app.store is source and failed_app.data_directory==source_path and not source.sample_writes_paused and source.db.execute("SELECT COUNT(*) FROM samples").fetchone()[0]==source_inventory["sample_count"] and model_path.exists()
-            candidate=prepare_data_directory(target_path,source_store=source,source_base=source_path)
+            candidate=prepare_locked(target_path,source_store=source,source_base=source_path)
             prepared_inventory=dict(candidate.target_inventory)
             app=fake_app(source,source_path)
             App._commit_prepared_directory(app,candidate)
@@ -10357,7 +10978,8 @@ def data_migration_contract_test():
                 os.environ[key]=value
         tempfile.tempdir=saved_temp
 def run_acceptance_test(path=None):
-    source_path=Path(path or __file__).resolve()
+    source_path=Path(__file__).resolve()
+    output_base=Path(path).expanduser().resolve() if path else None
     source=source_path.read_text(encoding="utf-8")
     report={"status":"failed","checks":{},"details":{},"manual_required":[]}
     failures=[]
@@ -10430,7 +11052,7 @@ def run_acceptance_test(path=None):
         record("结果弹窗只能点击已阅关闭",'text="已阅"' in result_source and 'WM_DELETE_WINDOW",confirm' not in result_source and 'WM_DELETE_WINDOW",refuse_close' in result_source and 'bind("<Escape>"' not in result_source and 'bind("<Return>"' not in result_source)
         migration_ok,migration_detail=data_migration_contract_test()
         record("真实文件夹迁移保持ID名称样本模型哈希且失败可回退",migration_ok,migration_detail)
-        record("Python ABI与动态空间估算覆盖常见Windows安装",SUPPORTED_PYTHON_ABIS=={(3,10),(3,11),(3,12),(3,13),(3,14)} and "12"+"GB" not in source and "required_runtime_space" in source and "required_migration_space" in source)
+        record("宿主Python ABI不再约束固定运行时",FIXED_RUNTIME_PYTHON_ABI==(3,12) and "_bootstrap_embedded_python" in source and ("下载仅支持"+"64位Python") not in source and "required_runtime_space" in source and "required_migration_space" in source)
         basic=BasicSafeAuthorizer()
         record("基础安全动作单session分级授权",basic.authorize("click|left",VersionedThresholdConfig.basic_safe_min_positive,VersionedThresholdConfig.basic_safe_min_consistency,1,True,True) and not basic.authorize("drag|left",100,1.0,4,True,True) and not basic.authorize("click|left",VersionedThresholdConfig.basic_safe_min_positive-1,1.0,1,True,True))
         machine=ControlStateMachine()
@@ -10465,6 +11087,13 @@ def run_acceptance_test(path=None):
         if os.name!="nt":
             report["manual_required"]=["在Windows 11运行 python main.py --windows-smoke-test 验证真实可见控制面板、真实窗口枚举和采集后端","在真实雷电窗口与普通窗口按规定顺序完成下载、游戏、窗口、学习、睡眠、训练、指导和已阅结果弹窗","在STARTING、RUNNING、STOPPING分别按ESC，并验证真实鼠标与非ESC键盘安全停机"]
             report["status"]="windows_required" if not failures else "failed"
+            if output_base is not None:
+                output_path=output_base/"audit"/"static_contract_report.json"
+                output_path.parent.mkdir(parents=True,exist_ok=True)
+                temporary=output_path.with_suffix(".json.tmp."+uuid.uuid4().hex)
+                temporary.write_text(json.dumps(report,ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
+                os.replace(temporary,output_path)
+                report["report_path"]=str(output_path)
             sys.stdout.write(json.dumps(report,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n")
             return 2 if not failures else 1
         original_local=os.environ.get("LOCALAPPDATA")
@@ -10476,8 +11105,17 @@ def run_acceptance_test(path=None):
                 enable_dpi_awareness()
                 root=tk.Tk()
                 app=App(root)
-                candidate=prepare_data_directory(Path(folder)/"data")
-                app._commit_prepared_directory(candidate)
+                data_path=Path(folder)/"data"
+                directory_lock=DataDirectoryLock(data_path).acquire()
+                try:
+                    candidate=prepare_data_directory(data_path)
+                    candidate.directory_lock=directory_lock
+                    candidate.directory_lock_owned=True
+                    app._commit_prepared_directory(candidate)
+                    directory_lock=None
+                finally:
+                    if directory_lock is not None:
+                        directory_lock.close()
                 root.deiconify()
                 root.update_idletasks()
                 root.update()
@@ -10501,13 +11139,13 @@ def run_acceptance_test(path=None):
                     root.tk.call(command)
                     root.update_idletasks()
                     popup_confirmed["close_refused"]=bool(dialog.winfo_exists())
-                    button=next((child for child in descendants(dialog) if isinstance(child,ttk.Button) and str(child.cget("text"))=="确认"),None)
+                    button=next((child for child in descendants(dialog) if isinstance(child,ttk.Button) and str(child.cget("text"))=="已阅"),None)
                     if button:
                         popup_confirmed["value"]=True
                         button.invoke()
                 root.after(100,inspect_popup)
                 app.show_info("验收结果","结果弹窗只能点击已阅按钮关闭")
-                record("Windows结果弹窗拒绝右上角关闭且确认可用",popup_confirmed["value"] and popup_confirmed["close_refused"])
+                record("Windows结果弹窗拒绝右上角关闭且已阅可用",popup_confirmed["value"] and popup_confirmed["close_refused"])
                 report["manual_required"]=["真实下载运行库后按规定顺序完成游戏增删改选、雷电与普通窗口确认、学习、睡眠、训练、指导","在STARTING、RUNNING、STOPPING分别按ESC","用真实鼠标和非ESC键盘验证安全停机"]
                 app.api.block_input()
                 app.api.release_all_buttons()
@@ -10538,6 +11176,13 @@ def run_acceptance_test(path=None):
     except Exception as error:
         report["details"]["fatal"]="".join(traceback.format_exception(type(error),error,error.__traceback__))
         report["status"]="failed"
+    if output_base is not None:
+        output_path=output_base/"audit"/"static_contract_report.json"
+        output_path.parent.mkdir(parents=True,exist_ok=True)
+        temporary=output_path.with_suffix(".json.tmp."+uuid.uuid4().hex)
+        temporary.write_text(json.dumps(report,ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
+        os.replace(temporary,output_path)
+        report["report_path"]=str(output_path)
     sys.stdout.write(json.dumps(report,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n")
     return 0 if report["status"]=="passed" else 1
 EXTENSION_SCHEMA_VERSION=3
@@ -10599,15 +11244,6 @@ def configure_data_directory(path):
     base=Path(path).expanduser().resolve()
     if not base.exists() or not base.is_dir():
         raise RuntimeError("文件夹尚未完成准备")
-    site=runtime_site_packages(base)
-    old_sites=[value for value in list(sys.path) if "runtime.current" in str(value) and str(value).endswith("site-packages")]
-    for value in old_sites:
-        try:
-            sys.path.remove(value)
-        except ValueError:
-            pass
-    if site.exists():
-        sys.path.insert(0,str(site))
     os.environ["UGAI_DATA_DIR"]=str(base)
     os.environ.pop("PIP_TARGET",None)
     os.environ["PIP_CACHE_DIR"]=str(base/"cache"/"pip")
@@ -10678,7 +11314,7 @@ def data_tree_manifest(base):
     root=Path(base)
     files=[]
     for item in sorted(root.rglob("*")):
-        if item.is_file() and item.name not in {".ugai_migration_manifest.json","universal_game_ai.db-wal","universal_game_ai.db-shm"}:
+        if item.is_file() and item.name not in {".ugai_migration_manifest.json",".ugai.lock","universal_game_ai.db-wal","universal_game_ai.db-shm"}:
             files.append({"path":item.relative_to(root).as_posix(),"size":int(item.stat().st_size),"sha256":sha256_file(item)})
     return {"created":time.time(),"files":files,"file_count":len(files),"total_bytes":sum(item["size"] for item in files)}
 def verify_data_tree_manifest(base,manifest):
@@ -10731,6 +11367,8 @@ class PreparedDataDirectory:
         self.source_paused=bool(source_store is not None and not self.same)
         self.promoted=False
         self.closed=False
+        self.directory_lock=None
+        self.directory_lock_owned=False
     def resume_source(self):
         if self.source_paused and self.source_store is not None:
             try:
@@ -10757,6 +11395,13 @@ class PreparedDataDirectory:
             if self.staging is not None and self.staging.exists() and not self.promoted:
                 shutil.rmtree(self.staging,ignore_errors=True)
             self.resume_source()
+            if self.directory_lock_owned and self.directory_lock is not None:
+                try:
+                    self.directory_lock.close()
+                except Exception:
+                    pass
+                self.directory_lock=None
+                self.directory_lock_owned=False
             if self.destination_created and self.destination.exists():
                 try:
                     if not any(self.destination.iterdir()):
@@ -10880,8 +11525,10 @@ def validate_runtime_manifest(base,verify_files=False):
         if not path.exists():
             return None
         raise RuntimeError("运行库清单、wheel锁或文件SHA-256校验失败")
-    if tuple(value.get("python_abi",[]))!=tuple(sys.version_info[:2]):
-        raise RuntimeError("运行库Python ABI与当前程序不一致")
+    if tuple(value.get("python_abi",[]))!=FIXED_RUNTIME_PYTHON_ABI:
+        raise RuntimeError("运行库不是固定的独立Python "+FIXED_RUNTIME_PYTHON_VERSION)
+    if safe_int(value.get("lock_manifest_version"),0)!=RUNTIME_LOCK_MANIFEST_VERSION:
+        raise RuntimeError("运行库锁清单版本不一致")
     if str(value.get("preprocess_hash",""))!=VISION_PREPROCESS_HASH:
         raise RuntimeError("运行库预处理版本不一致")
     freeze=value.get("pip_freeze")
@@ -10922,10 +11569,6 @@ def directory_runtime_manifest(base):
                 shutil.rmtree(current,ignore_errors=True)
         return None
 def prepare_data_directory(path,stop_event=None,progress=None,source_store=None,source_base=None):
-    if tuple(sys.version_info[:2]) not in SUPPORTED_PYTHON_ABIS:
-        raise RuntimeError("仅支持64位Python 3.10至3.14")
-    if ctypes.sizeof(ctypes.c_void_p)!=8:
-        raise RuntimeError("仅支持64位Python")
     destination=Path(path).expanduser().resolve()
     source_path=Path(source_base).expanduser().resolve() if source_base is not None else None
     if stop_event is not None and stop_event.is_set():
@@ -10942,10 +11585,10 @@ def prepare_data_directory(path,stop_event=None,progress=None,source_store=None,
         return PreparedDataDirectory(destination,None,source_store,directory_runtime_manifest(source_path),source_store,source_path,inventory,inventory,None,True,False)
     created=not destination.exists()
     destination.mkdir(parents=True,exist_ok=True)
-    for stale in list(destination.glob(".ugai_migration_*"))+list(destination.glob(".ugai_prepare_*")):
+    for stale in list(destination.glob(".ugai_migration_*"))+list(destination.glob(".ugai_prepare_*"))+list(destination.glob(".ugai_rollback_*")):
         if stale.is_dir():
             shutil.rmtree(stale,ignore_errors=True)
-    existing=list(destination.iterdir())
+    existing=[item for item in destination.iterdir() if item.name!=".ugai.lock"]
     reopening=False
     if existing:
         valid_existing,existing_reason=existing_data_directory_status(destination)
@@ -11052,12 +11695,90 @@ def prepare_data_directory(path,stop_event=None,progress=None,source_store=None,
             except OSError:
                 pass
         raise
+def _validated_download(url,target,expected_sha256,maximum_bytes,allowed_hosts=None,progress=None):
+    value=str(url)
+    parsed=urllib.parse.urlsplit(value)
+    allowed=set(allowed_hosts or RUNTIME_ALLOWED_DOWNLOAD_HOSTS)
+    if parsed.scheme.lower()!="https" or parsed.hostname not in allowed:
+        raise RuntimeError("下载地址不在允许域名锁内："+value)
+    destination=Path(target)
+    temporary=destination.with_suffix(destination.suffix+".part")
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler())
+    request=urllib.request.Request(value,headers={"User-Agent":"UniversalGameAI/"+str(FORMAT_VERSION)})
+    digest=hashlib.sha256()
+    size=0
+    try:
+        with opener.open(request,timeout=120) as response,temporary.open("wb") as handle:
+            final=urllib.parse.urlsplit(response.geturl())
+            if final.scheme.lower()!="https" or final.hostname not in allowed:
+                raise RuntimeError("最终重定向地址不在允许域名锁内："+response.geturl())
+            expected_length=safe_int(response.headers.get("Content-Length"),0,0)
+            if expected_length and expected_length>int(maximum_bytes):
+                raise RuntimeError("下载文件超过锁定大小上限")
+            while True:
+                block=response.read(1024*1024)
+                if not block:
+                    break
+                size+=len(block)
+                if size>int(maximum_bytes):
+                    raise RuntimeError("下载文件超过锁定大小上限")
+                digest.update(block)
+                handle.write(block)
+                if progress is not None:
+                    progress(size,expected_length)
+        if digest.hexdigest().lower()!=str(expected_sha256).lower():
+            raise RuntimeError("下载文件SHA-256与内嵌锁不一致")
+        os.replace(temporary,destination)
+        return {"url":value,"final_url":response.geturl(),"sha256":digest.hexdigest(),"size":size}
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+def _bootstrap_embedded_python(staging):
+    runtime=Path(staging)/"python"
+    runtime.mkdir(parents=True,exist_ok=True)
+    archive=Path(staging)/"python-runtime.zip"
+    pip_wheel=Path(staging)/("pip-"+FIXED_RUNTIME_PIP_VERSION+"-py3-none-any.whl")
+    _runtime_emit("progress",value=2.0,message="下载固定Python "+FIXED_RUNTIME_PYTHON_VERSION)
+    python_artifact=_validated_download(FIXED_RUNTIME_PYTHON_URL,archive,FIXED_RUNTIME_PYTHON_SHA256,FIXED_RUNTIME_PYTHON_MAX_BYTES)
+    _runtime_emit("progress",value=5.0,message="解压固定独立Python")
+    import zipfile
+    with zipfile.ZipFile(archive,"r") as bundle:
+        for info in bundle.infolist():
+            name=info.filename.replace("\\","/")
+            if name.startswith("/") or ".." in Path(name).parts:
+                raise RuntimeError("Python运行时压缩包包含越界路径")
+            bundle.extract(info,runtime)
+    archive.unlink()
+    site=runtime/"Lib"/"site-packages"
+    site.mkdir(parents=True,exist_ok=True)
+    pth=runtime/"python312._pth"
+    pth.write_text("python312.zip\n.\nLib\nLib\\site-packages\nimport site\n",encoding="utf-8")
+    _runtime_emit("progress",value=7.0,message="安装固定pip引导wheel")
+    pip_artifact=_validated_download(FIXED_RUNTIME_PIP_URL,pip_wheel,FIXED_RUNTIME_PIP_SHA256,FIXED_RUNTIME_PIP_MAX_BYTES)
+    with zipfile.ZipFile(pip_wheel,"r") as bundle:
+        for info in bundle.infolist():
+            name=info.filename.replace("\\","/")
+            if name.startswith("/") or ".." in Path(name).parts:
+                raise RuntimeError("pip wheel包含越界路径")
+            bundle.extract(info,site)
+    pip_wheel.unlink()
+    python=runtime/("python.exe" if os.name=="nt" else "python")
+    if not python.is_file():
+        raise RuntimeError("固定Python运行时缺少python.exe")
+    return python,{"python":python_artifact,"pip":pip_artifact}
 def _runtime_emit(kind,**values):
     packet={"kind":str(kind),**values}
     sys.stdout.write(json.dumps(packet,ensure_ascii=False,separators=(",",":"))+"\n")
     sys.stdout.flush()
-def _runtime_python(venv):
-    return Path(venv)/("Scripts/python.exe" if os.name=="nt" else "bin/python")
+def _runtime_python(runtime_root):
+    root=Path(runtime_root)
+    direct=root/"python"/("python.exe" if os.name=="nt" else "python")
+    if direct.exists():
+        return str(direct)
+    return str(root/("venv/Scripts/python.exe" if os.name=="nt" else "venv/bin/python"))
 def _runtime_worker_command(command,env,label):
     _runtime_emit("status",message=label)
     process=subprocess.Popen([str(value) for value in command],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding="utf-8",errors="replace",env=env)
@@ -11107,9 +11828,18 @@ def _runtime_download_locked_wheels(entries,wheelhouse,env):
         temporary=target.with_suffix(target.suffix+".part")
         digest=hashlib.sha256()
         size=0
+        source=urllib.parse.urlsplit(entry["url"])
+        if source.scheme.lower()!="https" or source.hostname not in RUNTIME_ALLOWED_DOWNLOAD_HOSTS:
+            raise RuntimeError("wheel下载地址不在允许域名锁内："+entry["filename"])
+        maximum=2*1024*1024*1024 if entry["name"].casefold().startswith(("torch","nvidia-")) else 512*1024*1024
         request=urllib.request.Request(entry["url"],headers={"User-Agent":"UniversalGameAI/"+str(FORMAT_VERSION)})
         with opener.open(request,timeout=120) as response,temporary.open("wb") as handle:
+            final=urllib.parse.urlsplit(response.geturl())
+            if final.scheme.lower()!="https" or final.hostname not in RUNTIME_ALLOWED_DOWNLOAD_HOSTS:
+                raise RuntimeError("wheel最终重定向地址不在允许域名锁内："+entry["filename"])
             expected_length=safe_int(response.headers.get("Content-Length"),0,0)
+            if expected_length and expected_length>maximum:
+                raise RuntimeError("wheel超过包级大小上限："+entry["filename"])
             while True:
                 block=response.read(1024*1024)
                 if not block:
@@ -11117,6 +11847,8 @@ def _runtime_download_locked_wheels(entries,wheelhouse,env):
                 handle.write(block)
                 digest.update(block)
                 size+=len(block)
+                if size>maximum:
+                    raise RuntimeError("wheel超过包级大小上限："+entry["filename"])
             if expected_length and size!=expected_length:
                 raise RuntimeError("wheel文件大小与HTTP元数据不一致："+entry["filename"])
         if digest.hexdigest().lower()!=entry["sha256"]:
@@ -11138,18 +11870,15 @@ def runtime_install_worker(request_path):
     base=Path(request["base"]).resolve()
     staging=Path(request["staging"]).resolve()
     vendor=str(request.get("vendor","unknown"))
-    if tuple(sys.version_info[:2]) not in SUPPORTED_PYTHON_ABIS or ctypes.sizeof(ctypes.c_void_p)!=8:
-        raise RuntimeError("安装进程仅支持64位Python 3.10至3.14")
+    if os.name!="nt":
+        raise RuntimeError("固定独立Python运行时只能在Windows 11安装")
     ensure_free_space(base,required_runtime_space(base),"运行库下载与安装")
     if staging.exists():
         shutil.rmtree(staging,ignore_errors=True)
     staging.mkdir(parents=True)
     try:
-        import venv
-        _runtime_emit("progress",value=3.0,message="创建独立虚拟环境")
-        venv_dir=staging/"venv"
-        venv.EnvBuilder(with_pip=True,clear=True,symlinks=False,upgrade_deps=False).create(venv_dir)
-        python=_runtime_python(venv_dir)
+        python_path,bootstrap_artifacts=_bootstrap_embedded_python(staging)
+        python=str(python_path)
         wheelhouse=staging/"wheelhouse"
         wheelhouse.mkdir()
         cache=staging/"pip_cache"
@@ -11157,8 +11886,8 @@ def runtime_install_worker(request_path):
         env.update({"PYTHONNOUSERSITE":"1","PIP_DISABLE_PIP_VERSION_CHECK":"1","PIP_NO_INPUT":"1","PIP_CACHE_DIR":str(cache),"TORCH_HOME":str(staging/"models"/"torch"),"HF_HOME":str(staging/"models"/"huggingface"),"HUGGINGFACE_HUB_CACHE":str(staging/"cache"/"huggingface_hub"),"TRANSFORMERS_CACHE":str(staging/"cache"/"transformers"),"XDG_CACHE_HOME":str(staging/"cache"),"PYTHONPYCACHEPREFIX":str(staging/"cache"/"pycache"),"TORCH_EXTENSIONS_DIR":str(staging/"cache"/"torch_extensions"),"CUDA_CACHE_PATH":str(staging/"cache"/"cuda"),"NUMBA_CACHE_DIR":str(staging/"cache"/"numba"),"MPLCONFIGDIR":str(staging/"cache"/"matplotlib"),"TMP":str(staging/"temp"),"TEMP":str(staging/"temp")})
         for name in ("models/torch","models/huggingface","models/ocr","cache","cache/pycache","cache/torch_extensions","cache/cuda","cache/numba","cache/matplotlib","temp"):
             (staging/name).mkdir(parents=True,exist_ok=True)
-        pins=runtime_pins_for_abi()
-        onnx_version=RUNTIME_ONNX_BY_ABI[tuple(sys.version_info[:2])]
+        pins=runtime_pins_for_abi(FIXED_RUNTIME_PYTHON_ABI)
+        onnx_version=RUNTIME_ONNX_BY_ABI[FIXED_RUNTIME_PYTHON_ABI]
         pins.append(("onnxruntime-gpu==" if vendor=="nvidia" else "onnxruntime-directml==")+onnx_version)
         torch_index=RUNTIME_TORCH_CUDA_INDEX if vendor=="nvidia" else RUNTIME_TORCH_CPU_INDEX
         report_path=staging/"resolution_report.json"
@@ -11195,9 +11924,7 @@ print(json.dumps({"python":sys.version,"torch":torch.__version__,"numpy":numpy._
         shutil.rmtree(wheelhouse,ignore_errors=True)
         shutil.rmtree(cache,ignore_errors=True)
         critical={}
-        site=runtime_site_packages(staging.parent/staging.name)
-        if not site.exists():
-            site=venv_dir/("Lib/site-packages" if os.name=="nt" else "lib/python"+str(sys.version_info.major)+"."+str(sys.version_info.minor)+"/site-packages")
+        site=staging/"python"/"Lib"/"site-packages"
         candidates=[python]
         for name in ("torch/__init__.py","numpy/__init__.py","safetensors/__init__.py"):
             candidate=site/name
@@ -11205,7 +11932,7 @@ print(json.dumps({"python":sys.version,"torch":torch.__version__,"numpy":numpy._
                 candidates.append(candidate)
         for candidate in candidates:
             critical[str(candidate.relative_to(staging))]=sha256_file(candidate)
-        manifest={"layout_version":RUNTIME_LAYOUT_VERSION,"created":time.time(),"python_abi":list(sys.version_info[:2]),"python_version":sys.version,"python_executable":"venv/"+("Scripts/python.exe" if os.name=="nt" else "bin/python"),"vendor":vendor,"index_urls":[RUNTIME_PYPI_INDEX,torch_index],"top_level_pins":pins,"resolved_wheels":wheels,"wheel_lock_checksum":wheel_lock_checksum,"pip_freeze":freeze,"validation":validation_result,"gpu_backend":validation_result.get("backend","cpu"),"gpu_device":validation_result.get("device","CPU"),"preprocess_hash":VISION_PREPROCESS_HASH,"critical_files":critical}
+        manifest={"layout_version":RUNTIME_LAYOUT_VERSION,"lock_manifest_version":RUNTIME_LOCK_MANIFEST_VERSION,"created":time.time(),"python_abi":list(FIXED_RUNTIME_PYTHON_ABI),"python_version":str(validation_result.get("python",FIXED_RUNTIME_PYTHON_VERSION)),"python_executable":"python/"+("python.exe" if os.name=="nt" else "python"),"python_artifact":bootstrap_artifacts["python"],"pip_artifact":bootstrap_artifacts["pip"],"vendor":vendor,"allowed_download_hosts":sorted(RUNTIME_ALLOWED_DOWNLOAD_HOSTS),"index_urls":[RUNTIME_PYPI_INDEX,torch_index],"top_level_pins":pins,"resolved_wheels":wheels,"wheel_lock_checksum":wheel_lock_checksum,"pip_freeze":freeze,"validation":validation_result,"gpu_backend":validation_result.get("backend","cpu"),"gpu_device":validation_result.get("device","CPU"),"preprocess_hash":VISION_PREPROCESS_HASH,"critical_files":critical,"resolution_source":"dynamic_first_resolution","embedded_lock_checksum":"","reproducibility":"wheel SHA-256 lock created before payload acceptance; strict publication requires an embedded transitive wheel lock and acceptance_report.json"}
         manifest["manifest_checksum"]=hashlib.sha256(canonical_bytes(manifest)).hexdigest()
         (staging/"runtime_manifest.json").write_text(json.dumps(manifest,ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
         _runtime_emit("progress",value=94.0,message="原子切换运行库")
@@ -11239,11 +11966,12 @@ def runtime_installer_test_worker(request_path,mode):
     staging.mkdir(parents=True,exist_ok=True)
     if str(mode)=="success":
         runtime=staging
-        venv_python=runtime/"venv"/("Scripts/python.exe" if os.name=="nt" else "bin/python")
-        venv_python.parent.mkdir(parents=True,exist_ok=True)
-        venv_python.write_bytes(b"self-test-runtime")
-        critical={str(venv_python.relative_to(runtime)):sha256_file(venv_python)}
-        manifest={"layout_version":RUNTIME_LAYOUT_VERSION,"created":time.time(),"python_abi":list(sys.version_info[:2]),"python_version":sys.version,"python_executable":str(venv_python.relative_to(runtime)),"vendor":"self-test","index_urls":[],"top_level_pins":[],"resolved_wheels":[{"filename":"self-test.whl","sha256":"0"*64,"size":0}],"wheel_lock_checksum":hashlib.sha256(canonical_bytes([{"filename":"self-test.whl","sha256":"0"*64,"size":0}])).hexdigest(),"pip_freeze":["self-test==1"],"validation":{"backend":"cpu","device":"self-test"},"gpu_backend":"cpu","gpu_device":"self-test","preprocess_hash":VISION_PREPROCESS_HASH,"critical_files":critical}
+        runtime_python=runtime/"python"/("python.exe" if os.name=="nt" else "python")
+        runtime_python.parent.mkdir(parents=True,exist_ok=True)
+        runtime_python.write_bytes(b"self-test-runtime")
+        critical={str(runtime_python.relative_to(runtime)):sha256_file(runtime_python)}
+        wheels=[{"filename":"self-test.whl","sha256":"0"*64,"size":0}]
+        manifest={"layout_version":RUNTIME_LAYOUT_VERSION,"lock_manifest_version":RUNTIME_LOCK_MANIFEST_VERSION,"created":time.time(),"python_abi":list(FIXED_RUNTIME_PYTHON_ABI),"python_version":FIXED_RUNTIME_PYTHON_VERSION,"python_executable":str(runtime_python.relative_to(runtime)),"python_artifact":{"url":"self-test","final_url":"self-test","sha256":"0"*64,"size":0},"pip_artifact":{"url":"self-test","final_url":"self-test","sha256":"0"*64,"size":0},"vendor":"self-test","allowed_download_hosts":sorted(RUNTIME_ALLOWED_DOWNLOAD_HOSTS),"index_urls":[],"top_level_pins":[],"resolved_wheels":wheels,"wheel_lock_checksum":hashlib.sha256(canonical_bytes(wheels)).hexdigest(),"pip_freeze":["self-test==1"],"validation":{"backend":"cpu","device":"self-test"},"gpu_backend":"cpu","gpu_device":"self-test","preprocess_hash":VISION_PREPROCESS_HASH,"critical_files":critical,"resolution_source":"self_test","embedded_lock_checksum":""}
         manifest["manifest_checksum"]=hashlib.sha256(canonical_bytes(manifest)).hexdigest()
         (runtime/"runtime_manifest.json").write_text(json.dumps(manifest,ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
         current=base/"runtime.current"
@@ -11313,8 +12041,6 @@ class RuntimeInstaller:
             shutil.rmtree(item,ignore_errors=True)
         recover_runtime_layout(self.base)
     def run(self,stop_event,on_progress=None,on_line=None):
-        if self.test_mode is None and (tuple(sys.version_info[:2]) not in SUPPORTED_PYTHON_ABIS or ctypes.sizeof(ctypes.c_void_p)!=8):
-            raise RuntimeError("下载仅支持64位Python 3.10至3.14")
         self.cancelled=False
         ensure_free_space(self.base,required_runtime_space(self.base),"运行库下载与安装")
         self._cleanup_staging()
@@ -11622,8 +12348,9 @@ class OfflineVisionRuntime:
                 offset=pixel*3
                 motion[pixel]=(abs(current[offset]-previous[offset])+abs(current[offset+1]-previous[offset+1])+abs(current[offset+2]-previous[offset+2]))//3
         return b"".join(channels)+bytes(motion)
-    def train(self,game_id,samples,stop_event=None,progress=None):
+    def train(self,game_id,samples,stop_event=None,progress=None,seed=None):
         self.require_ready()
+        sleep_seed=safe_int(seed,int(hashlib.sha256((str(game_id)+"|sleep").encode()).hexdigest()[:16],16),0,2**63-1)
         valid=[]
         for index,item in enumerate(samples or []):
             if isinstance(item,dict):
@@ -11660,14 +12387,16 @@ class OfflineVisionRuntime:
             arrays=arrays.transpose(0,3,1,2)
             labels=self.np.array([int(hashlib.sha256(item["action"].encode()).hexdigest()[:8],16)%2147483647 for item in valid],dtype=self.np.int64)
             total_steps=max(32,min(320,len(valid)*4))
-            generator=random.Random(int(hashlib.sha256((str(game_id)+"|contrastive").encode()).hexdigest()[:16],16)+self.trained_steps)
+            generator=random.Random(sleep_seed)
+            torch_generator=torch.Generator(device=self.device)
+            torch_generator.manual_seed(sleep_seed)
             for step in range(total_steps):
                 if stop_event is not None and stop_event.is_set():
                     raise InputStopped("GPU离线视觉模型训练已停止")
                 indexes=[generator.randrange(len(valid)) for _ in range(min(32,max(6,len(valid))))]
                 batch=torch.from_numpy(arrays[indexes].copy()).to(self.device)
                 label=torch.from_numpy(labels[indexes].copy()).to(self.device)
-                noisy=(batch+(torch.rand_like(batch)-0.5)*0.06).clamp(0,1)
+                noisy=(batch+(torch.rand(batch.shape,dtype=batch.dtype,device=self.device,generator=torch_generator)-0.5)*0.06).clamp(0,1)
                 latent,reconstruction=model(noisy)
                 embedding=torch.nn.functional.normalize(latent.mean(dim=(2,3)),dim=1)
                 similarity=embedding@embedding.T/0.2
@@ -11694,7 +12423,7 @@ class OfflineVisionRuntime:
             encoder.eval()
             self.model=encoder
             self.trained_steps+=total_steps
-            self._atomic_save(self.active_path,encoder.state_dict(),{"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":str(game_id),"trained_steps":self.trained_steps,"updated":time.time(),"preprocess_hash":VISION_PREPROCESS_HASH,"preprocess_signature":preprocess_signature(),"runtime_fingerprint":self.runtime_fingerprint(),"training_objectives":["reconstruction","action_conditioned_contrastive","temporal_consistency"],"raw_feature_preserved":True,"neural_feature_version":NEURAL_FEATURE_VERSION})
+            self._atomic_save(self.active_path,encoder.state_dict(),{"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":str(game_id),"trained_steps":self.trained_steps,"updated":time.time(),"preprocess_hash":VISION_PREPROCESS_HASH,"preprocess_signature":preprocess_signature(),"runtime_fingerprint":self.runtime_fingerprint(),"training_objectives":["reconstruction","action_conditioned_contrastive","temporal_consistency"],"raw_feature_preserved":True,"neural_feature_version":NEURAL_FEATURE_VERSION,"sleep_seed":sleep_seed})
             return self.manifest()
 class OfflineOCRRuntime:
     def __init__(self,base):
@@ -11843,6 +12572,268 @@ class OfflineOCRRuntime:
         if not selected:
             selected=[{"norm":[0.05,0.05,0.25,0.15],"score":0.0,"text":""},{"norm":[0.7,0.05,0.25,0.15],"score":0.0,"text":""},{"norm":[0.05,0.8,0.25,0.15],"score":0.0,"text":""},{"norm":[0.7,0.8,0.25,0.15],"score":0.0,"text":""}]
         return selected
+def _disable_network_access():
+    import socket
+    def denied(*args,**kwargs):
+        raise RuntimeError("离线AI工作进程禁止网络访问")
+    socket.socket=denied
+    socket.create_connection=denied
+    socket.getaddrinfo=denied
+    urllib.request.urlopen=denied
+    urllib.request.build_opener=denied
+class FileStopEvent:
+    def __init__(self,path):
+        self.path=Path(path) if path else None
+    def is_set(self):
+        return bool(self.path is not None and self.path.exists())
+    def set(self):
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True,exist_ok=True)
+            self.path.touch(exist_ok=True)
+    def wait(self,timeout=0.0):
+        deadline=time.monotonic()+max(0.0,float(timeout))
+        while not self.is_set() and time.monotonic()<deadline:
+            time.sleep(min(0.02,max(0.001,deadline-time.monotonic())))
+        return self.is_set()
+def ai_worker_main(base,address,auth_text,family):
+    from multiprocessing.connection import Client
+    auth=base64.urlsafe_b64decode(str(auth_text).encode("ascii"))
+    connection=Client(address,family=family,authkey=auth)
+    try:
+        vision=OfflineVisionRuntime(base)
+        ocr=OfflineOCRRuntime(base)
+        vision.require_ready()
+        ocr.require_ready()
+        _disable_network_access()
+        connection.send({"kind":"ready","status":{"device":vision.device_name,"vision_ready":vision.ready,"ocr_ready":ocr.ready}})
+        while True:
+            command=connection.recv()
+            if not isinstance(command,dict):
+                continue
+            request_id=str(command.get("id",""))
+            operation=str(command.get("operation",""))
+            payload=command.get("payload") if isinstance(command.get("payload"),dict) else {}
+            try:
+                if operation=="shutdown":
+                    connection.send({"kind":"result","id":request_id,"value":True})
+                    break
+                if operation=="status":
+                    value={"device":vision.device_name,"vision_ready":vision.ready,"ocr_ready":ocr.ready,"active_game":vision.active_game,"manifest":vision.manifest() if vision.active_game else None}
+                elif operation=="activate_game":
+                    value=vision.activate_game(str(payload.get("game_id","")))
+                elif operation=="vision_manifest":
+                    value=vision.manifest()
+                elif operation=="encode":
+                    value=vision.encode(bytes(payload.get("rgb",b"")),bytes(payload["previous"]) if payload.get("previous") is not None else None)
+                elif operation=="train":
+                    stop=FileStopEvent(payload.get("stop_path"))
+                    def progress(amount):
+                        connection.send({"kind":"progress","id":request_id,"value":float(amount)})
+                    value=vision.train(str(payload.get("game_id","")),list(payload.get("samples",[])),stop,progress,payload.get("sleep_seed"))
+                elif operation=="ocr_recognize_region":
+                    value=ocr.recognize_region(dict(payload.get("frame",{})),payload.get("norm"))
+                else:
+                    raise RuntimeError("未知AI工作进程操作："+operation)
+                connection.send({"kind":"result","id":request_id,"value":value})
+            except BaseException as error:
+                connection.send({"kind":"error","id":request_id,"message":str(error),"traceback":traceback.format_exc()[-10000:]})
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+class AIWorkerClient:
+    def __init__(self,base,on_failure=None):
+        from multiprocessing.connection import Listener
+        self.base=Path(base).resolve()
+        self.on_failure=on_failure
+        self.lock=threading.RLock()
+        self.connection=None
+        self.process=None
+        self.closed=False
+        self.active_stop_path=None
+        self.status={}
+        self.auth=os.urandom(32)
+        self.family="AF_PIPE" if os.name=="nt" else "AF_INET"
+        self.address=(r"\\.\pipe\UniversalGameAI-"+uuid.uuid4().hex) if os.name=="nt" else ("127.0.0.1",0)
+        listener=Listener(self.address,family=self.family,authkey=self.auth)
+        actual_address=listener.address
+        python=runtime_python_path(self.base)
+        if not python.is_file():
+            listener.close()
+            raise RuntimeError("固定独立Python工作进程不存在")
+        env=os.environ.copy()
+        env.update({"PYTHONNOUSERSITE":"1","UGAI_DATA_DIR":str(self.base),"PIP_NO_INDEX":"1","TORCH_HOME":str(self.base/"models"/"torch"),"HF_HOME":str(self.base/"models"/"huggingface"),"HUGGINGFACE_HUB_CACHE":str(self.base/"cache"/"huggingface_hub"),"TRANSFORMERS_CACHE":str(self.base/"cache"/"transformers"),"XDG_CACHE_HOME":str(self.base/"cache"),"PYTHONPYCACHEPREFIX":str(self.base/"cache"/"pycache"),"TORCH_EXTENSIONS_DIR":str(self.base/"cache"/"torch_extensions"),"CUDA_CACHE_PATH":str(self.base/"cache"/"cuda"),"NUMBA_CACHE_DIR":str(self.base/"cache"/"numba"),"MPLCONFIGDIR":str(self.base/"cache"/"matplotlib"),"TMP":str(self.base/"temp"),"TEMP":str(self.base/"temp")})
+        address_text=actual_address if isinstance(actual_address,str) else json.dumps(list(actual_address),separators=(",",":"))
+        command=[str(python),str(Path(__file__).resolve()),"--ai-worker",str(self.base),str(address_text),base64.urlsafe_b64encode(self.auth).decode("ascii"),self.family]
+        flags=0x08000000 if os.name=="nt" else 0
+        self.process=subprocess.Popen(command,env=env,creationflags=flags,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        accepted=queue.Queue(maxsize=1)
+        def acceptor():
+            try:
+                accepted.put((True,listener.accept()))
+            except BaseException as error:
+                accepted.put((False,error))
+        thread=threading.Thread(target=acceptor,name="UniversalGameAI-AIWorkerAccept",daemon=True)
+        thread.start()
+        try:
+            ok,value=accepted.get(timeout=30.0)
+        except queue.Empty:
+            self._terminate_process()
+            listener.close()
+            raise RuntimeError("AI工作进程连接超时")
+        listener.close()
+        if not ok:
+            self._terminate_process()
+            raise RuntimeError("AI工作进程连接失败："+str(value))
+        self.connection=value
+        if not self.connection.poll(120.0):
+            self.close(0.2)
+            raise RuntimeError("AI工作进程初始化超时")
+        hello=self.connection.recv()
+        if not isinstance(hello,dict) or hello.get("kind")!="ready":
+            self.close(0.2)
+            raise RuntimeError("AI工作进程初始化协议无效")
+        self.status=dict(hello.get("status",{}))
+    def _terminate_process(self):
+        process=self.process
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=1.0)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+    def _failed(self,error):
+        if self.on_failure is not None:
+            try:
+                self.on_failure(error)
+            except Exception:
+                pass
+    def request_stop(self):
+        path=self.active_stop_path
+        if path is not None:
+            try:
+                Path(path).touch(exist_ok=True)
+            except Exception:
+                pass
+    def request(self,operation,payload=None,timeout=120.0,progress=None):
+        with self.lock:
+            if self.closed or self.connection is None or self.process is None or self.process.poll() is not None:
+                error=RuntimeError("AI工作进程不可用")
+                self._failed(error)
+                raise error
+            request_id=uuid.uuid4().hex
+            stop_path=None
+            data=dict(payload) if isinstance(payload,dict) else {}
+            if operation=="train":
+                stop_path=self.base/"temp"/("ai_stop_"+request_id)
+                try:
+                    stop_path.unlink()
+                except OSError:
+                    pass
+                data["stop_path"]=str(stop_path)
+                self.active_stop_path=stop_path
+            try:
+                self.connection.send({"id":request_id,"operation":str(operation),"payload":data})
+                deadline=time.monotonic()+max(1.0,float(timeout))
+                while True:
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0 or not self.connection.poll(min(0.2,max(0.01,remaining))):
+                        if self.process.poll() is not None:
+                            raise RuntimeError("AI工作进程异常退出")
+                        if remaining<=0:
+                            raise RuntimeError("AI工作进程请求超时："+str(operation))
+                        continue
+                    packet=self.connection.recv()
+                    if not isinstance(packet,dict) or str(packet.get("id",""))!=request_id:
+                        continue
+                    if packet.get("kind")=="progress":
+                        if progress is not None:
+                            progress(packet.get("value",0.0))
+                        continue
+                    if packet.get("kind")=="error":
+                        raise RuntimeError(str(packet.get("message","AI工作进程失败"))+"\n"+str(packet.get("traceback","")))
+                    if packet.get("kind")=="result":
+                        return packet.get("value")
+            except BaseException as error:
+                self._failed(error)
+                raise
+            finally:
+                if stop_path is not None:
+                    try:
+                        stop_path.unlink()
+                    except OSError:
+                        pass
+                    self.active_stop_path=None
+    def alive(self):
+        return bool(not self.closed and self.process is not None and self.process.poll() is None)
+    def close(self,timeout=2.0):
+        if self.closed:
+            return True
+        self.request_stop()
+        try:
+            if self.connection is not None and self.process is not None and self.process.poll() is None:
+                self.request("shutdown",{},max(1.0,float(timeout)))
+        except Exception:
+            pass
+        self.closed=True
+        try:
+            if self.connection is not None:
+                self.connection.close()
+        except Exception:
+            pass
+        self._terminate_process()
+        return not self.alive()
+class VisionRuntimeProxy:
+    def __init__(self,worker):
+        self.worker=worker
+        self.ready=True
+        self.error=""
+        self.active_game=None
+        self.device_name=str(worker.status.get("device","独立AI工作进程"))
+        self.trained_steps=0
+    def require_ready(self):
+        if not self.worker.alive():
+            self.ready=False
+            raise RuntimeError("AI工作进程不可用")
+        return True
+    def activate_game(self,game_id):
+        self.require_ready()
+        value=self.worker.request("activate_game",{"game_id":str(game_id)},180.0)
+        self.active_game=str(game_id)
+        if isinstance(value,dict):
+            self.trained_steps=safe_int(value.get("trained_steps"),self.trained_steps)
+        return value
+    def manifest(self):
+        self.require_ready()
+        value=self.worker.request("vision_manifest",{},60.0)
+        if isinstance(value,dict):
+            self.trained_steps=safe_int(value.get("trained_steps"),self.trained_steps)
+        return value
+    def encode(self,rgb,previous_rgb=None):
+        self.require_ready()
+        return self.worker.request("encode",{"rgb":bytes(rgb),"previous":bytes(previous_rgb) if previous_rgb is not None else None},30.0)
+    def train(self,game_id,samples,stop_event=None,progress=None,seed=None):
+        self.require_ready()
+        return self.worker.request("train",{"game_id":str(game_id),"samples":list(samples),"sleep_seed":safe_int(seed,0,0,2**63-1)},7200.0,progress)
+class OCRRuntimeProxy:
+    def __init__(self,worker):
+        self.worker=worker
+        self.ready=True
+        self.error=""
+    def require_ready(self):
+        if not self.worker.alive():
+            self.ready=False
+            raise RuntimeError("AI工作进程不可用")
+        return True
+    def recognize_region(self,frame,norm):
+        self.require_ready()
+        return self.worker.request("ocr_recognize_region",{"frame":dict(frame),"norm":norm},45.0)
 def _rect_iou(first,second):
     ax,ay,aw,ah=[safe_float(value) for value in first]
     bx,by,bw,bh=[safe_float(value) for value in second]
@@ -12079,10 +13070,11 @@ def run_strict_requirement_tests(path=None):
     machine.set_directory_phase("ready")
     download=machine.begin("下载")
     machine.request_stop("stopped","ESC")
+    download_stopped=download.is_set()
     machine.finish()
     machine.set_runtime_ready(True)
     run=machine.begin("学习")
-    check("单一状态机与严格前置条件",initial and preparing and download.is_set() and run is not None and machine.state==MODE_STARTING and '"选择文件夹":not running' in availability and '"下载":not running and data_ready' in availability)
+    check("单一状态机与严格前置条件",initial and preparing and download_stopped and run is download and not run.is_set() and machine.state==MODE_STARTING and '"选择文件夹":not running' in availability and '"下载":not running and data_ready' in availability)
     machine.request_stop("stopped","ESC")
     machine.finish()
     with tempfile.TemporaryDirectory() as old_folder,tempfile.TemporaryDirectory() as new_parent:
@@ -12152,7 +13144,7 @@ def run_strict_requirement_tests(path=None):
         target=runtime/"x.bin"
         target.write_bytes(b"x")
         wheels=[{"filename":"x.whl","sha256":"0"*64,"size":1}]
-        manifest={"layout_version":RUNTIME_LAYOUT_VERSION,"python_abi":list(sys.version_info[:2]),"preprocess_hash":VISION_PREPROCESS_HASH,"pip_freeze":["x==1"],"resolved_wheels":wheels,"wheel_lock_checksum":hashlib.sha256(canonical_bytes(wheels)).hexdigest(),"critical_files":{"x.bin":sha256_file(target)}}
+        manifest={"layout_version":RUNTIME_LAYOUT_VERSION,"lock_manifest_version":RUNTIME_LOCK_MANIFEST_VERSION,"python_abi":list(FIXED_RUNTIME_PYTHON_ABI),"preprocess_hash":VISION_PREPROCESS_HASH,"pip_freeze":["x==1"],"resolved_wheels":wheels,"wheel_lock_checksum":hashlib.sha256(canonical_bytes(wheels)).hexdigest(),"critical_files":{"x.bin":sha256_file(target)}}
         manifest["manifest_checksum"]=hashlib.sha256(canonical_bytes(manifest)).hexdigest()
         (runtime/"runtime_manifest.json").write_text(json.dumps(manifest),encoding="utf-8")
         accepted=validate_runtime_manifest(base,True) is not None
@@ -12269,7 +13261,7 @@ def run_strict_requirement_tests(path=None):
     sleep_source=method_source("App","start_sleep")
     sleep_controller="\n".join(text.splitlines()[classes["ReviewController"].lineno-1:classes["ReviewController"].end_lineno])
     check("睡眠离线且经验结构明确","self.review_controller.run" in sleep_source and "SendInput" not in sleep_controller and "GetCursorPos" not in sleep_controller and "SetForegroundWindow" not in sleep_controller and all(value in sleep_controller for value in ('"state"','"action"','"next_state"','"result"','"reward"','"experience_model"')))
-    check("Python ABI与空间估算动态化",SUPPORTED_PYTHON_ABIS=={(3,10),(3,11),(3,12),(3,13),(3,14)} and "required_runtime_space" in text and "required_migration_space" in text and "12"+"GB" not in text)
+    check("宿主Python ABI已消除且空间估算动态化",FIXED_RUNTIME_PYTHON_ABI==(3,12) and "_bootstrap_embedded_python" in text and '"python_executable":"python/' in text and "required_runtime_space" in text and "required_migration_space" in text and ("下载仅支持"+"64位Python") not in text)
     check("无MonkeyPatch且按钮绑定最终方法",not assignments and all(value in app_build for value in ("self.choose_data_directory","self.start_download","self.open_game_dialog","self.open_window_dialog","self.start_learning","self.start_sleep","self.start_training","self.start_ask")))
     try:
         tokens=list(tokenize.tokenize(io.BytesIO(source_path.read_bytes()).readline))
@@ -12280,8 +13272,45 @@ def run_strict_requirement_tests(path=None):
     result={"status":"passed" if not failures else "failed","checks":checks,"failures":failures}
     sys.stdout.write(json.dumps(result,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n")
     return 0 if not failures else 1
+def show_acknowledge_only_startup(message):
+    try:
+        enable_dpi_awareness()
+        root=tk.Tk()
+        root.withdraw()
+        win=tk.Toplevel(root)
+        win.title("通用游戏AI")
+        fit_window(win,560,260,420,220)
+        win.transient(root)
+        frame=ttk.Frame(win,padding=20)
+        frame.pack(fill="both",expand=True)
+        ttk.Label(frame,text=str(message),wraplength=500,justify="left").pack(fill="both",expand=True)
+        def close():
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            root.destroy()
+        ttk.Button(frame,text="已阅",command=close).pack(fill="x",pady=(16,0),ipady=7)
+        win.protocol("WM_DELETE_WINDOW",lambda:(win.bell(),win.lift()))
+        win.grab_set()
+        root.mainloop()
+    except Exception:
+        pass
+def strict_acceptance_gate(path):
+    report=AcceptanceReport(path)
+    result=report.strict_passed()
+    sys.stdout.write(json.dumps(report.data,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n")
+    return 0 if result else 1
 def main():
     multiprocessing.freeze_support()
+    if "--ai-worker" in sys.argv:
+        index=sys.argv.index("--ai-worker")
+        base=sys.argv[index+1]
+        address_text=sys.argv[index+2]
+        auth=sys.argv[index+3]
+        family=sys.argv[index+4]
+        address=address_text if family=="AF_PIPE" else tuple(json.loads(address_text))
+        raise SystemExit(ai_worker_main(base,address,auth,family) or 0)
     if "--runtime-install-worker" in sys.argv:
         index=sys.argv.index("--runtime-install-worker")
         request=sys.argv[index+1] if index+1<len(sys.argv) else ""
@@ -12296,9 +13325,23 @@ def main():
     if "--self-test" in sys.argv:
         raise SystemExit(run_self_test())
     if "--windows-smoke-test" in sys.argv:
-        raise SystemExit(run_windows_smoke_test())
+        index=sys.argv.index("--windows-smoke-test")
+        target=sys.argv[index+1] if index+1<len(sys.argv) and not sys.argv[index+1].startswith("--") else None
+        raise SystemExit(run_windows_smoke_test(target))
     if "--acceptance-test" in sys.argv:
-        raise SystemExit(run_acceptance_test())
+        index=sys.argv.index("--acceptance-test")
+        target=sys.argv[index+1] if index+1<len(sys.argv) and not sys.argv[index+1].startswith("--") else None
+        raise SystemExit(run_acceptance_test(target))
+    if "--strict-acceptance" in sys.argv:
+        index=sys.argv.index("--strict-acceptance")
+        base=sys.argv[index+1] if index+1<len(sys.argv) else ""
+        raise SystemExit(strict_acceptance_gate(base))
+    global PROGRAM_INSTANCE_LOCK
+    try:
+        PROGRAM_INSTANCE_LOCK=ProcessInstanceLock().acquire()
+    except Exception as error:
+        show_acknowledge_only_startup(str(error))
+        return
     enable_dpi_awareness()
     root=tk.Tk()
     holder={"app":None}
