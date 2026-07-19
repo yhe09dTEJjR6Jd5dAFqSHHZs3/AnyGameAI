@@ -59,7 +59,9 @@ SQUARED_DIFF=tuple(value*value for value in range(-255,256))
 FEATURE_ALGORITHM_VERSION=4
 ACTION_ALGORITHM_VERSION=6
 DATABASE_SCHEMA_VERSION=8
-MODEL_SCHEMA_VERSION=2
+MODEL_SCHEMA_VERSION=3
+POLICY_MODEL_SCHEMA_VERSION=2
+DEFAULT_POLICY_SCORE_WEIGHTS={"bc":60.0,"q":45.0,"success":35.0,"risk":45.0,"ood":55.0}
 DEFAULT_SAMPLE_BUDGET=1500
 MAX_SAMPLES=6000
 MAX_PROTOTYPES=320
@@ -560,6 +562,46 @@ def visual_perceptual_hash(feature):
     for bit in values:
         value=(value<<1)|bit
     return format(value,"016x")
+def perceptual_hash_hamming(first,second):
+    try:
+        return (int(str(first),16)^int(str(second),16)).bit_count()
+    except (TypeError,ValueError):
+        return 64
+def normalized_policy_score_weights(value=None):
+    source=value if isinstance(value,dict) else {}
+    return {name:safe_float(source.get(name,default),default,0.0,500.0) for name,default in DEFAULT_POLICY_SCORE_WEIGHTS.items()}
+def policy_experience_row(experience_model,state_hash,cluster_id):
+    if not isinstance(experience_model,dict):
+        return {}
+    state_action=experience_model.get("state_action")
+    if isinstance(state_action,dict):
+        row=state_action.get(str(state_hash)+"|"+str(cluster_id))
+        if isinstance(row,dict):
+            return row
+        priors=experience_model.get("action_prior",{})
+        row=priors.get(str(cluster_id)) if isinstance(priors,dict) else None
+        return row if isinstance(row,dict) else {}
+    row=experience_model.get(str(state_hash)+"|"+str(cluster_id))
+    return row if isinstance(row,dict) else {}
+def summarize_episode_metrics(experiences):
+    by_episode=defaultdict(list)
+    for item in experiences or []:
+        if isinstance(item,dict):
+            by_episode[str(item.get("episode_id") or item.get("session") or "legacy")].append(item)
+    rows=[]
+    for episode,items in by_episode.items():
+        ordered=sorted(items,key=lambda item:safe_int(item.get("step_id"),0))
+        rows.append({"episode_id":episode,"steps":len(ordered),"reward":sum(safe_float(item.get("reward_t",item.get("reward",0.0)),0.0) for item in ordered),
+            "success":any(bool(item.get("success")) for item in ordered),"failure":any(bool(item.get("failure")) for item in ordered),
+            "human_overrides":sum(1 for item in ordered if item.get("human_override")),
+            "duration":max(0.0,safe_float(ordered[-1].get("created_t",0.0),0.0)-safe_float(ordered[0].get("created_t",0.0),0.0)) if ordered else 0.0})
+    total=len(rows)
+    return {"episodes":total,"task_success_rate":sum(1 for row in rows if row["success"])/max(1,total),
+        "failure_rate":sum(1 for row in rows if row["failure"])/max(1,total),
+        "average_actions":sum(row["steps"] for row in rows)/max(1,total),
+        "average_completion_time":sum(row["duration"] for row in rows if row["success"])/max(1,sum(1 for row in rows if row["success"])),
+        "human_override_count":sum(row["human_overrides"] for row in rows),
+        "mean_episode_reward":sum(row["reward"] for row in rows)/max(1,total)}
 def visual_scene_key(item):
     feature=feature_bytes(item.get("f"))
     plane=feature[:PIXELS]
@@ -599,26 +641,64 @@ class TaskAgentPolicy:
         self.game_id=str(self.profile.get("game_id",""))
         self.success_states=frozenset(str(value) for value in self.profile.get("success_states",[]))
         self.failure_states=frozenset(str(value) for value in self.profile.get("failure_states",[]))
+        self.success_hash_distance=safe_int(self.profile.get("success_hash_distance",6),6,0,32)
+        self.failure_hash_distance=safe_int(self.profile.get("failure_hash_distance",6),6,0,32)
+        self.terminal_confirm_frames=safe_int(self.profile.get("terminal_confirm_frames",2),2,1,8)
+        self._terminal_candidate=""
+        self._terminal_streak=0
+        self.last_classification={"state":"neutral","success_probability":0.0,"failure_probability":0.0,"progress_score":0.0,"confirmed":False}
     def allowed_action(self,action):
         family=action_family_key(action)
         return bool(family and family in self.allowed)
     def state_hash(self,feature):
         return visual_perceptual_hash(feature)
+    def _hash_probability(self,value,states,threshold):
+        if not states:
+            return 0.0,64
+        distance=min(perceptual_hash_hamming(value,item) for item in states)
+        scale=max(1,threshold+2)
+        return max(0.0,min(1.0,1.0-distance/scale)),distance
     def classify(self,feature):
         value=self.state_hash(feature)
-        if value in self.success_states:
-            return "success",safe_float(self.profile.get("success_reward",1.0),1.0)
-        if value in self.failure_states:
-            return "failure",safe_float(self.profile.get("failure_reward",-1.0),-1.0)
+        success_probability,success_distance=self._hash_probability(value,self.success_states,self.success_hash_distance)
+        failure_probability,failure_distance=self._hash_probability(value,self.failure_states,self.failure_hash_distance)
+        progress_score=0.0
+        semantic_terminal=""
         hub=globals().get("SEMANTIC_EVENT_HUB")
         event=hub.latest(self.game_id or None,1.5) if hub is not None else None
         if event:
-            if event.get("terminal")=="success":
-                return "success",1.0
-            if event.get("terminal")=="failure":
-                return "failure",-1.0
-            return "neutral",max(-0.25,min(0.25,safe_float(event.get("progress"),0.0)*0.25))
-        return "neutral",0.0
+            semantic_terminal=str(event.get("terminal") or "")
+            progress_score=max(-1.0,min(1.0,safe_float(event.get("progress"),0.0)))
+            if semantic_terminal=="success":
+                success_probability=1.0
+            elif semantic_terminal=="failure":
+                failure_probability=1.0
+        candidate=""
+        if semantic_terminal=="success" or success_distance<=self.success_hash_distance and success_probability>=failure_probability:
+            candidate="success"
+        elif semantic_terminal=="failure" or failure_distance<=self.failure_hash_distance:
+            candidate="failure"
+        if candidate and candidate==self._terminal_candidate:
+            self._terminal_streak+=1
+        elif candidate:
+            self._terminal_candidate=candidate
+            self._terminal_streak=1
+        else:
+            self._terminal_candidate=""
+            self._terminal_streak=0
+        confirmed=bool(candidate and self._terminal_streak>=self.terminal_confirm_frames)
+        state=candidate if confirmed else "neutral"
+        reward=0.0
+        if state=="success":
+            reward=safe_float(self.profile.get("success_reward",1.0),1.0)
+        elif state=="failure":
+            reward=safe_float(self.profile.get("failure_reward",-1.0),-1.0)
+        else:
+            reward=max(-0.25,min(0.25,progress_score*0.25))
+        self.last_classification={"state":state,"candidate":candidate,"success_probability":round(success_probability,6),
+            "failure_probability":round(failure_probability,6),"progress_score":round(progress_score,6),"confirmed":confirmed,
+            "confirmation_streak":self._terminal_streak,"confirmation_required":self.terminal_confirm_frames}
+        return state,reward
     def register(self,before,action,after,changed):
         before_hash=self.state_hash(before); after_hash=self.state_hash(after) if after is not None else ""
         state,reward=self.classify(after if after is not None else before)
@@ -626,11 +706,14 @@ class TaskAgentPolicy:
             self.failures+=1
         else:
             self.failures=0
-        self.history.append({"before":before_hash,"action":action_signature(action),"after":after_hash,"state":state,"reward":reward,"changed":bool(changed)})
-        return {"state":state,"reward":reward,"failures":self.failures,"stop":self.failures>=self.max_failures}
+        record={"before":before_hash,"action":action_signature(action),"after":after_hash,"state":state,"reward":reward,"changed":bool(changed)}
+        record.update(self.last_classification)
+        self.history.append(record)
+        return {"state":state,"reward":reward,"failures":self.failures,"stop":self.failures>=self.max_failures,**self.last_classification}
     @staticmethod
     def sequence_penalty(history,cluster_id,sequence_model):
         return calculate_sequence_penalty(history,cluster_id,sequence_model)
+
 def profile_checksum(profile):
     value=dict(profile) if isinstance(profile,dict) else {}
     value.pop("updated",None)
@@ -5336,6 +5419,7 @@ class LearningExecution:
         self.last_action_feature=None
         self.last_action_changed=True
         self.state_since=time.monotonic()
+        self.step_id=0
 
     def preflight(self):
         self.game=self.phase.get("game") or self.host.require_game()
@@ -5403,10 +5487,13 @@ class LearningExecution:
         if not complete:
             self.invalid_frames+=1
             return None
-        return self.host.sample_context(
+        context=self.host.sample_context(
             self.last_action_signature,self.last_action_time,self.last_action_changed,
             frame.get("motion_valid",False),self.session_id,frame.get("method","unknown"),"one_shot",temporal,
         )
+        context.update({"episode_id":self.session_id,"step_id":self.step_id,"action_delay":round(max(0.0,time.monotonic()-self.last_action_time),4) if self.last_action_time else None,
+            "human_override":False,"trajectory_schema_version":2})
+        return context
 
     def save(self,frame,action,source,weight=1.0,cursor_point=None):
         if frame is None or not frame.get("usable_for_learning"):
@@ -5437,6 +5524,7 @@ class LearningExecution:
             self.duplicates+=1
             return
         self.learned+=1
+        self.step_id+=1
         signature=action_signature(action)
         self.recent_actions.append(signature)
         self.last_action_signature=signature
@@ -5879,19 +5967,21 @@ class ReviewController:
         step_penalty=safe_float(profile.get("step_penalty",-0.01),-0.01,-1.0,0.0)
         success_reward=safe_float(profile.get("success_reward",1.0),1.0,-10.0,10.0)
         failure_reward=safe_float(profile.get("failure_reward",-1.0),-1.0,-10.0,10.0)
+        gamma=safe_float(profile.get("offline_discount",0.97),0.97,0.0,0.999)
         experiences=[]
-        aggregates=defaultdict(lambda:{"count":0,"reward_sum":0.0,"success":0,"failure":0,"neutral":0,"next_states":Counter()})
         by_session=defaultdict(list)
         for item in samples:
             by_session[self.session_of(item)].append(item)
         for session,items in sorted(by_session.items()):
             ordered=sorted(items,key=lambda item:(safe_float(item.get("created"),0.0),str(item.get("checksum",""))))
+            episode=[]
             for index,item in enumerate(ordered):
                 if len(experiences)%64==0 and self.context.callbacks.should_stop():
                     raise InputStopped("睡眠已停止")
                 next_item=ordered[index+1] if index+1<len(ordered) else item
                 start=safe_float(item.get("created"),0.0)
-                end=safe_float(next_item.get("created"),start)+1.5
+                next_created=safe_float(next_item.get("created"),start)
+                end=next_created if index+1<len(ordered) else start+1.5
                 matched=[entry.get("event",{}) for entry in events if start<=safe_float(entry.get("created"),0.0)<=end]
                 terminal=""
                 progress=0.0
@@ -5907,30 +5997,63 @@ class ReviewController:
                 reward=step_penalty+progress*0.5
                 result="neutral"
                 if terminal=="success":
-                    reward+=success_reward
-                    result="success"
+                    reward+=success_reward; result="success"
                 elif terminal=="failure":
-                    reward+=failure_reward
-                    result="failure"
+                    reward+=failure_reward; result="failure"
                 elif progress>0:
                     result="progress"
                 elif progress<0:
                     result="regress"
                 action_id=str(item.get("_action_cluster") or item.get("_canonical_action_signature") or action_signature(item.get("a")))
-                state=visual_perceptual_hash(item["f"])
-                next_state=visual_perceptual_hash(next_item["f"])
-                experience={"session":session,"state":state,"action":action_id,"next_state":next_state,"result":result,"reward":round(reward,6),"ocr_events":ocr}
-                experiences.append(experience)
-                key=state+"|"+action_id
-                row=aggregates[key]
-                row["count"]+=1
-                row["reward_sum"]+=reward
-                row["success" if result=="success" else "failure" if result=="failure" else "neutral"]+=1
-                row["next_states"][next_state]+=1
-        model={}
-        for key,row in aggregates.items():
-            model[key]={"count":row["count"],"mean_reward":round(row["reward_sum"]/max(1,row["count"]),6),"success":row["success"],"failure":row["failure"],"neutral":row["neutral"],
+                state=visual_perceptual_hash(item["f"]); next_state=visual_perceptual_hash(next_item["f"])
+                context=item.get("context",{}) if isinstance(item.get("context"),dict) else {}
+                done=bool(terminal in {"success","failure"} or index+1>=len(ordered))
+                action_delay=safe_float(context.get("action_delay",max(0.0,next_created-start)),max(0.0,next_created-start),0.0,60.0)
+                experience={"episode_id":str(context.get("episode_id") or session),"step_id":safe_int(context.get("step_id",index),index,0),
+                    "state_t":state,"action_t":action_id,"state_t+1":next_state,"reward_t":round(reward,6),"done":done,
+                    "success":result=="success","failure":result=="failure","result":result,"progress_score":round(progress,6),
+                    "action_delay":round(action_delay,6),"human_override":bool(context.get("human_override") or str(item.get("source","")).startswith("teach")),
+                    "created_t":start,"created_t+1":next_created,"visual_change":round(visual_distance(item["f"],next_item["f"]),6),"ocr_events":ocr,
+                    "session":session,"state":state,"action":action_id,"next_state":next_state,"reward":round(reward,6)}
+                episode.append(experience)
+            running=0.0
+            for experience in reversed(episode):
+                running=safe_float(experience["reward_t"],0.0)+(0.0 if experience["done"] else gamma*running)
+                experience["return_t"]=round(running,6)
+            experiences.extend(episode)
+        state_rows=defaultdict(lambda:{"count":0,"reward_sum":0.0,"return_sum":0.0,"success":0,"failure":0,"neutral":0,"next_states":Counter(),"override":0})
+        action_rows=defaultdict(lambda:{"count":0,"reward_sum":0.0,"return_sum":0.0,"success":0,"failure":0,"neutral":0,"next_states":Counter(),"override":0})
+        state_action_ids={}
+        for experience in experiences:
+            state_key=experience["state_t"]+"|"+experience["action_t"]
+            state_action_ids[state_key]=experience["action_t"]
+            for row in (state_rows[state_key],action_rows[experience["action_t"]]):
+                row["count"]+=1; row["reward_sum"]+=experience["reward_t"]; row["return_sum"]+=experience["return_t"]
+                row["success"]+=int(experience["success"]); row["failure"]+=int(experience["failure"]); row["neutral"]+=int(not experience["success"] and not experience["failure"])
+                row["override"]+=int(experience["human_override"]); row["next_states"][experience["state_t+1"]]+=1
+        def finish(row):
+            count=max(1,row["count"]); terminal=max(0,row["success"]+row["failure"]); alpha=1.0
+            success_probability=(row["success"]+alpha)/(terminal+2*alpha) if terminal else 0.0
+            failure_probability=(row["failure"]+alpha)/(terminal+2*alpha) if terminal else 0.0
+            uncertainty=min(1.0,1.0/math.sqrt(count)+0.5*(1.0-min(1.0,terminal/count)))
+            return {"count":row["count"],"mean_reward":round(row["reward_sum"]/count,6),"q_value":round(row["return_sum"]/count,6),
+                "success":row["success"],"failure":row["failure"],"neutral":row["neutral"],"success_probability":round(success_probability,6),
+                "risk_probability":round(failure_probability,6),"uncertainty":round(uncertainty,6),"human_override_rate":round(row["override"]/count,6),
                 "next_states":dict(row["next_states"].most_common(8))}
+        state_model={key:finish(row) for key,row in state_rows.items()}
+        action_model={key:finish(row) for key,row in action_rows.items()}
+        temperature=safe_float(profile.get("awr_temperature",0.5),0.5,0.05,10.0)
+        baseline=sum(row["q_value"]*row["count"] for row in action_model.values())/max(1,sum(row["count"] for row in action_model.values()))
+        for row in action_model.values():
+            advantage=row["q_value"]-baseline
+            row["advantage"]=round(advantage,6); row["awr_weight"]=round(math.exp(max(-4.0,min(4.0,advantage/temperature))),6)
+        for key,row in state_model.items():
+            prior=action_model.get(state_action_ids.get(key),{})
+            advantage=row["q_value"]-safe_float(prior.get("q_value",baseline),baseline)
+            row["advantage"]=round(advantage,6); row["awr_weight"]=round(math.exp(max(-4.0,min(4.0,advantage/temperature))),6)
+        model={"schema_version":POLICY_MODEL_SCHEMA_VERSION,"algorithm":"conservative_return_regression+advantage_weighted_behavior_cloning",
+            "gamma":gamma,"awr_temperature":temperature,"value_baseline":round(baseline,6),"total_count":len(experiences),
+            "state_action":state_model,"action_prior":action_model,"episode_metrics":summarize_episode_metrics(experiences)}
         return experiences,model
     def run(self):
         return ReviewRunner(ModeContext.from_host(self.host),self,self.host,False).run()
@@ -5945,7 +6068,7 @@ class ReviewController:
         try:
             samples,stats=host.store.load_samples(game["id"],MAX_SAMPLES)
             rgb_samples=[item for item in samples if sample_rgb_valid(item.get("rgb"))]
-            host.set_status("睡眠阶段：正在用RGB样本执行动作条件对比学习和时序一致性优化")
+            host.set_status("睡眠阶段：正在用RGB轨迹执行同状态增强对比学习、显式相邻帧时序学习和负时序分离")
             sleep_seed,sleep_seed_evidence=deterministic_sleep_seed(game["id"],rgb_samples)
             host.sleep_seed=sleep_seed
             host.sleep_seed_evidence=sleep_seed_evidence
@@ -6312,7 +6435,8 @@ class ReviewExecution:
             "samples":len(self.decorrelated),"training_samples":len(self.train),"holdout_samples":len(self.holdout),"invalid_samples":self.stats["invalid"],
             "action_clusters":len(self.action_clusters),"rejection_constraints":self.rejection_constraints,"prototypes":self.prototypes,"capture_backends":self.train_methods,
             "validation":self.validation,"training_checksums":self.train_checksums,"holdout_checksums":self.holdout_checksums,"sequence_model":self.sequence_model,
-            "experiences":experiences,"experience_model":experience_model,"model_binding":model_binding_from_samples(self.train),
+            "experiences":experiences,"experience_model":experience_model,"episode_metrics":summarize_episode_metrics(experiences),
+            "policy_score_weights":normalized_policy_score_weights(profile.get("policy_score_weights")),"model_binding":model_binding_from_samples(self.train),
             "safety_profile_checksum":profile_checksum(profile),"stopped":False}
 
     def report_lines(self):
@@ -6417,6 +6541,9 @@ class TrainingExecution:
         self.state_since=time.monotonic()
         self.action_hits=defaultdict(deque)
         self.snapshot_last_check=0.0
+        self.guidance_requests=0
+        self.last_guidance_reason=""
+        self.guidance_request_last_time=0.0
 
     def preflight(self):
         self.game=self.phase.get("game") or self.host.require_game()
@@ -6655,6 +6782,12 @@ class TrainingExecution:
         decision=self.host.evaluate_action_candidates(ranked)
         if not decision.get("accepted"):
             self.reset_candidate()
+            now=time.monotonic()
+            reason=str(decision.get("reason","识别不确定"))
+            if reason!=self.last_guidance_reason or now-self.guidance_request_last_time>=2.0:
+                self.guidance_requests+=1
+                self.guidance_request_last_time=now
+            self.last_guidance_reason=reason
             self.host.set_input_status("等待连续确认")
             self.host.set_confidence("训练置信度："+str(round(float(decision.get("confidence",0.0))*100,1))+"%")
             suffix="；安全探索仅保持等待，不产生鼠标输入" if self.profile.get("exploration_enabled") else "；不执行动作并等待指导"
@@ -6872,7 +7005,8 @@ class TrainingExecution:
         details={"strict_input_violation":self.isolation.kind,"task_history":list(self.agent_policy.history),
             "training_snapshot_checksum":self.training_snapshot_checksum,"snapshot_guarded":True,
             "coordinate_audit":{"sent":self.actions,"outside":0,"client_rect":list(self.host.api.client_rect(int(self.target["hwnd"])))},
-            "keyboard_events":self.keyboard_count,"external_mouse_events":self.mouse_count}
+            "keyboard_events":self.keyboard_count,"external_mouse_events":self.mouse_count,"guidance_requests":self.guidance_requests,
+            "last_guidance_reason":self.last_guidance_reason,"terminal_classification":dict(self.agent_policy.last_classification)}
         return ModeResult(status,summary,details)
 
     def run(self):
@@ -7147,6 +7281,7 @@ class TeachingController:
                         temporal["previous_action_changed_frame"]=True
                         policy=str(entry.get("repeat_policy","one_shot"))
                         context=app.sample_context(recent_actions[-1] if recent_actions else "",0,True,frame.get("motion_valid",False),session_id,frame.get("method","unknown"),policy,temporal)
+                        context.update({"episode_id":session_id,"step_id":safe_int(app.ask_counts.get("saved"),0),"action_delay":None,"human_override":True,"trajectory_schema_version":2})
                         if kind!="choose":
                             raise RuntimeError("指导主流程仅接受A/B/C/D或E跳过")
                         action=normalize_action(entry.get("a"))
@@ -7390,7 +7525,9 @@ class DataStore:
                 self.logger.write("DATABASE_LIGHT_CHECKPOINT_FAILED",error)
     def default_game_profile(self):
         return {"goal":"模仿已学习的鼠标操作并在不确定时停止","allowed_families":["no_op","click|left","move","hover","scroll_v|1","scroll_v|-1"],"max_consecutive_failures":3,"exploration_enabled":False,
-            "restart_action":None,"success_states":[],"failure_states":[],"success_reward":1.0,"failure_reward":-1.0,"step_penalty":-0.01,"updated":0.0}
+            "restart_action":None,"success_states":[],"failure_states":[],"success_hash_distance":6,"failure_hash_distance":6,"terminal_confirm_frames":2,
+            "success_reward":1.0,"failure_reward":-1.0,"step_penalty":-0.01,"offline_discount":0.97,"awr_temperature":0.5,
+            "policy_score_weights":dict(DEFAULT_POLICY_SCORE_WEIGHTS),"updated":0.0}
     def load_game_profile(self,gid):
         profile=self.default_game_profile()
         try:
@@ -7416,6 +7553,12 @@ class DataStore:
         value["success_states"]=sorted({str(item) for item in value.get("success_states",[]) if str(item)})
         value["failure_states"]=sorted({str(item) for item in value.get("failure_states",[]) if str(item)})
         value["max_consecutive_failures"]=safe_int(value.get("max_consecutive_failures",3),3,1,20)
+        value["success_hash_distance"]=safe_int(value.get("success_hash_distance",6),6,0,32)
+        value["failure_hash_distance"]=safe_int(value.get("failure_hash_distance",6),6,0,32)
+        value["terminal_confirm_frames"]=safe_int(value.get("terminal_confirm_frames",2),2,1,8)
+        value["offline_discount"]=safe_float(value.get("offline_discount",0.97),0.97,0.0,0.999)
+        value["awr_temperature"]=safe_float(value.get("awr_temperature",0.5),0.5,0.05,10.0)
+        value["policy_score_weights"]=normalized_policy_score_weights(value.get("policy_score_weights"))
         value["exploration_enabled"]=bool(value.get("exploration_enabled",False))
         value["restart_action"]=normalize_action(value.get("restart_action")) if value.get("restart_action") else None
         value["updated"]=time.time()
@@ -8870,7 +9013,7 @@ class DataStore:
             )
             if not binding_valid:
                 return False
-            if not isinstance(item.get("sequence_model"),dict) or len(str(item.get("safety_profile_checksum","")))!=64:
+            if not isinstance(item.get("sequence_model"),dict) or not isinstance(item.get("experience_model"),dict) or not isinstance(item.get("policy_score_weights"),dict) or len(str(item.get("safety_profile_checksum","")))!=64:
                 return False
             prototypes=item.get("prototypes")
             if not isinstance(prototypes,list) or not prototypes or len(prototypes)>MAX_PROTOTYPES:
@@ -11180,7 +11323,7 @@ class AppModeMixin:
             model_token=prototype_collection_checksum(prototypes)
         feature_digest=hashlib.blake2b(feature_bytes(feature),digest_size=16).digest()
         coarse_digest=hashlib.blake2b(query_coarse,digest_size=8).digest()
-        visual_cache_key=("visual-v3",model_token,feature_digest,coarse_digest,backend,exact_limit)
+        visual_cache_key=("visual-v4",model_token,feature_digest,coarse_digest,backend,exact_limit)
         visual_matches=self.candidate_cache.get(visual_cache_key)
         if visual_matches is None:
             worker=getattr(self,"ai_worker",None)
@@ -11192,6 +11335,8 @@ class AppModeMixin:
             visual_matches=tuple((safe_int(item.get("index"),-1),safe_float(item.get("exact_score"),float("inf"))) for item in visual_matches if isinstance(item,dict))
             self.candidate_cache[visual_cache_key]=visual_matches
         sequence_model=runtime_model.get("sequence_model",{}) if active_runtime else {}
+        experience_model=runtime_model.get("experience_model",{}) if active_runtime else {}
+        policy_weights=normalized_policy_score_weights(runtime_model.get("policy_score_weights",{})) if active_runtime else normalized_policy_score_weights()
         recent_actions=query_temporal.get("recent_actions",[last_action_signature])
         grouped=defaultdict(list)
         for position,(index,raw) in enumerate(visual_matches):
@@ -11202,8 +11347,7 @@ class AppModeMixin:
             proto=prototypes[index]
             if "authorized" in proto and not proto.get("authorized"):
                 continue
-            methods=proto.get("capture_methods",frozenset())
-            methods=frozenset(str(value) for value in methods)
+            methods=frozenset(str(value) for value in proto.get("capture_methods",frozenset()))
             if methods and backend not in methods:
                 continue
             expected=str(proto.get("previous_action",""))
@@ -11215,60 +11359,70 @@ class AppModeMixin:
             sequence_penalty=calculate_sequence_penalty(recent_actions,cluster_id,sequence_model)
             if cluster_id:
                 grouped[cluster_id].append((raw+previous_penalty+temporal_penalty+sequence_penalty,raw,tdistance,proto))
+        total_support=sum(max(1,max(int(item[3].get("action_support",item[3].get("support",0))) for item in items)) for items in grouped.values())
+        query_state=visual_perceptual_hash(feature)
         result=[]
         for cluster_id,items in grouped.items():
             items.sort(key=lambda item:item[0])
-            best_score,best_distance,best_temporal,best_proto=items[0]
+            visual_best,visual_distance_value,best_temporal,best_proto=items[0]
             action=normalize_action(best_proto.get("a"))
             if action is None:
                 continue
-            vote_score=best_score if len(items)==1 else 0.88*best_score+0.12*items[1][0]
-            result.append({
-                "cluster_id":cluster_id,
-                "canonical_action_signature":str(best_proto.get("canonical_action_signature") or action_signature(action)),
-                "score":vote_score,
-                "best_score":best_score,
-                "distance":best_distance,
-                "temporal_distance":best_temporal,
-                "proto":best_proto,
-                "a":action,
-                "support":max(int(item[3].get("action_support",item[3].get("support",0))) for item in items),
-                "prototype_votes":len(items),
-            })
-        result.sort(key=lambda item:item["score"])
+            visual_score=visual_best if len(items)==1 else 0.88*visual_best+0.12*items[1][0]
+            support=max(int(item[3].get("action_support",item[3].get("support",0))) for item in items)
+            row=policy_experience_row(experience_model,query_state,cluster_id)
+            awr_weight=safe_float(row.get("awr_weight",1.0),1.0,0.01,100.0)
+            bc_probability=max(0.0,min(1.0,support/max(1,total_support)*math.sqrt(awr_weight)))
+            q_value=safe_float(row.get("q_value",row.get("mean_reward",0.0)),0.0)
+            q_normalized=math.tanh(q_value/2.0)
+            success_probability=safe_float(row.get("success_probability",0.0),0.0,0.0,1.0)
+            risk_probability=safe_float(row.get("risk_probability",0.0),0.0,0.0,1.0)
+            learned_uncertainty=safe_float(row.get("uncertainty",1.0 if not row else 0.5),0.5,0.0,1.0)
+            threshold=max(1.0,safe_float(best_proto.get("threshold",100.0),100.0))
+            distance_ood=max(0.0,min(1.0,visual_distance_value/threshold))
+            temporal_ood=max(0.0,min(1.0,best_temporal/max(0.05,safe_float(best_proto.get("temporal_threshold",0.25),0.25))))
+            support_ood=1.0/math.sqrt(max(1,support))
+            ood_uncertainty=max(0.0,min(1.0,0.45*distance_ood+0.25*temporal_ood+0.15*support_ood+0.15*learned_uncertainty))
+            policy_adjustment=(-policy_weights["bc"]*bc_probability-policy_weights["q"]*q_normalized-policy_weights["success"]*success_probability
+                +policy_weights["risk"]*risk_probability+policy_weights["ood"]*ood_uncertainty)
+            final_cost=max(0.0,visual_score+policy_adjustment)
+            result.append({"cluster_id":cluster_id,"canonical_action_signature":str(best_proto.get("canonical_action_signature") or action_signature(action)),
+                "score":final_cost,"visual_score":visual_score,"best_score":visual_best,"distance":visual_distance_value,"temporal_distance":best_temporal,
+                "proto":best_proto,"a":action,"support":support,"prototype_votes":len(items),"bc_probability":bc_probability,"q_value":q_value,
+                "success_probability":success_probability,"risk_probability":risk_probability,"ood_uncertainty":ood_uncertainty,"policy_adjustment":policy_adjustment,
+                "policy_weights":policy_weights,"experience_count":safe_int(row.get("count"),0),"advantage":safe_float(row.get("advantage",0.0),0.0),"awr_weight":awr_weight})
+        result.sort(key=lambda item:(item["score"],item["visual_score"],-item["support"]))
         return result
     def evaluate_action_candidates(self,ranked):
         if not ranked:
             return {"accepted":False,"confidence":0.0,"reason":"没有候选或停止请求"}
-        best=ranked[0]
-        second=ranked[1] if len(ranked)>1 else None
-        proto=best["proto"]
+        best=ranked[0]; second=ranked[1] if len(ranked)>1 else None; proto=best["proto"]
         strict_multiplier,min_support,margin_ratio=tuple(proto.get("strictness") or self.action_strictness(best["a"]))
         threshold=float(proto["threshold"])/strict_multiplier
         second_score=second["score"] if second else float("inf")
         margin=second_score-best["score"]
-        required_gap=max(float(proto.get("minimum_second_candidate_gap",16.0)),best["score"]*0.12)
-        margin_ok=math.isinf(second_score) or best["score"]<second_score*margin_ratio and margin>required_gap
-        support=int(best.get("support",0))
-        rejected_distance=proto.get("nearest_rejected_distance")
+        required_gap=max(6.0,min(40.0,float(proto.get("minimum_second_candidate_gap",16.0))*0.5),abs(best["score"])*0.08)
+        margin_ok=math.isinf(second_score) or margin>required_gap
+        support=int(best.get("support",0)); rejected_distance=proto.get("nearest_rejected_distance")
         rejection_ok=rejected_distance is None or best["distance"]<float(rejected_distance)*0.65
         temporal_ok=float(best.get("temporal_distance",1.0))<=float(proto.get("temporal_threshold",0.0))
         query_backend=str((proto.get("temporal_cached") or temporal_from_context(proto.get("temporal",{}))).get("capture_method","unknown"))
-        ambiguous=bool(proto.get("ambiguous",False))
-        authorized=bool(proto.get("authorized",True))
-        accepted=authorized and not ambiguous and best["distance"]<threshold and margin_ok and support>=min_support and rejection_ok and temporal_ok
-        confidence=max(0.0,min(1.0,1.0-best["distance"]/max(1.0,threshold)))*(1.0-min(1.0,float(best.get("temporal_distance",1.0))))
-        if not authorized:
-            reason="动作簇未通过独立session验证，拒绝执行"
-        elif ambiguous:
-            reason="视觉与短时序状态仍对应不同动作，必须指导"
-        elif not temporal_ok:
-            reason="最近3至5帧、最近动作、状态时长或鼠标位置不匹配"
-        else:
-            reason="未达到动作阈值、差距或支持数要求"
+        ambiguous=bool(proto.get("ambiguous",False)); authorized=bool(proto.get("authorized",True))
+        risk_ok=float(best.get("risk_probability",0.0))<0.55
+        ood_ok=float(best.get("ood_uncertainty",1.0))<0.82
+        accepted=authorized and not ambiguous and best["distance"]<threshold and margin_ok and support>=min_support and rejection_ok and temporal_ok and risk_ok and ood_ok
+        visual_confidence=max(0.0,min(1.0,1.0-best["distance"]/max(1.0,threshold)))*(1.0-min(1.0,float(best.get("temporal_distance",1.0))))
+        policy_confidence=max(0.0,min(1.0,0.35*best.get("bc_probability",0.0)+0.25*best.get("success_probability",0.0)+0.2*(1-best.get("risk_probability",0.0))+0.2*(1-best.get("ood_uncertainty",1.0))))
+        confidence=0.65*visual_confidence+0.35*policy_confidence
+        if not authorized: reason="动作簇未通过独立session验证，拒绝执行"
+        elif ambiguous: reason="视觉与真实时序状态仍对应不同动作，必须指导"
+        elif not risk_ok: reason="离线轨迹显示该动作失败风险过高，等待指导"
+        elif not ood_ok: reason="当前状态超出训练分布或不确定性过高，等待指导"
+        elif not temporal_ok: reason="最近帧、最近动作、状态时长或鼠标位置不匹配"
+        else: reason="未达到视觉阈值、策略差距或支持数要求"
         return {"accepted":accepted,"best":best,"second":second,"threshold":threshold,"margin":margin,"required_gap":required_gap,"support":support,"min_support":min_support,
-            "confidence":confidence,"margin_ok":margin_ok,"rejection_ok":rejection_ok,"temporal_ok":temporal_ok,"ambiguous":ambiguous,"authorized":authorized,"reason":reason,
-            "nearest_rejected_distance":rejected_distance,"query_backend":query_backend}
+            "confidence":confidence,"visual_confidence":visual_confidence,"policy_confidence":policy_confidence,"margin_ok":margin_ok,"rejection_ok":rejection_ok,"temporal_ok":temporal_ok,
+            "risk_ok":risk_ok,"ood_ok":ood_ok,"ambiguous":ambiguous,"authorized":authorized,"reason":reason,"nearest_rejected_distance":rejected_distance,"query_backend":query_backend}
     def validate_model_binding(self,model,target):
         if not isinstance(model,dict):
             raise RuntimeError("模型不存在或格式无效")
@@ -11900,7 +12054,7 @@ class AppStorageMixin:
         if vision is not None and vision.ready and ocr is not None and ocr.ready:
             manifest=vision.manifest() if vision.active_game else {"device":vision.device_name,"trained_steps":0,"backend":vision.backend,"serialization":vision.serialization}
             vision_backend=str(manifest.get("backend",getattr(vision,"backend","builtin_cpu")))
-            vision_text="PyTorch" if vision_backend=="torch" else "内置CPU特征"
+            vision_text="PyTorch" if vision_backend=="torch" else "内置CPU可训练编码器"
             ocr_backend=str(getattr(ocr,"backend","none"))
             ocr_text="RapidOCR可用" if ocr_backend=="rapidocr" and bool(getattr(ocr,"self_test_passed",False)) else "RapidOCR自检失败" if ocr_backend=="rapidocr" else "未安装"
             serialization=str(manifest.get("serialization",getattr(vision,"serialization","builtin_json")))
@@ -11962,7 +12116,7 @@ class AppStorageMixin:
                 "ocr_backend":status.get("ocr_backend","none"),"ocr_self_test":bool(status.get("ocr_self_test",False)),"capabilities":dict(status.get("capabilities",{})),"source_sha256":source_hash,"database_integrity":True})
         self.ui(self._update_runtime_status)
         self.ui(self._update_control_availability)
-        vision_text="PyTorch" if runtime_details["vision_backend"]=="torch" else "内置CPU特征"
+        vision_text="PyTorch" if runtime_details["vision_backend"]=="torch" else "内置CPU可训练编码器"
         ocr_text="RapidOCR可用" if runtime_details["ocr_backend"]=="rapidocr" and runtime_details["ocr_self_test"] else "RapidOCR不可用"
         return ModeResult("completed","文件完整性检查完成；视觉："+vision_text+"；OCR："+ocr_text+"；模型格式："+str(runtime_details["vision_serialization"]),{"runtime":runtime_details})
 class App(AppUiMixin,AppLifecycleMixin,AppModeMixin,AppStorageMixin):
@@ -14085,6 +14239,7 @@ class OfflineVisionRuntime:
         self.ready=False
         self.error="尚未检查AI运行库"
         self.runtime_manifest=None
+        self.builtin_state=None
         self._load_runtime()
     def _load_runtime(self):
         try:
@@ -14093,16 +14248,19 @@ class OfflineVisionRuntime:
                 raise RuntimeError("运行库清单不存在")
             self.builtin=True
             self.device="cpu"
-            self.device_name="内置CPU特征"
+            self.device_name="内置CPU可训练编码器"
             self.ready=True
             self.error=""
             site=runtime_site_packages(self.base)
             if site.exists() and str(site) not in sys.path:
                 sys.path.insert(0,str(site))
+            import importlib
+            importlib.invalidate_caches()
             try:
-                import importlib
-                importlib.invalidate_caches()
                 self.np=importlib.import_module("numpy")
+            except Exception:
+                self.np=None
+            try:
                 self.torch=importlib.import_module("torch")
                 self.safetensors=importlib.import_module("safetensors.torch")
                 self.builtin=False
@@ -14114,8 +14272,10 @@ class OfflineVisionRuntime:
                     self.device_name="PyTorch CPU"
             except Exception:
                 self.torch=None
-                self.np=None
                 self.safetensors=None
+                self.builtin=True
+                self.device="cpu"
+                self.device_name="NumPy CPU可训练编码器" if self.np is not None else "内置CPU可训练编码器"
         except Exception as error:
             self.ready=False
             self.error=str(error)
@@ -14214,25 +14374,51 @@ class OfflineVisionRuntime:
             return metadata
         except Exception as error:
             self._quarantine(path,error)
+    def _builtin_default_state(self,game_id):
+        return {"architecture_version":VISION_ARCHITECTURE_VERSION,"builtin_encoder_version":1,"game_id":str(game_id),"trained_steps":0,"created":time.time(),
+            "backend":"builtin_cpu","preprocess_hash":VISION_PREPROCESS_HASH,
+            "encoder_weights":[[0.299,0.587,0.114],[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]],"encoder_bias":[0.0,0.0,0.0,0.0],
+            "decoder_weights":[[0.0,1.0,0.0,0.0],[0.0,0.0,1.0,0.0],[0.0,0.0,0.0,1.0]],"decoder_bias":[0.0,0.0,0.0]}
+    def _builtin_state_checksum(self,value):
+        clean=dict(value); clean.pop("checksum",None)
+        return hashlib.sha256(canonical_bytes(clean)).hexdigest()
+    def _save_builtin_state(self,value):
+        clean=dict(value); clean["checksum"]=self._builtin_state_checksum(clean)
+        temporary=Path(str(self.active_path)+".tmp")
+        temporary.write_text(json.dumps(clean,ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
+        os.replace(temporary,self.active_path)
+        self.builtin_state=clean
+        return clean
+    def _load_builtin_state(self,path,game_id):
+        state=None
+        if path.exists():
+            try:
+                candidate=json.loads(path.read_text(encoding="utf-8"))
+                checksum=str(candidate.get("checksum",""))
+                if checksum and checksum==self._builtin_state_checksum(candidate) and isinstance(candidate.get("encoder_weights"),list):
+                    state=candidate
+            except Exception:
+                state=None
+        if state is None:
+            state=self._builtin_default_state(game_id)
+            self.active_path=path
+            state=self._save_builtin_state(state)
+        return state
+    @staticmethod
+    def _sigmoid(value):
+        return max(0.0,min(1.0,float(value)))
     def activate_game(self,game_id):
         self.require_ready()
         gid=str(game_id or "default")
         with self.lock:
             if getattr(self,"builtin",False):
                 path=self.model_dir/(hashlib.sha256(gid.encode("utf-8","replace")).hexdigest()+".builtin.json")
-                if path.exists():
-                    try:
-                        value=json.loads(path.read_text(encoding="utf-8"))
-                        self.trained_steps=safe_int(value.get("trained_steps"),0,0)
-                    except Exception:
-                        self.trained_steps=0
-                else:
-                    value={"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":gid,"trained_steps":0,"created":time.time(),"backend":"builtin_cpu","preprocess_hash":VISION_PREPROCESS_HASH}
-                    value["checksum"]=hashlib.sha256(canonical_bytes(value)).hexdigest()
-                    path.write_text(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
-                self.active_game=gid
                 self.active_path=path
-                self.model="builtin_cpu"
+                value=self._load_builtin_state(path,gid)
+                self.trained_steps=safe_int(value.get("trained_steps"),0,0)
+                self.builtin_state=value
+                self.active_game=gid
+                self.model="builtin_trainable_cpu"
                 return self.manifest()
             if self.active_game==gid and self.model is not None:
                 return self.manifest()
@@ -14260,7 +14446,8 @@ class OfflineVisionRuntime:
         if self.active_path is not None and self.active_path.exists():
             checksum=sha256_file(self.active_path,MODEL_MAX_BYTES)
         builtin=bool(getattr(self,"builtin",False))
-        capabilities={"vision_encode":True,"vision_train":not builtin,"ocr_recognize":False,"safe_serialization":"builtin_json" if builtin else "safetensors"}
+        capabilities={"vision_encode":True,"vision_train":True,"ocr_recognize":False,"safe_serialization":"builtin_json" if builtin else "safetensors",
+            "learned_visual_representation":True,"explicit_temporal_pairs":not builtin or self.trained_steps>0}
         return {"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":self.active_game,"checksum":checksum,"trained_steps":self.trained_steps,"device":self.device_name,
             "relative_path":str(self.active_path.relative_to(self.base)) if self.active_path is not None else "","preprocess_hash":VISION_PREPROCESS_HASH,"preprocess_signature":preprocess_signature(),
             "runtime_fingerprint":self.runtime_fingerprint(),"serialization":"builtin_json" if builtin else "safetensors","backend":"builtin_cpu" if builtin else "torch",
@@ -14278,18 +14465,21 @@ class OfflineVisionRuntime:
             raise CaptureUnavailable("AI视觉输入尺寸无效")
         previous=sample_rgb_bytes(previous_rgb)
         if getattr(self,"builtin",False):
-            red=bytearray(PIXELS)
-            green=bytearray(PIXELS)
-            blue=bytearray(PIXELS)
-            gray=bytearray(PIXELS)
+            if self.builtin_state is None:
+                self.activate_game(self.active_game or "default")
+            weights=self.builtin_state.get("encoder_weights") or self._builtin_default_state(self.active_game or "default")["encoder_weights"]
+            bias=self.builtin_state.get("encoder_bias") or [0.0]*4
+            channels=[bytearray(PIXELS) for _ in range(4)]
             motion=bytearray(PIXELS)
             for pixel in range(PIXELS):
                 offset=pixel*3
-                r=current[offset]; g=current[offset+1]; b=current[offset+2]
-                red[pixel]=r; green[pixel]=g; blue[pixel]=b; gray[pixel]=(77*r+150*g+29*b)>>8
+                values=(current[offset]/255.0,current[offset+1]/255.0,current[offset+2]/255.0)
+                for channel in range(4):
+                    encoded=self._sigmoid(sum(float(weights[channel][index])*values[index] for index in range(3))+float(bias[channel]))
+                    channels[channel][pixel]=max(0,min(255,round(encoded*255.0)))
                 if previous is not None:
-                    motion[pixel]=(abs(r-previous[offset])+abs(g-previous[offset+1])+abs(b-previous[offset+2]))//3
-            return bytes(gray)+bytes(red)+bytes(green)+bytes(blue)+bytes(motion)
+                    motion[pixel]=(abs(current[offset]-previous[offset])+abs(current[offset+1]-previous[offset+1])+abs(current[offset+2]-previous[offset+2]))//3
+            return b"".join(bytes(channel) for channel in channels)+bytes(motion)
         with self.lock:
             if self.model is None:
                 self.activate_game(self.active_game or "default")
@@ -14313,18 +14503,53 @@ class OfflineVisionRuntime:
             valid=[]
             for index,item in enumerate(samples or []):
                 if stop_event is not None and stop_event.is_set():
-                    raise InputStopped("内置CPU离线视觉优化已停止")
+                    raise InputStopped("内置CPU视觉编码器训练已停止")
                 rgb=sample_rgb_bytes(item.get("rgb") or item.get("thumbnail")) if isinstance(item,dict) else sample_rgb_bytes(item)
                 if rgb is not None:
-                    valid.append(hashlib.sha256(rgb).hexdigest())
+                    valid.append(rgb)
                 if progress is not None and index%16==0:
-                    progress(35.0*(index+1)/max(1,sample_total))
-            self.trained_steps+=max(1,len(valid))
-            value={"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":str(game_id),"trained_steps":self.trained_steps,"updated":time.time(),"backend":"builtin_cpu",
-                "preprocess_hash":VISION_PREPROCESS_HASH,"sleep_seed":sleep_seed,"sample_hash":hashlib.sha256(canonical_bytes(valid)).hexdigest(),"training_objectives":["deterministic_visual_encoding",
-                    "action_conditioned_prototype_support","temporal_consistency"]}
-            value["checksum"]=hashlib.sha256(canonical_bytes(value)).hexdigest()
-            self.active_path.write_text(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8")
+                    progress(5.0*(index+1)/max(1,sample_total))
+            if not valid:
+                return self.manifest()
+            state=dict(self.builtin_state or self._builtin_default_state(game_id))
+            ew=[[float(value) for value in row] for row in state["encoder_weights"]]; eb=[float(value) for value in state["encoder_bias"]]
+            dw=[[float(value) for value in row] for row in state["decoder_weights"]]; db=[float(value) for value in state["decoder_bias"]]
+            generator=random.Random(sleep_seed)
+            learning_rate=0.035
+            total_steps=max(40,min(320,len(valid)*3))
+            for step in range(total_steps):
+                if stop_event is not None and stop_event.is_set():
+                    raise InputStopped("内置CPU视觉编码器训练已停止")
+                rgb=valid[generator.randrange(len(valid))]
+                for _ in range(48):
+                    pixel=generator.randrange(PIXELS); offset=pixel*3
+                    x=[rgb[offset]/255.0,rgb[offset+1]/255.0,rgb[offset+2]/255.0]
+                    noisy=[max(0.0,min(1.0,value+(generator.random()-0.5)*0.12)) for value in x]
+                    pre_y=[sum(ew[j][k]*noisy[k] for k in range(3))+eb[j] for j in range(4)]
+                    y=[self._sigmoid(value) for value in pre_y]
+                    pre_z=[sum(dw[k][j]*y[j] for j in range(4))+db[k] for k in range(3)]
+                    z=[self._sigmoid(value) for value in pre_z]
+                    dz=[2.0*(z[k]-x[k])*(1.0 if 0.0<pre_z[k]<1.0 else 0.0) for k in range(3)]
+                    dy=[]
+                    for j in range(4):
+                        gradient=sum(dz[k]*dw[k][j] for k in range(3))*(1.0 if 0.0<pre_y[j]<1.0 else 0.0)
+                        dy.append(gradient)
+                    for k in range(3):
+                        for j in range(4):
+                            dw[k][j]-=learning_rate*dz[k]*y[j]
+                        db[k]-=learning_rate*dz[k]
+                    for j in range(4):
+                        for k in range(3):
+                            ew[j][k]-=learning_rate*dy[j]*noisy[k]
+                        eb[j]-=learning_rate*dy[j]
+                learning_rate*=0.997
+                if progress is not None and step%2==0:
+                    progress(35.0*(step+1)/total_steps)
+            self.trained_steps+=total_steps
+            state.update({"trained_steps":self.trained_steps,"updated":time.time(),"sleep_seed":sleep_seed,"encoder_weights":ew,"encoder_bias":eb,
+                "decoder_weights":dw,"decoder_bias":db,"sample_hash":hashlib.sha256(canonical_bytes([hashlib.sha256(value).hexdigest() for value in valid])).hexdigest(),
+                "training_objectives":["learned_linear_autoencoder","same_state_augmentation","explicit_session_trajectory_support"],"backend":"builtin_cpu_trainable"})
+            self._save_builtin_state(state)
             if progress is not None:
                 progress(35.0)
             return self.manifest()
@@ -14362,38 +14587,55 @@ class OfflineVisionRuntime:
             optimizer=torch.optim.AdamW(model.parameters(),lr=0.0012,weight_decay=0.0001)
             arrays=self.np.stack([self.np.frombuffer(item["rgb"],dtype=self.np.uint8).reshape(FEATURE_H,FEATURE_W,3) for item in valid]).astype(self.np.float32)/255.0
             arrays=arrays.transpose(0,3,1,2)
-            labels=self.np.array([int(hashlib.sha256(item["action"].encode()).hexdigest()[:8],16)%2147483647 for item in valid],dtype=self.np.int64)
+            session_groups=defaultdict(list)
+            for index,item in enumerate(valid):
+                session_groups[item["session"]].append(index)
+            temporal_pairs=[]
+            for _,indices in session_groups.items():
+                indices.sort(key=lambda index:valid[index]["created"])
+                temporal_pairs.extend((first,second) for first,second in zip(indices,indices[1:]) if 0.0<=valid[second]["created"]-valid[first]["created"]<=2.5)
+            negative_pairs=[]
+            for first in range(len(valid)):
+                for second in range(first+1,min(len(valid),first+24)):
+                    different_session=valid[first]["session"]!=valid[second]["session"]
+                    far_same=abs(valid[first]["created"]-valid[second]["created"])>8.0
+                    if different_session or far_same:
+                        negative_pairs.append((first,second))
             total_steps=max(32,min(320,len(valid)*4))
             generator=random.Random(sleep_seed)
-            torch_generator=torch.Generator(device=self.device)
-            torch_generator.manual_seed(sleep_seed)
+            torch_generator=torch.Generator(device=self.device); torch_generator.manual_seed(sleep_seed)
+            def embed(value):
+                return torch.nn.functional.normalize(model.encoder(value).mean(dim=(2,3)),dim=1)
             for step in range(total_steps):
                 if stop_event is not None and stop_event.is_set():
                     raise InputStopped("GPU离线视觉模型训练已停止")
-                indexes=[generator.randrange(len(valid)) for _ in range(min(32,max(6,len(valid))))]
+                indexes=[generator.randrange(len(valid)) for _ in range(min(24,max(6,len(valid))))]
                 batch=torch.from_numpy(arrays[indexes].copy()).to(self.device)
-                label=torch.from_numpy(labels[indexes].copy()).to(self.device)
-                noisy=(batch+(torch.rand(batch.shape,dtype=batch.dtype,device=self.device,generator=torch_generator)-0.5)*0.06).clamp(0,1)
-                latent,reconstruction=model(noisy)
-                embedding=torch.nn.functional.normalize(latent.mean(dim=(2,3)),dim=1)
-                similarity=embedding@embedding.T/0.2
-                eye=torch.eye(len(indexes),dtype=torch.bool,device=self.device)
-                positive=(label[:,None]==label[None,:])&~eye
-                logits=similarity.masked_fill(eye,-1e9)
-                log_prob=logits-torch.logsumexp(logits,dim=1,keepdim=True)
-                contrastive=-(log_prob[positive]).mean() if bool(positive.any()) else torch.zeros((),device=self.device)
+                noisy_a=(batch+(torch.rand(batch.shape,dtype=batch.dtype,device=self.device,generator=torch_generator)-0.5)*0.06).clamp(0,1)
+                noisy_b=(batch+(torch.rand(batch.shape,dtype=batch.dtype,device=self.device,generator=torch_generator)-0.5)*0.06).clamp(0,1)
+                latent,reconstruction=model(noisy_a)
+                embedding_a=torch.nn.functional.normalize(latent.mean(dim=(2,3)),dim=1)
+                embedding_b=embed(noisy_b)
+                similarity=embedding_a@embedding_b.T/0.2
+                labels=torch.arange(len(indexes),device=self.device)
+                contrastive=torch.nn.functional.cross_entropy(similarity,labels)
                 temporal=torch.zeros((),device=self.device)
-                if len(indexes)>1:
-                    distances=(embedding[1:]-embedding[:-1]).pow(2).sum(dim=1)
-                    same=label[1:]==label[:-1]
-                    temporal=torch.where(same,distances,torch.relu(0.5-distances)).mean()
+                if temporal_pairs:
+                    chosen=[temporal_pairs[generator.randrange(len(temporal_pairs))] for _ in range(min(12,len(temporal_pairs)))]
+                    first=torch.from_numpy(arrays[[pair[0] for pair in chosen]].copy()).to(self.device)
+                    second=torch.from_numpy(arrays[[pair[1] for pair in chosen]].copy()).to(self.device)
+                    temporal=(embed(first)-embed(second)).pow(2).sum(dim=1).mean()
+                negative=torch.zeros((),device=self.device)
+                if negative_pairs:
+                    chosen=[negative_pairs[generator.randrange(len(negative_pairs))] for _ in range(min(12,len(negative_pairs)))]
+                    first=torch.from_numpy(arrays[[pair[0] for pair in chosen]].copy()).to(self.device)
+                    second=torch.from_numpy(arrays[[pair[1] for pair in chosen]].copy()).to(self.device)
+                    distances=(embed(first)-embed(second)).pow(2).sum(dim=1)
+                    negative=torch.relu(0.5-distances).mean()
                 reconstruction_loss=torch.nn.functional.smooth_l1_loss(reconstruction,batch)
                 variance_penalty=(latent.var(dim=(2,3)).mean()+0.0001).reciprocal().clamp(max=10)
-                loss=reconstruction_loss+0.12*contrastive+0.05*temporal+0.01*variance_penalty
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(),2.0)
-                optimizer.step()
+                loss=reconstruction_loss+0.14*contrastive+0.05*temporal+0.04*negative+0.01*variance_penalty
+                optimizer.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(),2.0); optimizer.step()
                 if progress is not None and step%2==0:
                     progress(35.0*(step+1)/total_steps)
             encoder=model.encoder
@@ -14402,7 +14644,7 @@ class OfflineVisionRuntime:
             self.trained_steps+=total_steps
             self._atomic_save(self.active_path,encoder.state_dict(),{"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":str(game_id),"trained_steps":self.trained_steps,
                     "updated":time.time(),"preprocess_hash":VISION_PREPROCESS_HASH,"preprocess_signature":preprocess_signature(),"runtime_fingerprint":self.runtime_fingerprint(),
-                    "training_objectives":["reconstruction","action_conditioned_contrastive","temporal_consistency"],"raw_feature_preserved":True,"neural_feature_version":NEURAL_FEATURE_VERSION,"sleep_seed":sleep_seed})
+                    "training_objectives":["reconstruction","same_state_augmentation_contrastive","explicit_adjacent_session_temporal_pairs","cross_session_or_far_negative_pairs"],"raw_feature_preserved":True,"neural_feature_version":NEURAL_FEATURE_VERSION,"sleep_seed":sleep_seed})
             return self.manifest()
 class OfflineOCRRuntime:
     def __init__(self,base):
