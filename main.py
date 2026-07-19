@@ -58,9 +58,9 @@ COARSE_LEN=COARSE_W*COARSE_H*FEATURE_CHANNELS
 SQUARED_DIFF=tuple(value*value for value in range(-255,256))
 FEATURE_ALGORITHM_VERSION=4
 ACTION_ALGORITHM_VERSION=6
-DATABASE_SCHEMA_VERSION=8
+DATABASE_SCHEMA_VERSION=9
 MODEL_SCHEMA_VERSION=3
-POLICY_MODEL_SCHEMA_VERSION=2
+POLICY_MODEL_SCHEMA_VERSION=3
 DEFAULT_POLICY_SCORE_WEIGHTS={"bc":60.0,"q":45.0,"success":35.0,"risk":45.0,"ood":55.0}
 DEFAULT_SAMPLE_BUDGET=1500
 MAX_SAMPLES=6000
@@ -69,6 +69,10 @@ SUPPORTED_BUTTONS={"left","right","middle"}
 SUPPORTED_KINDS={"no_op","click","double_click","long_press","drag","scroll_v","scroll_h","move","hover"}
 BASIC_SAFE_FAMILIES={"no_op","click|left","move","hover"}
 REPEAT_POLICIES={"one_shot","repeatable","hold_until_change","rate_limited"}
+SEMANTIC_ACTION_SCHEMA_VERSION=1
+TRAJECTORY_SCHEMA_VERSION=3
+TASK_SCHEMA_VERSION=1
+SEMANTIC_TARGET_FALLBACK_CLASSES={"screen_point","coordinate_fallback","screen","none"}
 MODE_IDLE="IDLE"
 MODE_STARTING="STARTING"
 MODE_RUNNING="RUNNING"
@@ -570,38 +574,60 @@ def perceptual_hash_hamming(first,second):
 def normalized_policy_score_weights(value=None):
     source=value if isinstance(value,dict) else {}
     return {name:safe_float(source.get(name,default),default,0.0,500.0) for name,default in DEFAULT_POLICY_SCORE_WEIGHTS.items()}
-def policy_experience_row(experience_model,state_hash,cluster_id):
+def policy_experience_row(experience_model,state_hash,cluster_id,task_id=None):
     if not isinstance(experience_model,dict):
         return {}
+    tid=normalized_identifier(task_id or experience_model.get("default_task_id"),"default",96)
     state_action=experience_model.get("state_action")
     if isinstance(state_action,dict):
-        row=state_action.get(str(state_hash)+"|"+str(cluster_id))
+        for key in (tid+"|"+str(state_hash)+"|"+str(cluster_id),str(state_hash)+"|"+str(cluster_id)):
+            row=state_action.get(key)
+            if isinstance(row,dict):
+                return row
+        priors=experience_model.get("action_prior",{})
+        if isinstance(priors,dict):
+            for key in (tid+"|"+str(cluster_id),str(cluster_id)):
+                row=priors.get(key)
+                if isinstance(row,dict):
+                    return row
+        return {}
+    for key in (tid+"|"+str(state_hash)+"|"+str(cluster_id),str(state_hash)+"|"+str(cluster_id)):
+        row=experience_model.get(key)
         if isinstance(row,dict):
             return row
-        priors=experience_model.get("action_prior",{})
-        row=priors.get(str(cluster_id)) if isinstance(priors,dict) else None
-        return row if isinstance(row,dict) else {}
-    row=experience_model.get(str(state_hash)+"|"+str(cluster_id))
-    return row if isinstance(row,dict) else {}
+    return {}
 def summarize_episode_metrics(experiences):
     by_episode=defaultdict(list)
     for item in experiences or []:
         if isinstance(item,dict):
-            by_episode[str(item.get("episode_id") or item.get("session") or "legacy")].append(item)
+            key=(str(item.get("game_id") or "legacy"),normalized_identifier(item.get("task_id"),"default",96),str(item.get("episode_id") or item.get("session") or "legacy"))
+            by_episode[key].append(item)
     rows=[]
-    for episode,items in by_episode.items():
+    for (game_id,task_id,episode),items in by_episode.items():
         ordered=sorted(items,key=lambda item:safe_int(item.get("step_id"),0))
-        rows.append({"episode_id":episode,"steps":len(ordered),"reward":sum(safe_float(item.get("reward_t",item.get("reward",0.0)),0.0) for item in ordered),
+        rows.append({"game_id":game_id,"task_id":task_id,"episode_id":episode,"steps":len(ordered),"reward":sum(safe_float(item.get("reward_t",item.get("reward",0.0)),0.0) for item in ordered),
             "success":any(bool(item.get("success")) for item in ordered),"failure":any(bool(item.get("failure")) for item in ordered),
             "human_overrides":sum(1 for item in ordered if item.get("human_override")),
             "duration":max(0.0,safe_float(ordered[-1].get("created_t",0.0),0.0)-safe_float(ordered[0].get("created_t",0.0),0.0)) if ordered else 0.0})
     total=len(rows)
+    task_rows=defaultdict(list)
+    for row in rows:
+        task_rows[row["task_id"]].append(row)
+    by_task={}
+    for task_id,items in task_rows.items():
+        by_task[task_id]={
+            "episodes":len(items),
+            "success_rate":sum(1 for item in items if item["success"])/max(1,len(items)),
+            "failure_rate":sum(1 for item in items if item["failure"])/max(1,len(items)),
+            "average_actions":sum(item["steps"] for item in items)/max(1,len(items)),
+            "human_override_count":sum(item["human_overrides"] for item in items),
+        }
     return {"episodes":total,"task_success_rate":sum(1 for row in rows if row["success"])/max(1,total),
         "failure_rate":sum(1 for row in rows if row["failure"])/max(1,total),
         "average_actions":sum(row["steps"] for row in rows)/max(1,total),
         "average_completion_time":sum(row["duration"] for row in rows if row["success"])/max(1,sum(1 for row in rows if row["success"])),
         "human_override_count":sum(row["human_overrides"] for row in rows),
-        "mean_episode_reward":sum(row["reward"] for row in rows)/max(1,total)}
+        "mean_episode_reward":sum(row["reward"] for row in rows)/max(1,total),"by_task":by_task}
 def visual_scene_key(item):
     feature=feature_bytes(item.get("f"))
     plane=feature[:PIXELS]
@@ -611,21 +637,33 @@ def visual_scene_key(item):
     context=temporal_from_context(item.get("context",{}))
     motion=sum(context.get("recent_frame_deltas",[]))/max(1,len(context.get("recent_frame_deltas",[])))
     return "L"+str(min(5,int(mean//43)))+"|E"+str(min(5,int(edge_mean//43)))+"|M"+str(min(5,int(motion//120)))
-def calculate_sequence_penalty(history,cluster_id,sequence_model):
+def calculate_sequence_penalty(history,cluster_id,sequence_model,task_id=None):
     if not isinstance(sequence_model,dict):
         return 0.0
     values=[str(value) for value in history] if isinstance(history,(list,tuple,deque)) else [str(history)]
+    prefixes=[]
+    if task_id not in (None,""):
+        prefixes.append(normalized_identifier(task_id,"default",96)+"|")
+    prefixes.append("")
     choices={}
     depth=0
-    for size in range(min(4,len(values)),0,-1):
-        key=str(size)+"|"+"|".join(values[-size:])
-        candidate=sequence_model.get(key,{})
-        if isinstance(candidate,dict) and candidate:
-            choices=candidate
-            depth=size
+    for prefix in prefixes:
+        for size in range(min(4,len(values)),0,-1):
+            key=prefix+str(size)+"|"+"|".join(values[-size:])
+            candidate=sequence_model.get(key,{})
+            if isinstance(candidate,dict) and candidate:
+                choices=candidate
+                depth=size
+                break
+        if choices:
             break
     if not choices:
-        choices=sequence_model.get(str(values[-1] if values else "<START>"),{})
+        suffix=str(values[-1] if values else "<START>")
+        for prefix in prefixes:
+            candidate=sequence_model.get(prefix+suffix,{})
+            if isinstance(candidate,dict) and candidate:
+                choices=candidate
+                break
     if not isinstance(choices,dict) or not choices:
         return 0.0
     total=sum(max(0.0,safe_float(value,0.0)) for value in choices.values())
@@ -639,6 +677,7 @@ class TaskAgentPolicy:
         self.failures=0
         self.history=deque(maxlen=128)
         self.game_id=str(self.profile.get("game_id",""))
+        self.task_id=normalized_identifier(self.profile.get("task_id") or self.profile.get("default_task_id"),"default",96)
         self.success_states=frozenset(str(value) for value in self.profile.get("success_states",[]))
         self.failure_states=frozenset(str(value) for value in self.profile.get("failure_states",[]))
         self.success_hash_distance=safe_int(self.profile.get("success_hash_distance",6),6,0,32)
@@ -710,9 +749,8 @@ class TaskAgentPolicy:
         record.update(self.last_classification)
         self.history.append(record)
         return {"state":state,"reward":reward,"failures":self.failures,"stop":self.failures>=self.max_failures,**self.last_classification}
-    @staticmethod
-    def sequence_penalty(history,cluster_id,sequence_model):
-        return calculate_sequence_penalty(history,cluster_id,sequence_model)
+    def sequence_penalty(self,history,cluster_id,sequence_model):
+        return calculate_sequence_penalty(history,cluster_id,sequence_model,self.task_id)
 
 def profile_checksum(profile):
     value=dict(profile) if isinstance(profile,dict) else {}
@@ -1621,7 +1659,386 @@ def resample_path(path,count=16):
             point=[clean[segment][0]+(clean[segment+1][0]-clean[segment][0])*ratio,clean[segment][1]+(clean[segment+1][1]-clean[segment][1])*ratio]
         result.append([round(point[0],5),round(point[1],5)])
     return result
-def normalize_action(action):
+def normalized_identifier(value,default="default",maximum=96):
+    text=str(value or "").strip()[:int(maximum)]
+    allowed="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    clean="".join(character if character in allowed else "_" for character in text).strip("._-")
+    return clean or str(default)
+
+def _bounded_json_mapping(value,maximum=16384):
+    if not isinstance(value,dict):
+        return {}
+    try:
+        raw=json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+        if len(raw.encode("utf-8"))>int(maximum):
+            return {}
+        loaded=json.loads(raw)
+        return loaded if isinstance(loaded,dict) else {}
+    except (TypeError,ValueError,OverflowError,json.JSONDecodeError):
+        return {}
+
+@dataclass(frozen=True)
+class SemanticAction:
+    action_type:str
+    target_class:str
+    target_instance:str=""
+    target_index:int=-1
+    target_text:str=""
+    offset:tuple=(0.0,0.0)
+    parameters:dict=field(default_factory=dict)
+    coordinate_fallback:dict=field(default_factory=dict)
+    attributes:dict=field(default_factory=dict)
+    def to_dict(self):
+        target={"class":self.target_class}
+        if self.target_instance:
+            target["instance"]=self.target_instance
+        if self.target_index>=0:
+            target["index"]=self.target_index
+        if self.target_text:
+            target["text"]=self.target_text
+        if self.attributes:
+            target["attributes"]=dict(self.attributes)
+        result={"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"action_type":self.action_type,"target":target,"offset":[round(float(self.offset[0]),6),round(float(self.offset[1]),6)],"parameters":dict(self.parameters)}
+        if self.coordinate_fallback:
+            result["coordinate_fallback"]=dict(self.coordinate_fallback)
+        return result
+    @classmethod
+    def from_mapping(cls,value):
+        normalized=normalize_semantic_action(value)
+        if normalized is None:
+            raise ValueError("语义动作无效")
+        target=normalized["target"]
+        return cls(
+            normalized["action_type"],target["class"],str(target.get("instance","")),
+            safe_int(target.get("index",-1),-1,-1,1000000),str(target.get("text","")),
+            tuple(normalized["offset"]),dict(normalized.get("parameters",{})),
+            dict(normalized.get("coordinate_fallback",{})),dict(target.get("attributes",{})),
+        )
+
+@dataclass(frozen=True)
+class GroundedAction:
+    semantic_action:dict
+    grounded_action:dict
+    grounding:dict=field(default_factory=dict)
+    def to_dict(self):
+        return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":dict(self.semantic_action),"grounded_action":dict(self.grounded_action),"grounding":dict(self.grounding)}
+
+@dataclass(frozen=True)
+class TaskDefinition:
+    game_id:str
+    task_id:str
+    name:str
+    goal:str
+    allowed_families:tuple=()
+    reward_config:dict=field(default_factory=dict)
+    success_detector:dict=field(default_factory=dict)
+    failure_detector:dict=field(default_factory=dict)
+    progress_detector:dict=field(default_factory=dict)
+    reset_detector:dict=field(default_factory=dict)
+    enabled:bool=True
+    schema_version:int=TASK_SCHEMA_VERSION
+    @classmethod
+    def from_mapping(cls,value,game_id="",task_id="default"):
+        item=dict(value) if isinstance(value,dict) else {}
+        gid=str(item.get("game_id") or game_id)
+        tid=normalized_identifier(item.get("task_id") or task_id,"default",96)
+        reward_source=item.get("reward_config") if isinstance(item.get("reward_config"),dict) else item
+        reward={
+            "step_penalty":safe_float(reward_source.get("step_penalty",-0.01),-0.01,-1.0,0.0),
+            "success_reward":safe_float(reward_source.get("success_reward",1.0),1.0,-10.0,10.0),
+            "failure_reward":safe_float(reward_source.get("failure_reward",-1.0),-1.0,-10.0,10.0),
+            "progress_scale":safe_float(reward_source.get("progress_scale",0.5),0.5,0.0,10.0),
+            "no_change_penalty":safe_float(reward_source.get("no_change_penalty",0.0),0.0,-1.0,0.0),
+            "repeat_penalty":safe_float(reward_source.get("repeat_penalty",0.0),0.0,-1.0,0.0),
+        }
+        families=tuple(sorted({str(item_value) for item_value in item.get("allowed_families",[]) if str(item_value)}))
+        success_detector=_bounded_json_mapping(item.get("success_detector"))
+        failure_detector=_bounded_json_mapping(item.get("failure_detector"))
+        progress_detector=_bounded_json_mapping(item.get("progress_detector"))
+        reset_detector=_bounded_json_mapping(item.get("reset_detector"))
+        if not success_detector and item.get("success_states"):
+            success_detector={"type":"visual_hash","states":sorted({str(value) for value in item.get("success_states",[]) if str(value)}),"hash_distance":safe_int(item.get("success_hash_distance",6),6,0,32)}
+        if not failure_detector and item.get("failure_states"):
+            failure_detector={"type":"visual_hash","states":sorted({str(value) for value in item.get("failure_states",[]) if str(value)}),"hash_distance":safe_int(item.get("failure_hash_distance",6),6,0,32)}
+        return cls(
+            gid,tid,str(item.get("name") or tid)[:200],
+            str(item.get("goal") or "完成任务并在不确定时停止")[:2000],families,reward,
+            success_detector,failure_detector,progress_detector,reset_detector,
+            bool(item.get("enabled",True)),TASK_SCHEMA_VERSION,
+        )
+    def to_dict(self):
+        return {
+            "schema_version":self.schema_version,"game_id":self.game_id,"task_id":self.task_id,
+            "name":self.name,"goal":self.goal,"allowed_families":list(self.allowed_families),
+            "reward_config":dict(self.reward_config),"success_detector":dict(self.success_detector),
+            "failure_detector":dict(self.failure_detector),"progress_detector":dict(self.progress_detector),
+            "reset_detector":dict(self.reset_detector),"enabled":self.enabled,
+        }
+
+class RewardProvider:
+    def evaluate(self,transition,task):
+        raise NotImplementedError
+
+class SuccessDetector:
+    def detect(self,transition,task):
+        raise NotImplementedError
+
+class FailureDetector:
+    def detect(self,transition,task):
+        raise NotImplementedError
+
+class ProgressDetector:
+    def score(self,transition,task):
+        raise NotImplementedError
+
+class ResetDetector:
+    def detect(self,transition,task):
+        raise NotImplementedError
+
+class StandardSuccessDetector(SuccessDetector):
+    def detect(self,transition,task):
+        return bool(transition.get("success") or str(transition.get("terminal",""))=="success")
+
+class StandardFailureDetector(FailureDetector):
+    def detect(self,transition,task):
+        return bool(transition.get("failure") or str(transition.get("terminal",""))=="failure")
+
+class StandardProgressDetector(ProgressDetector):
+    def score(self,transition,task):
+        return max(-1.0,min(1.0,safe_float(transition.get("progress_score",transition.get("progress",0.0)),0.0)))
+
+class StandardResetDetector(ResetDetector):
+    def detect(self,transition,task):
+        return bool(transition.get("reset"))
+
+class CompositeRewardProvider(RewardProvider):
+    def evaluate(self,transition,task):
+        config=dict(task.reward_config)
+        progress=StandardProgressDetector().score(transition,task)
+        success=StandardSuccessDetector().detect(transition,task)
+        failure=StandardFailureDetector().detect(transition,task)
+        components={"step":safe_float(config.get("step_penalty",-0.01),-0.01),"progress":progress*safe_float(config.get("progress_scale",0.5),0.5),"terminal":0.0,"no_change":0.0,"repeat":0.0}
+        if success:
+            components["terminal"]+=safe_float(config.get("success_reward",1.0),1.0)
+        if failure:
+            components["terminal"]+=safe_float(config.get("failure_reward",-1.0),-1.0)
+        if transition.get("changed") is False:
+            components["no_change"]+=safe_float(config.get("no_change_penalty",0.0),0.0)
+        if transition.get("repeated"):
+            components["repeat"]+=safe_float(config.get("repeat_penalty",0.0),0.0)
+        reward=sum(components.values())
+        return {"reward":round(reward,6),"components":{key:round(value,6) for key,value in components.items()},"success":success,"failure":failure,"progress":round(progress,6),"reset":StandardResetDetector().detect(transition,task)}
+
+class TaskRuntime:
+    def __init__(self,definition,reward_provider=None):
+        self.definition=definition if isinstance(definition,TaskDefinition) else TaskDefinition.from_mapping(definition)
+        self.reward_provider=reward_provider or CompositeRewardProvider()
+    def evaluate(self,transition):
+        return self.reward_provider.evaluate(dict(transition) if isinstance(transition,dict) else {},self.definition)
+
+def task_definitions_checksum(tasks):
+    normalized=[]
+    for item in tasks or []:
+        try:
+            normalized.append(TaskDefinition.from_mapping(item).to_dict())
+        except (TypeError,ValueError,OverflowError):
+            continue
+    normalized.sort(key=lambda item:(str(item.get("game_id","")),str(item.get("task_id",""))))
+    return hashlib.sha256(canonical_bytes(normalized)).hexdigest()
+
+def task_profile_overlay(profile,task):
+    value=dict(profile) if isinstance(profile,dict) else {}
+    definition=task if isinstance(task,TaskDefinition) else TaskDefinition.from_mapping(task,value.get("game_id",""),value.get("default_task_id","default"))
+    value["task_id"]=definition.task_id
+    value["default_task_id"]=definition.task_id
+    value["goal"]=definition.goal
+    if definition.allowed_families:
+        value["allowed_families"]=list(definition.allowed_families)
+    value.update(definition.reward_config)
+    success=dict(definition.success_detector)
+    failure=dict(definition.failure_detector)
+    if isinstance(success.get("states"),list):
+        value["success_states"]=list(success["states"])
+        value["success_hash_distance"]=safe_int(success.get("hash_distance",value.get("success_hash_distance",6)),6,0,32)
+    if isinstance(failure.get("states"),list):
+        value["failure_states"]=list(failure["states"])
+        value["failure_hash_distance"]=safe_int(failure.get("hash_distance",value.get("failure_hash_distance",6)),6,0,32)
+    return value
+
+def normalize_semantic_action(action):
+    try:
+        if isinstance(action,SemanticAction):
+            action=action.to_dict()
+        if isinstance(action,GroundedAction):
+            action=action.to_dict().get("semantic_action")
+        if not isinstance(action,dict):
+            return None
+        source=action.get("semantic_action") if isinstance(action.get("semantic_action"),dict) else action
+        action_type=str(source.get("action_type") or source.get("type") or "")
+        if action_type not in SUPPORTED_KINDS:
+            return None
+        raw_target=source.get("target")
+        if isinstance(raw_target,str):
+            raw_target={"class":raw_target}
+        target=dict(raw_target) if isinstance(raw_target,dict) else {}
+        target_class=str(target.get("class") or target.get("category") or source.get("target_class") or ("none" if action_type=="no_op" else ""))[:200]
+        if not target_class:
+            return None
+        normalized_target={"class":target_class}
+        instance=target.get("instance",source.get("target_instance",""))
+        if instance not in (None,""):
+            normalized_target["instance"]=str(instance)[:200]
+        index=target.get("index",source.get("target_index",-1))
+        if finite_number(index) and int(index)>=0:
+            normalized_target["index"]=safe_int(index,-1,0,1000000)
+        text_value=str(target.get("text") or source.get("target_text") or "")[:500]
+        if text_value:
+            normalized_target["text"]=text_value
+        attributes=_bounded_json_mapping(target.get("attributes") or source.get("target_attributes"))
+        if attributes:
+            normalized_target["attributes"]=attributes
+        raw_offset=source.get("offset",source.get("relative_offset",[0.0,0.0]))
+        if not isinstance(raw_offset,(list,tuple)) or len(raw_offset)<2 or not finite_number(raw_offset[0]) or not finite_number(raw_offset[1]):
+            raw_offset=[0.0,0.0]
+        offset=[round(max(-2.0,min(2.0,float(raw_offset[0]))),6),round(max(-2.0,min(2.0,float(raw_offset[1]))),6)]
+        parameters=_bounded_json_mapping(source.get("parameters") or source.get("execution_parameters"))
+        fallback_source=source.get("coordinate_fallback") or source.get("fallback_action")
+        fallback=_normalize_coordinate_action(fallback_source) if isinstance(fallback_source,dict) else None
+        result={"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"action_type":action_type,"target":normalized_target,"offset":offset,"parameters":parameters}
+        if fallback:
+            result["coordinate_fallback"]=fallback
+        return result
+    except (TypeError,ValueError,OverflowError):
+        return None
+
+def semantic_action_from_coordinate(action):
+    item=_normalize_coordinate_action(action)
+    if not item:
+        return None
+    parameters={key:item[key] for key in ("button","duration","delta") if key in item}
+    target={"class":"coordinate_fallback","instance":action_family_key(item)}
+    if item.get("path"):
+        point=item["path"][-1]
+        target["attributes"]={"point":[round(point[0],6),round(point[1],6)]}
+    return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"action_type":item["kind"],"target":target,"offset":[0.0,0.0],"parameters":parameters,"coordinate_fallback":item}
+
+def semantic_action_signature(action):
+    item=normalize_semantic_action(action)
+    if not item:
+        return ""
+    target=item["target"]
+    identity={"action_type":item["action_type"],"target_class":target.get("class",""),"target_instance":target.get("instance",""),"target_index":target.get("index",-1),"target_text":target.get("text",""),"offset":item.get("offset",[0.0,0.0]),"parameters":item.get("parameters",{})}
+    return hashlib.sha256(canonical_bytes(identity)).hexdigest()[:24]
+
+def _normalized_semantic_target(value,index):
+    if not isinstance(value,dict):
+        return None
+    raw_box=value.get("bbox") or value.get("box") or value.get("rect")
+    if not isinstance(raw_box,(list,tuple)) or len(raw_box)!=4 or not all(finite_number(item) for item in raw_box):
+        center=value.get("center")
+        if not isinstance(center,(list,tuple)) or len(center)<2 or not all(finite_number(item) for item in center[:2]):
+            return None
+        raw_box=[float(center[0])-0.01,float(center[1])-0.01,0.02,0.02]
+    left=max(0.0,min(1.0,float(raw_box[0]))); top=max(0.0,min(1.0,float(raw_box[1])))
+    width=max(0.002,min(1.0-left,float(raw_box[2]))); height=max(0.002,min(1.0-top,float(raw_box[3])))
+    target_class=str(value.get("target_class") or value.get("class") or value.get("category") or value.get("type") or "")[:200]
+    if not target_class:
+        return None
+    return {
+        "class":target_class,
+        "instance":str(value.get("instance") or value.get("id") or value.get("name") or "")[:200],
+        "index":safe_int(value.get("index",index),index,0,1000000),
+        "text":str(value.get("text") or value.get("label") or "")[:500],
+        "attributes":_bounded_json_mapping(value.get("attributes")),
+        "bbox":[left,top,width,height],
+        "confidence":safe_float(value.get("confidence",1.0),1.0,0.0,1.0),
+        "source":str(value.get("source") or "detector")[:100],
+    }
+
+def _semantic_target_score(request,candidate):
+    if str(request.get("class","")).casefold()!=str(candidate.get("class","")).casefold():
+        return None
+    score=5.0+safe_float(candidate.get("confidence",0.0),0.0)
+    requested_instance=str(request.get("instance","")).casefold()
+    if requested_instance:
+        if requested_instance!=str(candidate.get("instance","")).casefold():
+            return None
+        score+=4.0
+    if finite_number(request.get("index",-1)) and int(request.get("index",-1))>=0:
+        if int(request["index"])!=int(candidate.get("index",-2)):
+            return None
+        score+=2.0
+    requested_text=str(request.get("text","")).strip().casefold()
+    if requested_text:
+        candidate_text=str(candidate.get("text","")).strip().casefold()
+        if requested_text not in candidate_text and candidate_text not in requested_text:
+            return None
+        score+=3.0
+    requested_attributes=request.get("attributes",{}) if isinstance(request.get("attributes"),dict) else {}
+    candidate_attributes=candidate.get("attributes",{}) if isinstance(candidate.get("attributes"),dict) else {}
+    for key,value in requested_attributes.items():
+        if key not in candidate_attributes or candidate_attributes[key]!=value:
+            return None
+        score+=0.5
+    return score
+
+def ground_semantic_action(action,targets=None,allow_fallback=True):
+    semantic=normalize_semantic_action(action)
+    if semantic is None:
+        coordinate=_normalize_coordinate_action(action.get("grounded_action")) if isinstance(action,dict) and isinstance(action.get("grounded_action"),dict) else _normalize_coordinate_action(action)
+        return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic_action_from_coordinate(coordinate),"grounded_action":coordinate,"grounding":{"source":"coordinate","confidence":1.0,"fallback_used":False}} if coordinate else None
+    action_type=semantic["action_type"]
+    if action_type=="no_op":
+        coordinate=_normalize_coordinate_action({"kind":"no_op","duration":semantic.get("parameters",{}).get("duration",0.35)})
+        return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic,"grounded_action":coordinate,"grounding":{"source":"semantic","confidence":1.0,"fallback_used":False}}
+    requested=semantic["target"]
+    candidates=[]
+    for index,value in enumerate(targets or []):
+        candidate=_normalized_semantic_target(value,index)
+        if candidate is not None:
+            score=_semantic_target_score(requested,candidate)
+            if score is not None:
+                candidates.append((score,candidate))
+    selected=max(candidates,key=lambda item:(item[0],item[1]["confidence"]))[1] if candidates else None
+    if selected is None:
+        fallback=_normalize_coordinate_action(semantic.get("coordinate_fallback")) if allow_fallback else None
+        if fallback is None:
+            return None
+        return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic,"grounded_action":fallback,"grounding":{"source":"coordinate_fallback","confidence":0.0,"fallback_used":True,"reason":"target_not_found"}}
+    left,top,width,height=selected["bbox"]
+    offset=semantic.get("offset",[0.0,0.0])
+    point=[max(0.0,min(1.0,left+width*0.5+float(offset[0])*width*0.5)),max(0.0,min(1.0,top+height*0.5+float(offset[1])*height*0.5))]
+    parameters=semantic.get("parameters",{})
+    duration=parameters.get("duration",0.1)
+    if action_type in {"click","double_click","long_press","move","hover"}:
+        coordinate={"kind":action_type,"path":[point],"duration":duration}
+        if action_type in {"click","double_click","long_press"}:
+            coordinate["button"]=parameters.get("button","left")
+    elif action_type=="drag":
+        vector=parameters.get("drag_vector",parameters.get("vector",[0.0,0.0]))
+        if not isinstance(vector,(list,tuple)) or len(vector)<2 or not finite_number(vector[0]) or not finite_number(vector[1]):
+            vector=[0.0,0.0]
+        end=[max(0.0,min(1.0,point[0]+float(vector[0]))),max(0.0,min(1.0,point[1]+float(vector[1])))]
+        coordinate={"kind":"drag","button":parameters.get("button","left"),"path":[point,end],"duration":parameters.get("duration",0.45)}
+    elif action_type in {"scroll_v","scroll_h"}:
+        coordinate={"kind":action_type,"delta":parameters.get("delta",120),"path":[point],"duration":parameters.get("duration",0.08)}
+    else:
+        coordinate=None
+    grounded=_normalize_coordinate_action(coordinate) if coordinate else None
+    if grounded is None:
+        return None
+    grounding={
+        "source":selected["source"],"confidence":round(selected["confidence"],6),
+        "fallback_used":False,"target_bbox":[round(value,6) for value in selected["bbox"]],
+        "target_class":selected["class"],"target_instance":selected["instance"],
+        "target_index":selected["index"],
+    }
+    return {
+        "schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic,
+        "grounded_action":grounded,"grounding":grounding,
+    }
+
+def _normalize_coordinate_action(action):
     try:
         if not isinstance(action,dict):
             return None
@@ -1656,6 +2073,20 @@ def normalize_action(action):
         return result
     except (TypeError,ValueError,OverflowError):
         return None
+
+def normalize_action(action):
+    if isinstance(action,GroundedAction):
+        action=action.to_dict()
+    if isinstance(action,dict) and isinstance(action.get("grounded_action"),dict):
+        return _normalize_coordinate_action(action.get("grounded_action"))
+    coordinate=_normalize_coordinate_action(action)
+    if coordinate is not None:
+        return coordinate
+    semantic=normalize_semantic_action(action)
+    if semantic is None:
+        return None
+    grounded=ground_semantic_action(semantic,action.get("semantic_targets",[]) if isinstance(action,dict) else [],True)
+    return _normalize_coordinate_action(grounded.get("grounded_action")) if grounded else None
 def action_family_key(action):
     item=normalize_action(action)
     if not item:
@@ -5420,9 +5851,12 @@ class LearningExecution:
         self.last_action_changed=True
         self.state_since=time.monotonic()
         self.step_id=0
+        self.task_id="default"
 
     def preflight(self):
         self.game=self.phase.get("game") or self.host.require_game()
+        profile=self.host.store.load_game_profile(self.game["id"])
+        self.task_id=normalized_identifier(profile.get("default_task_id"),"default",96)
         self.target=self.phase.get("window") or self.host.require_window(False)
         self.calibration=self.phase.get("calibration") or self.host.ensure_capture_calibration(self.target,"学习")
         self.session_id="learn|"+uuid.uuid4().hex
@@ -5491,8 +5925,8 @@ class LearningExecution:
             self.last_action_signature,self.last_action_time,self.last_action_changed,
             frame.get("motion_valid",False),self.session_id,frame.get("method","unknown"),"one_shot",temporal,
         )
-        context.update({"episode_id":self.session_id,"step_id":self.step_id,"action_delay":round(max(0.0,time.monotonic()-self.last_action_time),4) if self.last_action_time else None,
-            "human_override":False,"trajectory_schema_version":2})
+        context.update({"episode_id":self.session_id,"task_id":self.task_id,"step_id":self.step_id,"action_delay":round(max(0.0,time.monotonic()-self.last_action_time),4) if self.last_action_time else None,
+            "human_override":False,"trajectory_schema_version":TRAJECTORY_SCHEMA_VERSION})
         return context
 
     def save(self,frame,action,source,weight=1.0,cursor_point=None):
@@ -5964,10 +6398,27 @@ class ReviewController:
         return uncovered
     def build_experiences(self,samples,ocr_events,profile):
         events=sorted((item for item in ocr_events if isinstance(item,dict)),key=lambda item:safe_float(item.get("created"),0.0))
-        step_penalty=safe_float(profile.get("step_penalty",-0.01),-0.01,-1.0,0.0)
-        success_reward=safe_float(profile.get("success_reward",1.0),1.0,-10.0,10.0)
-        failure_reward=safe_float(profile.get("failure_reward",-1.0),-1.0,-10.0,10.0)
         gamma=safe_float(profile.get("offline_discount",0.97),0.97,0.0,0.999)
+        game_id=str(profile.get("game_id") or (samples[0].get("game_id") if samples else ""))
+        default_task_id=normalized_identifier(profile.get("default_task_id"),"default",96)
+        task_runtimes={}
+        def task_runtime(task_id):
+            tid=normalized_identifier(task_id,default_task_id,96)
+            runtime=task_runtimes.get(tid)
+            if runtime is not None:
+                return runtime
+            payload=None
+            store=getattr(self.host,"store",None) if getattr(self,"host",None) is not None else None
+            if store is not None and game_id:
+                try:
+                    payload=store.load_task(game_id,tid)
+                except Exception:
+                    payload=None
+            if not isinstance(payload,dict):
+                payload={**profile,"game_id":game_id,"task_id":tid,"name":tid}
+            runtime=TaskRuntime(TaskDefinition.from_mapping(payload,game_id,tid))
+            task_runtimes[tid]=runtime
+            return runtime
         experiences=[]
         by_session=defaultdict(list)
         for item in samples:
@@ -5994,26 +6445,26 @@ class ReviewController:
                         terminal=str(event.get("terminal"))
                     if abs(safe_float(event.get("progress"),0.0))>abs(progress):
                         progress=max(-1.0,min(1.0,safe_float(event.get("progress"),0.0)))
-                reward=step_penalty+progress*0.5
-                result="neutral"
-                if terminal=="success":
-                    reward+=success_reward; result="success"
-                elif terminal=="failure":
-                    reward+=failure_reward; result="failure"
-                elif progress>0:
-                    result="progress"
-                elif progress<0:
-                    result="regress"
                 action_id=str(item.get("_action_cluster") or item.get("_canonical_action_signature") or action_signature(item.get("a")))
                 state=visual_perceptual_hash(item["f"]); next_state=visual_perceptual_hash(next_item["f"])
                 context=item.get("context",{}) if isinstance(item.get("context"),dict) else {}
-                done=bool(terminal in {"success","failure"} or index+1>=len(ordered))
+                task_id=normalized_identifier(context.get("task_id"),default_task_id,96)
+                visual_change=visual_distance(item["f"],next_item["f"])
+                repeated=bool(index>0 and action_signature(ordered[index-1].get("a"))==action_signature(item.get("a")))
+                transition={"terminal":terminal,"progress_score":progress,"changed":visual_change>0.0,"repeated":repeated,"reset":any(bool(event.get("reset")) for event in matched if isinstance(event,dict))}
+                reward_result=task_runtime(task_id).evaluate(transition)
+                reward=safe_float(reward_result.get("reward"),0.0)
+                result="success" if reward_result.get("success") else "failure" if reward_result.get("failure") else "progress" if progress>0 else "regress" if progress<0 else "neutral"
+                done=bool(reward_result.get("success") or reward_result.get("failure") or index+1>=len(ordered))
                 action_delay=safe_float(context.get("action_delay",max(0.0,next_created-start)),max(0.0,next_created-start),0.0,60.0)
-                experience={"episode_id":str(context.get("episode_id") or session),"step_id":safe_int(context.get("step_id",index),index,0),
+                semantic_action=normalize_semantic_action(context.get("semantic_action")) or semantic_action_from_coordinate(item.get("a"))
+                grounded_action=normalize_action(context.get("grounded_action")) or normalize_action(item.get("a"))
+                experience={"game_id":game_id,"task_id":task_id,"episode_id":str(context.get("episode_id") or session),"step_id":safe_int(context.get("step_id",index),index,0),
                     "state_t":state,"action_t":action_id,"state_t+1":next_state,"reward_t":round(reward,6),"done":done,
                     "success":result=="success","failure":result=="failure","result":result,"progress_score":round(progress,6),
                     "action_delay":round(action_delay,6),"human_override":bool(context.get("human_override") or str(item.get("source","")).startswith("teach")),
-                    "created_t":start,"created_t+1":next_created,"visual_change":round(visual_distance(item["f"],next_item["f"]),6),"ocr_events":ocr,
+                    "created_t":start,"created_t+1":next_created,"visual_change":round(visual_change,6),"ocr_events":ocr,"reward_components":reward_result.get("components",{}),
+                    "semantic_action":semantic_action,"grounded_action":grounded_action,"grounding":context.get("grounding",{}),"trajectory_schema_version":TRAJECTORY_SCHEMA_VERSION,
                     "session":session,"state":state,"action":action_id,"next_state":next_state,"reward":round(reward,6)}
                 episode.append(experience)
             running=0.0
@@ -6025,9 +6476,11 @@ class ReviewController:
         action_rows=defaultdict(lambda:{"count":0,"reward_sum":0.0,"return_sum":0.0,"success":0,"failure":0,"neutral":0,"next_states":Counter(),"override":0})
         state_action_ids={}
         for experience in experiences:
-            state_key=experience["state_t"]+"|"+experience["action_t"]
-            state_action_ids[state_key]=experience["action_t"]
-            for row in (state_rows[state_key],action_rows[experience["action_t"]]):
+            task_id=normalized_identifier(experience.get("task_id"),default_task_id,96)
+            state_key=task_id+"|"+experience["state_t"]+"|"+experience["action_t"]
+            action_key=task_id+"|"+experience["action_t"]
+            state_action_ids[state_key]=action_key
+            for row in (state_rows[state_key],action_rows[action_key]):
                 row["count"]+=1; row["reward_sum"]+=experience["reward_t"]; row["return_sum"]+=experience["return_t"]
                 row["success"]+=int(experience["success"]); row["failure"]+=int(experience["failure"]); row["neutral"]+=int(not experience["success"] and not experience["failure"])
                 row["override"]+=int(experience["human_override"]); row["next_states"][experience["state_t+1"]]+=1
@@ -6051,9 +6504,11 @@ class ReviewController:
             prior=action_model.get(state_action_ids.get(key),{})
             advantage=row["q_value"]-safe_float(prior.get("q_value",baseline),baseline)
             row["advantage"]=round(advantage,6); row["awr_weight"]=round(math.exp(max(-4.0,min(4.0,advantage/temperature))),6)
-        model={"schema_version":POLICY_MODEL_SCHEMA_VERSION,"algorithm":"conservative_return_regression+advantage_weighted_behavior_cloning",
+        task_ids=sorted({normalized_identifier(item.get("task_id"),default_task_id,96) for item in experiences})
+        model={"schema_version":POLICY_MODEL_SCHEMA_VERSION,"algorithm":"task_conditioned_conservative_return_regression+advantage_weighted_behavior_cloning",
             "gamma":gamma,"awr_temperature":temperature,"value_baseline":round(baseline,6),"total_count":len(experiences),
-            "state_action":state_model,"action_prior":action_model,"episode_metrics":summarize_episode_metrics(experiences)}
+            "default_task_id":default_task_id,"task_ids":task_ids,"state_action":state_model,"action_prior":action_model,
+            "episode_metrics":summarize_episode_metrics(experiences)}
         return experiences,model
     def run(self):
         return ReviewRunner(ModeContext.from_host(self.host),self,self.host,False).run()
@@ -6410,6 +6865,7 @@ class ReviewExecution:
         train_by_session=defaultdict(list)
         for item in self.train:
             train_by_session[self.host.review_controller.session_of(item)].append(item)
+        default_task_id=normalized_identifier(self.host.store.load_game_profile(self.game["id"]).get("default_task_id"),"default",96)
         for _,session_items in sorted(train_by_session.items()):
             ordered=sorted(session_items,key=lambda item:float(item.get("created",0.0)))
             history=deque(["<START>","<START>","<START>","<START>"],maxlen=4)
@@ -6417,15 +6873,20 @@ class ReviewExecution:
                 cluster_id=str(item.get("_action_cluster") or "")
                 if not cluster_id:
                     continue
+                context=item.get("context",{}) if isinstance(item.get("context"),dict) else {}
+                task_id=normalized_identifier(context.get("task_id"),default_task_id,96)
+                prefix=task_id+"|"
                 for size in range(1,5):
-                    counts[str(size)+"|"+"|".join(list(history)[-size:])][cluster_id]+=1
+                    counts[prefix+str(size)+"|"+"|".join(list(history)[-size:])][cluster_id]+=1
                 signature=str(item.get("_canonical_action_signature") or action_signature(item["a"]))
-                counts[history[-1]][cluster_id]+=1
+                counts[prefix+history[-1]][cluster_id]+=1
                 history.append(signature)
         self.sequence_model={key:dict(value) for key,value in counts.items()}
 
     def build_model(self):
         profile=self.host.store.load_game_profile(self.game["id"])
+        tasks=self.host.store.list_tasks(self.game["id"],True)
+        default_task_id=normalized_identifier(profile.get("default_task_id"),"default",96)
         events=self.host.store.load_ocr_experience_events(self.game["id"],5000)
         experiences,experience_model=self.host.review_controller.build_experiences(self.train,events,profile)
         sleep_seed=safe_int(getattr(self.host,"sleep_seed",0),0,0,2**63-1)
@@ -6436,6 +6897,8 @@ class ReviewExecution:
             "action_clusters":len(self.action_clusters),"rejection_constraints":self.rejection_constraints,"prototypes":self.prototypes,"capture_backends":self.train_methods,
             "validation":self.validation,"training_checksums":self.train_checksums,"holdout_checksums":self.holdout_checksums,"sequence_model":self.sequence_model,
             "experiences":experiences,"experience_model":experience_model,"episode_metrics":summarize_episode_metrics(experiences),
+            "default_task_id":default_task_id,"task_ids":sorted({str(item.get("task_id","default")) for item in tasks}),
+            "task_definitions_checksum":task_definitions_checksum(tasks),
             "policy_score_weights":normalized_policy_score_weights(profile.get("policy_score_weights")),"model_binding":model_binding_from_samples(self.train),
             "safety_profile_checksum":profile_checksum(profile),"stopped":False}
 
@@ -6550,7 +7013,13 @@ class TrainingExecution:
         self.target=self.phase.get("window") or self.host.require_window(False)
         self.model=self.host.store.load_trainable_model(self.game["id"])
         self.host.validate_model_binding(self.model,self.target)
-        self.profile=self.host.store.load_game_profile(self.game["id"])
+        base_profile=self.host.store.load_game_profile(self.game["id"])
+        active_task_id=normalized_identifier(base_profile.get("default_task_id"),"default",96)
+        task=self.host.store.load_task(self.game["id"],active_task_id)
+        self.profile=task_profile_overlay(base_profile,task or {**base_profile,"task_id":active_task_id})
+        experience_schema=safe_int(self.model.get("experience_model",{}).get("schema_version",0),0) if isinstance(self.model.get("experience_model"),dict) else 0
+        if experience_schema>=3 and active_task_id not in {str(value) for value in self.model.get("task_ids",[])}:
+            raise RuntimeError("当前任务未包含在已睡眠模型中，请重新学习和睡眠")
         self.agent_policy=TaskAgentPolicy(self.profile)
         if not self.agent_policy.allowed:
             raise RuntimeError("当前游戏未配置任何自动动作白名单，请先打开“任务与安全”")
@@ -7524,9 +7993,9 @@ class DataStore:
             except Exception as error:
                 self.logger.write("DATABASE_LIGHT_CHECKPOINT_FAILED",error)
     def default_game_profile(self):
-        return {"goal":"模仿已学习的鼠标操作并在不确定时停止","allowed_families":["no_op","click|left","move","hover","scroll_v|1","scroll_v|-1"],"max_consecutive_failures":3,"exploration_enabled":False,
+        return {"goal":"模仿已学习的鼠标操作并在不确定时停止","default_task_id":"default","allowed_families":["no_op","click|left","move","hover","scroll_v|1","scroll_v|-1"],"max_consecutive_failures":3,"exploration_enabled":False,
             "restart_action":None,"success_states":[],"failure_states":[],"success_hash_distance":6,"failure_hash_distance":6,"terminal_confirm_frames":2,
-            "success_reward":1.0,"failure_reward":-1.0,"step_penalty":-0.01,"offline_discount":0.97,"awr_temperature":0.5,
+            "success_reward":1.0,"failure_reward":-1.0,"step_penalty":-0.01,"progress_scale":0.5,"no_change_penalty":0.0,"repeat_penalty":0.0,"offline_discount":0.97,"awr_temperature":0.5,
             "policy_score_weights":dict(DEFAULT_POLICY_SCORE_WEIGHTS),"updated":0.0}
     def load_game_profile(self,gid):
         profile=self.default_game_profile()
@@ -7549,6 +8018,7 @@ class DataStore:
         if isinstance(profile,dict):
             value.update(profile)
         value["goal"]=str(value.get("goal","")).strip()[:2000] or "模仿已学习的鼠标操作并在不确定时停止"
+        value["default_task_id"]=normalized_identifier(value.get("default_task_id"),"default",96)
         value["allowed_families"]=sorted({str(item) for item in value.get("allowed_families",[]) if str(item)})
         value["success_states"]=sorted({str(item) for item in value.get("success_states",[]) if str(item)})
         value["failure_states"]=sorted({str(item) for item in value.get("failure_states",[]) if str(item)})
@@ -7568,7 +8038,77 @@ class DataStore:
             self.db.execute("INSERT OR REPLACE INTO game_profiles(game_id,updated,payload,checksum) VALUES(?,?,?,?)",(str(gid),value["updated"],raw,checksum))
             self.db.execute("UPDATE games SET needs_review=1 WHERE id=?",(str(gid),))
         self.model_cache.pop(str(gid),None)
+        self.save_task(gid,self.default_task_definition(gid,value).to_dict(),False)
         return value
+    def default_task_definition(self,gid,profile=None):
+        source=dict(profile) if isinstance(profile,dict) else self.load_game_profile(gid)
+        return TaskDefinition.from_mapping({**source,"game_id":str(gid),"task_id":source.get("default_task_id","default"),"name":source.get("task_name","默认任务")},str(gid),source.get("default_task_id","default"))
+    def list_tasks(self,gid,include_disabled=False):
+        game_id=str(gid)
+        with self.lock:
+            rows=self.db.execute("SELECT task_id,payload,checksum,enabled FROM game_tasks WHERE game_id=? ORDER BY updated DESC,task_id",(game_id,)).fetchall()
+        result=[]
+        for row in rows:
+            try:
+                raw=str(row["payload"])
+                if hashlib.sha256(raw.encode("utf-8")).hexdigest()!=str(row["checksum"]):
+                    raise ValueError("任务校验和不匹配")
+                task=TaskDefinition.from_mapping(json.loads(raw),game_id,row["task_id"])
+                if include_disabled or task.enabled and bool(row["enabled"]):
+                    result.append(task.to_dict())
+            except (json.JSONDecodeError,TypeError,ValueError,OverflowError) as error:
+                self.logger.write("GAME_TASK_LOAD_FAILED",error,game_id=game_id,details={"task_id":str(row["task_id"])})
+        default_task=self.default_task_definition(game_id).to_dict()
+        if not any(item.get("task_id")==default_task["task_id"] for item in result) and (include_disabled or default_task.get("enabled",True)):
+            result.append(default_task)
+        return sorted(result,key=lambda item:(item.get("task_id")!=default_task["task_id"],str(item.get("name","")),str(item.get("task_id",""))))
+    def load_task(self,gid,task_id="default"):
+        game_id=str(gid)
+        tid=normalized_identifier(task_id,"default",96)
+        with self.lock:
+            row=self.db.execute("SELECT payload,checksum FROM game_tasks WHERE game_id=? AND task_id=?",(game_id,tid)).fetchone()
+        if row:
+            try:
+                raw=str(row["payload"])
+                if hashlib.sha256(raw.encode("utf-8")).hexdigest()!=str(row["checksum"]):
+                    raise ValueError("任务校验和不匹配")
+                return TaskDefinition.from_mapping(json.loads(raw),game_id,tid).to_dict()
+            except (json.JSONDecodeError,TypeError,ValueError,OverflowError) as error:
+                self.logger.write("GAME_TASK_LOAD_FAILED",error,game_id=game_id,details={"task_id":tid})
+        profile=self.load_game_profile(game_id)
+        default_id=normalized_identifier(profile.get("default_task_id"),"default",96)
+        if tid==default_id or tid=="default":
+            return self.default_task_definition(game_id,profile).to_dict()
+        return None
+    def save_task(self,gid,task,mark_review=True):
+        self._ensure_writable()
+        game_id=str(gid)
+        definition=TaskDefinition.from_mapping(task,game_id,(task.get("task_id") if isinstance(task,dict) else "default"))
+        if definition.game_id and definition.game_id!=game_id:
+            raise RuntimeError("任务game_id与目标游戏不一致")
+        payload=json.dumps(definition.to_dict(),ensure_ascii=False,sort_keys=True,separators=(",",":"))
+        checksum=hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        with self.lock,self.db:
+            if not self.db.execute("SELECT 1 FROM games WHERE id=?",(game_id,)).fetchone():
+                raise RuntimeError("游戏不存在")
+            self.db.execute("INSERT OR REPLACE INTO game_tasks(game_id,task_id,updated,enabled,payload,checksum) VALUES(?,?,?,?,?,?)",(game_id,definition.task_id,time.time(),1 if definition.enabled else 0,payload,checksum))
+            if mark_review:
+                self.db.execute("UPDATE games SET needs_review=1 WHERE id=?",(game_id,))
+        self.model_cache.pop(game_id,None)
+        return definition.to_dict()
+    def delete_task(self,gid,task_id):
+        self._ensure_writable()
+        game_id=str(gid)
+        tid=normalized_identifier(task_id,"default",96)
+        profile=self.load_game_profile(game_id)
+        if tid==normalized_identifier(profile.get("default_task_id"),"default",96):
+            raise RuntimeError("不能删除当前默认任务")
+        with self.lock,self.db:
+            cursor=self.db.execute("DELETE FROM game_tasks WHERE game_id=? AND task_id=?",(game_id,tid))
+            if int(cursor.rowcount or 0)>0:
+                self.db.execute("UPDATE games SET needs_review=1 WHERE id=?",(game_id,))
+        self.model_cache.pop(game_id,None)
+        return int(cursor.rowcount or 0)>0
     def quarantine_corrupt_row(self,table_name,row_id,game_id,reason,payload=""):
         if self.read_only:
             return
@@ -7877,6 +8417,8 @@ class DataStore:
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_rejections_game_created ON rejections(game_id,created DESC)")
         self.db.execute("CREATE TABLE IF NOT EXISTS capture_calibrations(identity_key TEXT NOT NULL,backend TEXT NOT NULL,saved REAL NOT NULL,payload TEXT NOT NULL,checksum TEXT NOT NULL,PRIMARY KEY(identity_key,backend))")
         self.db.execute("CREATE TABLE IF NOT EXISTS game_profiles(game_id TEXT PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,updated REAL NOT NULL,payload TEXT NOT NULL,checksum TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS game_tasks(game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,task_id TEXT NOT NULL,updated REAL NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,payload TEXT NOT NULL,checksum TEXT NOT NULL,PRIMARY KEY(game_id,task_id))")
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_game_tasks_game_enabled ON game_tasks(game_id,enabled,updated DESC)")
         self.db.execute("CREATE TABLE IF NOT EXISTS corrupt_rows(id INTEGER PRIMARY KEY AUTOINCREMENT,source_table TEXT NOT NULL,source_id INTEGER NOT NULL,game_id TEXT NOT NULL,created REAL NOT NULL,reason TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(source_table,source_id))")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_capture_calibrations_saved ON capture_calibrations(saved DESC)")
         self.db.execute(
@@ -7989,6 +8531,18 @@ class DataStore:
                         self.db.execute("UPDATE samples SET preprocess_signature='legacy_gray_v1' WHERE preprocess_signature='' OR preprocess_signature IS NULL")
                         self.db.execute("UPDATE rejections SET preprocess_signature='legacy_gray_v1' WHERE preprocess_signature='' OR preprocess_signature IS NULL")
                         version=8
+                    elif version==8:
+                        self._create_latest_schema()
+                        rows=self.db.execute("SELECT game_id,payload FROM game_profiles").fetchall()
+                        for row in rows:
+                            try:
+                                profile=json.loads(row["payload"])
+                                task=TaskDefinition.from_mapping({**profile,"game_id":row["game_id"],"task_id":profile.get("default_task_id","default"),"name":"默认任务"},row["game_id"],profile.get("default_task_id","default"))
+                                payload=json.dumps(task.to_dict(),ensure_ascii=False,sort_keys=True,separators=(",",":"))
+                                self.db.execute("INSERT OR IGNORE INTO game_tasks(game_id,task_id,updated,enabled,payload,checksum) VALUES(?,?,?,?,?,?)",(task.game_id,task.task_id,time.time(),1 if task.enabled else 0,payload,hashlib.sha256(payload.encode("utf-8")).hexdigest()))
+                            except (json.JSONDecodeError,TypeError,ValueError,OverflowError):
+                                pass
+                        version=9
                     else:
                         raise RuntimeError("没有从数据库版本"+str(version)+"开始的迁移路径")
                     self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)",(str(version),))
@@ -8389,8 +8943,9 @@ class DataStore:
             self.recent_samples_loaded.discard(key)
             self.recent_samples.pop(key,None)
     def _sample_fingerprint(self,feature,action,context=None):
-        temporal=temporal_from_context(context or {})
-        identity={"action":normalize_action(action),"temporal":temporal}
+        source_context=context if isinstance(context,dict) else {}
+        temporal=temporal_from_context(source_context)
+        identity={"action":normalize_action(action),"semantic_action":semantic_action_signature(source_context.get("semantic_action")),"task_id":normalized_identifier(source_context.get("task_id"),"default",96),"temporal":temporal}
         return hashlib.sha256(feature_bytes(feature)+b"\0"+canonical_bytes(identity)).hexdigest()
     def _near_duplicate(self,gid,feature,signature,threshold,context=None):
         game_id=str(gid)
@@ -8421,9 +8976,12 @@ class DataStore:
         self._ensure_writable()
         self._raise_writer_error()
         game_id=str(gid)
-        clean=normalize_action(action)
+        context=dict(context) if isinstance(context,dict) else {}
+        semantic=normalize_semantic_action(action)
+        grounding=ground_semantic_action(action,context.get("semantic_targets",[]),True)
+        clean=normalize_action(grounding or action)
         if not clean or not feature_valid(feature):
-            raise RuntimeError("拒绝保存无效样本")
+            raise RuntimeError("拒绝保存无效或无法落地的样本")
         fbytes=feature_bytes(feature)
         coarse=coarse_feature(fbytes)
         neural=feature_bytes(neural_feature) if feature_valid(neural_feature) else None
@@ -8431,7 +8989,12 @@ class DataStore:
         if rgb is None:
             raise RuntimeError("样本必须包含固定尺寸RGB图像")
         signature=action_signature(clean)
-        context=dict(context) if isinstance(context,dict) else {}
+        semantic=semantic or semantic_action_from_coordinate(clean)
+        context["semantic_action"]=semantic
+        context["grounded_action"]=clean
+        context["grounding"]=dict(grounding.get("grounding",{})) if isinstance(grounding,dict) else {"source":"coordinate","confidence":1.0,"fallback_used":False}
+        context["task_id"]=normalized_identifier(context.get("task_id"),"default",96)
+        context["trajectory_schema_version"]=TRAJECTORY_SCHEMA_VERSION
         context["preprocess_signature"]=preprocess_signature()
         context["preprocess_hash"]=VISION_PREPROCESS_HASH
         context["sample_image_version"]=SAMPLE_IMAGE_VERSION
@@ -9872,22 +10435,42 @@ class TaskSettingsDialog:
             app.show_error(str(error))
             return
         profile=app.store.load_game_profile(game["id"])
+        task_rows=app.store.list_tasks(game["id"],True)
+        tasks={str(item.get("task_id")):dict(item) for item in task_rows if isinstance(item,dict) and item.get("task_id")}
+        default_task_id=normalized_identifier(profile.get("default_task_id"),"default",96)
+        if default_task_id not in tasks:
+            tasks[default_task_id]=app.store.default_task_definition(game["id"],profile).to_dict()
+        active_profile=task_profile_overlay(profile,tasks[default_task_id])
+        deleted_task_ids=set()
         win=tk.Toplevel(app.root)
-        state={"closed":False}
+        state={"closed":False,"task_id":default_task_id}
         win.title("任务目标与安全边界")
         fit_window(win,760,700,520,400)
         frame=ttk.Frame(win,padding=16)
         frame.pack(fill="both",expand=True)
         ttk.Label(frame,text="该系统是按游戏配置的任务型模仿智能体，不保证适用于所有游戏。未进入白名单的动作永远不会自动执行。",wraplength=710).pack(anchor="w",fill="x",pady=(0,10))
-        ttk.Label(frame,text="游戏目标或奖励说明").pack(anchor="w")
+        task_frame=ttk.LabelFrame(frame,text="游戏下的任务",padding=10)
+        task_frame.pack(fill="x",pady=(0,10))
+        task_choice=tk.StringVar(value=default_task_id)
+        task_box=ttk.Combobox(task_frame,textvariable=task_choice,state="readonly",values=sorted(tasks),width=24)
+        task_box.grid(row=0,column=0,sticky="w",padx=(0,8))
+        task_name=tk.StringVar(value=str(tasks[default_task_id].get("name",default_task_id)))
+        ttk.Label(task_frame,text="任务名称").grid(row=0,column=1,sticky="e")
+        ttk.Entry(task_frame,textvariable=task_name,width=24).grid(row=0,column=2,sticky="we",padx=(6,8))
+        new_task_button=ttk.Button(task_frame,text="新建任务")
+        new_task_button.grid(row=0,column=3,padx=(0,6))
+        delete_task_button=ttk.Button(task_frame,text="删除任务")
+        delete_task_button.grid(row=0,column=4)
+        task_frame.columnconfigure(2,weight=1)
+        ttk.Label(frame,text="任务目标或奖励说明").pack(anchor="w")
         goal=tk.Text(frame,height=4,wrap="word")
         goal.pack(fill="x",pady=(4,10))
-        goal.insert("1.0",str(profile.get("goal","")))
+        goal.insert("1.0",str(active_profile.get("goal","")))
         allowed_frame=ttk.LabelFrame(frame,text="自动动作白名单",padding=10)
         allowed_frame.pack(fill="x")
         families=[("等待","no_op"),("左键单击","click|left"),("左键双击","double_click|left"),("左键长按","long_press|left"),("左键拖动","drag|left"),("右键单击","click|right"),("中键单击","click|middle"),("移动",
                 "move"),("悬停","hover"),("向上滚轮","scroll_v|1"),("向下滚轮","scroll_v|-1"),("横向正滚轮","scroll_h|1"),("横向负滚轮","scroll_h|-1")]
-        variables={family:tk.BooleanVar(value=family in set(profile.get("allowed_families",[]))) for _,family in families}
+        variables={family:tk.BooleanVar(value=family in set(active_profile.get("allowed_families",[]))) for _,family in families}
         for index,(label,family) in enumerate(families):
             ttk.Checkbutton(allowed_frame,text=label,variable=variables[family]).grid(row=index//3,column=index%3,sticky="w",padx=6,pady=3)
         safety=ttk.LabelFrame(frame,text="失败停机与回滚",padding=10)
@@ -9909,12 +10492,69 @@ class TaskSettingsDialog:
         ttk.Entry(safety,textvariable=restart_y,width=10).grid(row=3,column=2,sticky="w",pady=(4,0))
         state_frame=ttk.LabelFrame(frame,text="成功、失败状态",padding=10)
         state_frame.pack(fill="both",expand=True,pady=(10,0))
-        success_states=set(str(value) for value in profile.get("success_states",[]))
-        failure_states=set(str(value) for value in profile.get("failure_states",[]))
+        success_states=set(str(value) for value in active_profile.get("success_states",[]))
+        failure_states=set(str(value) for value in active_profile.get("failure_states",[]))
         state_text=tk.StringVar()
         feedback=tk.StringVar(value="选择目标窗口后，可把当前内容区域画面记录为成功或失败状态")
         def refresh_state_text():
             state_text.set("成功状态："+str(len(success_states))+"个    失败状态："+str(len(failure_states))+"个")
+        def capture_task_form(task_id):
+            tid=normalized_identifier(task_id,"default",96)
+            existing=dict(tasks.get(tid,{}))
+            success_detector=dict(existing.get("success_detector",{}))
+            failure_detector=dict(existing.get("failure_detector",{}))
+            success_detector.update({"type":"visual_hash","states":sorted(success_states),"hash_distance":safe_int(profile.get("success_hash_distance",6),6,0,32)})
+            failure_detector.update({"type":"visual_hash","states":sorted(failure_states),"hash_distance":safe_int(profile.get("failure_hash_distance",6),6,0,32)})
+            existing.update({"game_id":game["id"],"task_id":tid,"name":task_name.get().strip() or tid,"goal":goal.get("1.0","end").strip(),
+                "allowed_families":sorted(family for family,variable in variables.items() if variable.get()),"success_detector":success_detector,"failure_detector":failure_detector,"enabled":True})
+            tasks[tid]=TaskDefinition.from_mapping(existing,game["id"],tid).to_dict()
+        def load_task_form(task_id):
+            tid=normalized_identifier(task_id,"default",96)
+            task=tasks[tid]
+            overlay=task_profile_overlay(profile,task)
+            task_name.set(str(task.get("name",tid)))
+            goal.delete("1.0","end")
+            goal.insert("1.0",str(overlay.get("goal","")))
+            allowed=set(overlay.get("allowed_families",[]))
+            for family,variable in variables.items():
+                variable.set(family in allowed)
+            success_states.clear(); success_states.update(str(value) for value in overlay.get("success_states",[]))
+            failure_states.clear(); failure_states.update(str(value) for value in overlay.get("failure_states",[]))
+            refresh_state_text()
+        def switch_task():
+            selected=normalized_identifier(task_choice.get(),state["task_id"],96)
+            if selected not in tasks or selected==state["task_id"]:
+                return
+            capture_task_form(state["task_id"])
+            state["task_id"]=selected
+            load_task_form(selected)
+        def new_task():
+            capture_task_form(state["task_id"])
+            index=1
+            while "task_"+str(index) in tasks:
+                index+=1
+            tid="task_"+str(index)
+            tasks[tid]=TaskDefinition.from_mapping({"game_id":game["id"],"task_id":tid,"name":"新任务"+str(index),"goal":"完成新任务","allowed_families":["no_op","click|left"]},game["id"],tid).to_dict()
+            task_box.configure(values=sorted(tasks))
+            task_choice.set(tid)
+            state["task_id"]=tid
+            load_task_form(tid)
+        def delete_task():
+            if len(tasks)<=1:
+                feedback.set("至少保留一个任务")
+                return
+            tid=state["task_id"]
+            tasks.pop(tid,None)
+            deleted_task_ids.add(tid)
+            selected=sorted(tasks)[0]
+            task_box.configure(values=sorted(tasks))
+            task_choice.set(selected)
+            state["task_id"]=selected
+            load_task_form(selected)
+            feedback.set("任务将在确认保存后删除")
+        task_box.bind("<<ComboboxSelected>>",lambda event:switch_task())
+        new_task_button.configure(command=new_task)
+        delete_task_button.configure(command=delete_task)
         def record_state(kind):
             try:
                 target=app.require_window(False)
@@ -9942,7 +10582,9 @@ class TaskSettingsDialog:
         refresh_state_text()
         def save():
             try:
-                allowed=sorted(family for family,variable in variables.items() if variable.get())
+                capture_task_form(state["task_id"])
+                active_task=tasks[state["task_id"]]
+                allowed=sorted(active_task.get("allowed_families",[]))
                 if not allowed:
                     raise RuntimeError("至少选择一个安全动作；建议保留“等待”")
                 restart_action=None
@@ -9952,10 +10594,16 @@ class TaskSettingsDialog:
                     restart_action=normalize_action({"kind":"click","button":"left","path":[[x,y]],"duration":0.08})
                     if action_family_key(restart_action) not in allowed:
                         raise RuntimeError("启用重新开始动作时，必须把“左键单击”加入白名单")
+                active_overlay=task_profile_overlay(profile,active_task)
                 value=dict(profile)
-                value.update({"goal":goal.get("1.0","end").strip(),"allowed_families":allowed,"max_consecutive_failures":safe_int(max_failures.get(),3,1,20),
-                        "exploration_enabled":bool(exploration.get()),"restart_action":restart_action,"success_states":sorted(success_states),"failure_states":sorted(failure_states)})
+                value.update({"default_task_id":state["task_id"],"goal":active_overlay.get("goal",""),"allowed_families":allowed,"max_consecutive_failures":safe_int(max_failures.get(),3,1,20),
+                        "exploration_enabled":bool(exploration.get()),"restart_action":restart_action,"success_states":active_overlay.get("success_states",[]),"failure_states":active_overlay.get("failure_states",[])})
                 app.store.save_game_profile(game["id"],value)
+                for task in tasks.values():
+                    app.store.save_task(game["id"],task,False)
+                for task_id in sorted(deleted_task_ids):
+                    if task_id not in tasks:
+                        app.store.delete_task(game["id"],task_id)
                 app._refresh_all()
                 app.close_dialog(win,state)
                 app.show_info("任务与安全","配置已保存。安全配置或状态定义改变后，必须重新睡眠才能训练。")
@@ -11356,7 +12004,8 @@ class AppModeMixin:
             tdistance=temporal_distance(query_temporal,proto_temporal)
             temporal_penalty=tdistance*max(40.0,float(proto.get("threshold",100.0))*0.35)
             cluster_id=str(proto.get("cluster_id",proto.get("action_signature","")))
-            sequence_penalty=calculate_sequence_penalty(recent_actions,cluster_id,sequence_model)
+            active_task_id=normalized_identifier(runtime_model.get("default_task_id"),"default",96) if active_runtime else "default"
+            sequence_penalty=calculate_sequence_penalty(recent_actions,cluster_id,sequence_model,active_task_id)
             if cluster_id:
                 grouped[cluster_id].append((raw+previous_penalty+temporal_penalty+sequence_penalty,raw,tdistance,proto))
         total_support=sum(max(1,max(int(item[3].get("action_support",item[3].get("support",0))) for item in items)) for items in grouped.values())
@@ -11370,7 +12019,7 @@ class AppModeMixin:
                 continue
             visual_score=visual_best if len(items)==1 else 0.88*visual_best+0.12*items[1][0]
             support=max(int(item[3].get("action_support",item[3].get("support",0))) for item in items)
-            row=policy_experience_row(experience_model,query_state,cluster_id)
+            row=policy_experience_row(experience_model,query_state,cluster_id,active_task_id)
             awr_weight=safe_float(row.get("awr_weight",1.0),1.0,0.01,100.0)
             bc_probability=max(0.0,min(1.0,support/max(1,total_support)*math.sqrt(awr_weight)))
             q_value=safe_float(row.get("q_value",row.get("mean_reward",0.0)),0.0)
@@ -11456,7 +12105,12 @@ class AppModeMixin:
             errors.append("窗口规则或采集后端版本改变")
         profile=self.store.load_game_profile(self.require_game()["id"])
         if str(model.get("safety_profile_checksum",""))!=profile_checksum(profile):
-            errors.append("任务目标或安全白名单改变")
+            errors.append("游戏级安全配置改变")
+        experience_schema=safe_int(model.get("experience_model",{}).get("schema_version",0),0) if isinstance(model.get("experience_model"),dict) else 0
+        if experience_schema>=3:
+            current_tasks=self.store.list_tasks(self.require_game()["id"],True)
+            if str(model.get("task_definitions_checksum",""))!=task_definitions_checksum(current_tasks):
+                errors.append("任务定义或任务奖励改变")
         if errors:
             raise RuntimeError("模型与当前窗口/任务绑定不一致："+"、".join(errors)+"；请重新学习或睡眠")
         self.require_ai_runtime()
@@ -11537,9 +12191,11 @@ class AppModeMixin:
     def action_strictness(self,action):
         return action_runtime_metadata(action)["strictness"]
     def execute_action(self,target,action,expected_frame=None,mouse_interrupt=None,keyboard_monitor=None,keyboard_interrupt=None):
-        item=normalize_action(action)
+        semantic_targets=expected_frame.get("semantic_targets",[]) if isinstance(expected_frame,dict) else []
+        grounded=ground_semantic_action(action,semantic_targets,True)
+        item=normalize_action(grounded or action)
         if not item:
-            raise RuntimeError("模型包含无效动作")
+            raise RuntimeError("模型包含无法落地的动作")
         expected_rect=tuple(expected_frame.get("rect",())) if isinstance(expected_frame,dict) else ()
         expected_dpi=int(expected_frame.get("dpi",0)) if isinstance(expected_frame,dict) and finite_number(expected_frame.get("dpi",0)) else 0
         needs_input=item.get("kind")!="no_op"
@@ -12944,23 +13600,32 @@ def _atomic_write(path,data):
     return durable_atomic_write(path,data)
 DEVELOPMENT_MODULE_ANCHORS=(
     ("src/bootstrap.py",None),
-    ("src/windows/capture.py","CaptureProcessWorker"),
+    ("src/core/metrics.py","RuntimeMetrics"),
+    ("src/representation/features.py","visual_scene_key"),
+    ("src/policy/task_policy.py","TaskAgentPolicy"),
+    ("src/core/contracts.py","WindowIdentity"),
+    ("src/input/actions.py","normalized_identifier"),
+    ("src/core/tasks.py","TaskDefinition"),
+    ("src/reward/providers.py","RewardProvider"),
+    ("src/input/semantic_grounding.py","normalize_semantic_action"),
+    ("src/capture/windows.py","CaptureProcessWorker"),
     ("src/acceptance/report.py","AcceptanceReport"),
-    ("src/windows/identity.py","WinBridge"),
+    ("src/input/windows.py","WinBridge"),
     ("src/modes/base.py","ModeStateCallbacks"),
+    ("src/safety/contracts.py","TrainingCandidateConfirmer"),
     ("src/modes/learning.py","LearningController"),
     ("src/modes/sleeping.py","ReviewController"),
     ("src/modes/training.py","TrainingController"),
     ("src/modes/guidance.py","GuidanceWindow"),
     ("src/storage/database.py","DataStore"),
-    ("src/gui/dialogs.py","GameSelectionDialog"),
-    ("src/gui/app.py","AppUiMixin"),
+    ("src/ui/dialogs.py","GameSelectionDialog"),
+    ("src/ui/app.py","AppUiMixin"),
     ("src/acceptance/windows.py","ReviewProcessHost"),
-    ("src/bootstrap_runtime.py","SemanticEventHub"),
+    ("src/runtime/bootstrap.py","SemanticEventHub"),
     ("src/runtime/install.py","_validated_download"),
-    ("src/ai/worker.py","OfflineVisionRuntime"),
+    ("src/learning/vision.py","OfflineVisionRuntime"),
     ("src/acceptance/windows_runtime.py","_acceptance_geometry_complete"),
-    ("src/acceptance/static.py","logic_contract_suite"),
+    ("src/tests/contracts.py","logic_contract_suite"),
 )
 
 def _top_level_node_name(node):
@@ -15821,6 +16486,23 @@ def logic_contract_suite():
         checks[str(name)]={"passed":bool(condition),"evidence":evidence}
     action=normalize_action({"kind":"click","button":"left","path":[[1.2,-0.2]],"duration":0.01})
     record("action_normalization",bool(action and all(point==[1.0,0.0] for point in action["path"]) and action["duration"]>=0.02),action)
+    semantic=normalize_semantic_action({"action_type":"click","target":{"class":"confirm_button","instance":"primary","text":"确认"},"offset":[0.0,0.0],"parameters":{"button":"left","duration":0.08},"coordinate_fallback":{"kind":"click","button":"left","path":[[0.72,0.84]],"duration":0.08}})
+    grounded=ground_semantic_action(semantic,[{"class":"confirm_button","instance":"primary","text":"确认","bbox":[0.6,0.7,0.2,0.1],"confidence":0.95,"source":"ui_detector"}],True)
+    grounded_point=normalize_action(grounded)["path"][-1] if grounded and normalize_action(grounded) else []
+    record("semantic_action_grounding",bool(semantic and grounded and not grounded["grounding"].get("fallback_used") and len(grounded_point)==2 and abs(grounded_point[0]-0.7)<1e-6 and abs(grounded_point[1]-0.75)<1e-6),{"semantic":semantic,"grounded":grounded})
+    fallback=ground_semantic_action(semantic,[],True)
+    fallback_point=normalize_action(fallback)["path"][-1] if fallback and normalize_action(fallback) else []
+    record("semantic_action_coordinate_fallback",bool(fallback and fallback["grounding"].get("fallback_used") and fallback_point==[0.72,0.84]),fallback)
+    task=TaskDefinition.from_mapping({"game_id":"g","task_id":"battle","name":"战斗","goal":"获胜","step_penalty":-0.01,"success_reward":1.0,"failure_reward":-1.0,"progress_scale":0.5})
+    reward=TaskRuntime(task).evaluate({"terminal":"success","progress_score":1.0,"changed":True,"repeated":False})
+    record("standard_task_reward_contract",abs(reward.get("reward",0.0)-1.49)<1e-9 and reward.get("success") is True and reward.get("failure") is False,{"task":task.to_dict(),"reward":reward})
+    conditioned_model={"default_task_id":"battle","state_action":{"battle|state|cluster":{"q_value":1.0},"inventory|state|cluster":{"q_value":-1.0}},"action_prior":{"battle|cluster":{"q_value":0.5},"inventory|cluster":{"q_value":-0.5}}}
+    battle_row=policy_experience_row(conditioned_model,"state","cluster","battle")
+    inventory_row=policy_experience_row(conditioned_model,"state","cluster","inventory")
+    sequence={"battle|1|x":{"cluster":10.0},"inventory|1|x":{"other":10.0}}
+    battle_penalty=calculate_sequence_penalty(["x"],"cluster",sequence,"battle")
+    inventory_penalty=calculate_sequence_penalty(["x"],"cluster",sequence,"inventory")
+    record("task_conditioned_policy_contract",battle_row.get("q_value")==1.0 and inventory_row.get("q_value")==-1.0 and battle_penalty<inventory_penalty,{"battle":battle_row,"inventory":inventory_row,"battle_penalty":battle_penalty,"inventory_penalty":inventory_penalty})
     rect=normalized_rect((120,80,400,200),(100,50,800,600))
     restored=apply_normalized_rect((100,50,800,600),rect)
     record("coordinate_roundtrip",all(abs(a-b)<=1 for a,b in zip(restored,(120,80,400,200))),{"normalized":rect,"restored":restored})
