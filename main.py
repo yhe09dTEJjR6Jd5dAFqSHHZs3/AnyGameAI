@@ -19,6 +19,7 @@ import base64
 import io
 import tokenize
 import re
+import unicodedata
 from typing import Protocol,runtime_checkable
 import tempfile
 import shutil
@@ -62,20 +63,23 @@ FEATURE_ALGORITHM_VERSION=4
 ACTION_ALGORITHM_VERSION=6
 DATABASE_SCHEMA_VERSION=12
 MODEL_SCHEMA_VERSION=4
-POLICY_MODEL_SCHEMA_VERSION=5
+POLICY_MODEL_SCHEMA_VERSION=6
 DEFAULT_POLICY_SCORE_WEIGHTS={"bc":60.0,"q":45.0,"success":35.0,"risk":45.0,"ood":55.0}
 DEFAULT_SAMPLE_BUDGET=1500
 MAX_SAMPLES=6000
 MAX_PROTOTYPES=320
-GENERALIZATION_SCHEMA_VERSION=2
-DATA_LINEAGE_SCHEMA_VERSION=2
-MODALITY_MASK_SCHEMA_VERSION=1
+GENERALIZATION_SCHEMA_VERSION=3
+DATA_LINEAGE_SCHEMA_VERSION=3
+MODALITY_MASK_SCHEMA_VERSION=2
 MAX_TRAINING_SAMPLES=24000
 POLICY_ENSEMBLE_SIZE=5
 POLICY_INPUT_SIZE=64
 POLICY_HIDDEN_SIZE=32
 LATENT_STATE_SIZE=32
 LATENT_ACTION_SIZE=16
+SEMANTIC_ENCODER_SCHEMA_VERSION=1
+SEMANTIC_EMBEDDING_SIZE=48
+SEMANTIC_VOCAB_LIMIT=4096
 LATENT_WORLD_ENSEMBLE_SIZE=3
 ADAPTER_RANK=3
 SLEEP_PIPELINE_PHASES=("integrity_and_leakage","perception_and_termination","offline_policy_value_risk","calibration_and_ood","grouped_isolated_acceptance")
@@ -83,9 +87,9 @@ SEMANTIC_DETECTOR_SCHEMA_VERSION=1
 REPLAY_BUNDLE_SCHEMA_VERSION=1
 TASK_INDUCTION_SCHEMA_VERSION=1
 TEMPORAL_TERMINATION_SCHEMA_VERSION=1
-SKILL_DISCOVERY_SCHEMA_VERSION=1
+SKILL_DISCOVERY_SCHEMA_VERSION=2
 MODEL_PROMOTION_SCHEMA_VERSION=1
-EXPERIENCE_PORTFOLIO_SCHEMA_VERSION=1
+EXPERIENCE_PORTFOLIO_SCHEMA_VERSION=2
 REALTIME_BUDGET_MS={"capture_p95":35.0,"base_vision_p95":25.0,"semantic_ocr_p95":100.0,"candidate_ranking_p95":12.0,"escape_to_input_stop_p99":100.0}
 SUPPORTED_BUTTONS={"left","right","middle"}
 SUPPORTED_KINDS={"no_op","click","double_click","long_press","drag","scroll_v","scroll_h","move","hover"}
@@ -6738,11 +6742,18 @@ class LearningExecution:
         self.state_since=time.monotonic()
         self.step_id=0
         self.task_id="default"
+        self.capability=CapabilityProfile({})
+        self.keyboard_enabled=False
+        self.semantic_keymap={}
+        self.semantic_keyboard_events=deque(maxlen=64)
 
     def preflight(self):
         self.game=self.phase.get("game") or self.host.require_game()
         profile=self.host.store.load_game_profile(self.game["id"])
         self.task_id=normalized_identifier(profile.get("default_task_id"),"default",96)
+        self.capability=CapabilityProfile(profile)
+        self.keyboard_enabled=self.capability.authorize("keyboard")
+        self.semantic_keymap=dict(self.capability.semantic_keymap)
         self.target=self.phase.get("window") or self.host.require_window(False)
         self.calibration=self.phase.get("calibration") or self.host.ensure_capture_calibration(self.target,"学习")
         self.session_id="learn|"+uuid.uuid4().hex
@@ -6774,16 +6785,27 @@ class LearningExecution:
         events=[event for event in self.keyboard.drain() if event.get("kind")=="other" and event.get("down")]
         if not events:
             return events
+        self.keyboard_count+=len(events)
+        if self.keyboard_enabled:
+            inverse={str(value).casefold():key for key,value in self.semantic_keymap.items()}
+            for event in events:
+                candidates=(str(event.get("vkCode","")),str(event.get("vk","")),str(event.get("scanCode","")))
+                semantic=next((inverse[value.casefold()] for value in candidates if value and value.casefold() in inverse),"")
+                if semantic:
+                    self.semantic_keyboard_events.append({"semantic_action":semantic,"time":safe_float(event.get("time"),time.monotonic()),
+                        "model_version":"semantic_keyboard_v1"})
+                else:
+                    self.keyboard_discarded+=1
+            return []
         self.strict_violation=True
         self.invalid_reason="non_escape_keyboard_input"
-        self.keyboard_count+=len(events)
         self.keyboard_state["generation"]+=1
         self.keyboard_state["last_time"]=safe_float(events[0].get("time"),time.monotonic())
         if not self.invalid_marked:
             self.host.store.invalidate_learning_session(self.game["id"],self.session_id,self.invalid_reason)
             self.invalid_marked=True
         self.isolation.signal("keyboard",self.keyboard_state["last_time"])
-        self.host.request_mode_stop("stopped","学习检测到非ESC键盘输入，整段session无效")
+        self.host.request_mode_stop("stopped","学习检测到未授权的非ESC键盘输入，整段session无效")
         self.host.api.block_input()
         self.host.api.release_all_buttons()
         return events
@@ -6814,8 +6836,14 @@ class LearningExecution:
             self.last_action_signature,self.last_action_time,self.last_action_changed,
             frame.get("motion_valid",False),self.session_id,frame.get("method","unknown"),"one_shot",temporal,
         )
-        context.update({"episode_id":self.session_id,"task_id":self.task_id,"step_id":self.step_id,"action_delay":round(max(0.0,time.monotonic()-self.last_action_time),4) if self.last_action_time else None,
-            "human_override":False,"trajectory_schema_version":TRAJECTORY_SCHEMA_VERSION})
+        keyboard_events=list(self.semantic_keyboard_events)
+        self.semantic_keyboard_events.clear()
+        mask=context.get("modality_mask",{}) if isinstance(context.get("modality_mask"),dict) else {}
+        mask.update({"keyboard":bool(keyboard_events),"audio":False,"gamepad":False})
+        context.update({"episode_id":self.session_id,"task_id":self.task_id,"step_id":self.step_id,
+            "action_delay":round(max(0.0,time.monotonic()-self.last_action_time),4) if self.last_action_time else None,
+            "human_override":False,"trajectory_schema_version":TRAJECTORY_SCHEMA_VERSION,"modality_mask":mask,
+            "semantic_keyboard_events":keyboard_events,"modality_versions":self.capability.to_dict().get("modality_permissions",{})})
         return context
 
     def save(self,frame,action,source,weight=1.0,cursor_point=None):
@@ -7486,50 +7514,138 @@ class ReviewController:
     def _run_impl(self,phase=None):
         return ReviewExecution(self,phase).run()
 def build_offline_policy_models(experience_model,experiences,default_task_id):
-    state_source=experience_model.get("state_action",{}) if isinstance(experience_model,dict) else {}
-    prior_source=experience_model.get("action_prior",{}) if isinstance(experience_model,dict) else {}
-    behavior_state_counts=experience_model.get("behavior_state_count",{}) if isinstance(experience_model.get("behavior_state_count"),dict) else {}
-    behavior_action_counts=experience_model.get("behavior_action_count",{}) if isinstance(experience_model.get("behavior_action_count"),dict) else {}
-    behavior_state={}; value_state={}; risk_state={}; grouped=defaultdict(list)
-    for key in sorted(set(state_source)|set(behavior_state_counts)):
-        row=state_source.get(key,{}); prefix=str(key).rsplit("|",1)[0]
-        count=max(1,safe_int(behavior_state_counts.get(key,row.get("behavior_count",row.get("count",0))),0))
-        grouped[prefix].append((key,row,count))
-    for items in grouped.values():
-        total=sum(count*max(0.01,safe_float(row.get("awr_weight",1.0),1.0)) for _,row,count in items)
-        for key,row,behavior_count in items:
-            weight=behavior_count*max(0.01,safe_float(row.get("awr_weight",1.0),1.0))
-            behavior_state[key]={"count":behavior_count,"probability":round(weight/max(1e-9,total),8),"awr_weight":safe_float(row.get("awr_weight",1.0),1.0),
-                "advantage":safe_float(row.get("advantage",0.0),0.0),"human_override_rate":safe_float(row.get("human_override_rate",0.0),0.0)}
-            if row:
-                value_state[key]={"count":safe_int(row.get("count"),0),"expected_return":safe_float(row.get("q_value",0.0),0.0),"q_value":safe_float(row.get("q_value",0.0),0.0),
-                    "success_probability":safe_float(row.get("success_probability",0.0),0.0),"failure_probability":safe_float(row.get("risk_probability",0.0),0.0),
-                    "uncertainty":safe_float(row.get("uncertainty",1.0),1.0),"reward_confidence":safe_float(row.get("mean_reward_confidence",0.0),0.0)}
-                risk_state[key]={"count":safe_int(row.get("count"),0),"risk_probability":safe_float(row.get("risk_probability",0.0),0.0),
-                    "failure_probability":safe_float(row.get("risk_probability",0.0),0.0),"uncertainty":safe_float(row.get("uncertainty",1.0),1.0),
-                    "human_override_rate":safe_float(row.get("human_override_rate",0.0),0.0)}
-    behavior_prior={}; value_prior={}; risk_prior={}; task_totals=defaultdict(float)
-    all_prior_keys=sorted(set(prior_source)|set(behavior_action_counts))
-    for key in all_prior_keys:
-        row=prior_source.get(key,{}); task=str(key).split("|",1)[0]
-        count=max(1,safe_int(behavior_action_counts.get(key,row.get("behavior_count",row.get("count",0))),0))
-        task_totals[task]+=count*max(0.01,safe_float(row.get("awr_weight",1.0),1.0))
-    for key in all_prior_keys:
-        row=prior_source.get(key,{}); task=str(key).split("|",1)[0]
-        count=max(1,safe_int(behavior_action_counts.get(key,row.get("behavior_count",row.get("count",0))),0))
-        weight=count*max(0.01,safe_float(row.get("awr_weight",1.0),1.0))
-        behavior_prior[key]={"count":count,"probability":round(weight/max(1e-9,task_totals[task]),8),"awr_weight":safe_float(row.get("awr_weight",1.0),1.0)}
-        if row:
-            value_prior[key]={"count":safe_int(row.get("count"),0),"expected_return":safe_float(row.get("q_value",0.0),0.0),"q_value":safe_float(row.get("q_value",0.0),0.0),
-                "success_probability":safe_float(row.get("success_probability",0.0),0.0),"failure_probability":safe_float(row.get("risk_probability",0.0),0.0),
-                "uncertainty":safe_float(row.get("uncertainty",1.0),1.0),"reward_confidence":safe_float(row.get("mean_reward_confidence",0.0),0.0)}
-            risk_prior[key]={"count":safe_int(row.get("count"),0),"risk_probability":safe_float(row.get("risk_probability",0.0),0.0),
-                "failure_probability":safe_float(row.get("risk_probability",0.0),0.0),"uncertainty":safe_float(row.get("uncertainty",1.0),1.0)}
-    eligible=safe_int(experience_model.get("value_eligible_count",0),0)
-    behavior_model={"schema_version":2,"algorithm":"advantage_weighted_skill_behavior_cloning","state_action":behavior_state,"action_prior":behavior_prior,"total_count":len(experiences),"default_task_id":default_task_id}
-    value_model={"schema_version":2,"algorithm":"confidence_gated_conservative_n_step_return","state_action":value_state,"action_prior":value_prior,"total_count":eligible,"default_task_id":default_task_id}
-    risk_model={"schema_version":2,"algorithm":"independent_failure_and_irreversible_risk_model","state_action":risk_state,"action_prior":risk_prior,"total_count":eligible,"default_task_id":default_task_id}
-    enough_models=eligible>=max(150,VersionedThresholdConfig.review_min_accepted)
+    eligible=[item for item in experiences or [] if isinstance(item,dict) and item.get("value_update_eligible",True)]
+    transitions=defaultdict(lambda:{"count":0,"reward":0.0,"success":0,"failure":0,"override":0,"next":Counter()})
+    actions_by_state=defaultdict(set)
+    actions_by_task=defaultdict(set)
+    for item in eligible:
+        task=normalized_identifier(item.get("task_id"),default_task_id,96)
+        state=str(item.get("state_t",item.get("state","")))
+        action=str(item.get("action_t",item.get("action","")))
+        next_state=str(item.get("state_t+1",item.get("next_state","")))
+        key=task+"|"+state+"|"+action
+        row=transitions[key]
+        row["count"]+=1
+        row["reward"]+=safe_float(item.get("reward_t",item.get("reward",0.0)),0.0)
+        row["success"]+=int(bool(item.get("success")))
+        row["failure"]+=int(bool(item.get("failure")))
+        row["override"]+=int(bool(item.get("human_override")))
+        row["next"][next_state]+=1
+        actions_by_state[task+"|"+state].add(action)
+        actions_by_task[task].add(action)
+    gamma=safe_float(experience_model.get("gamma",0.97) if isinstance(experience_model,dict) else 0.97,0.97,0.0,0.999)
+    expectile=0.7
+    cql_alpha=0.25
+    beta=max(0.05,safe_float(experience_model.get("awr_temperature",0.5) if isinstance(experience_model,dict) else 0.5,0.5,0.05,10.0))
+    q={key:row["reward"]/max(1,row["count"]) for key,row in transitions.items()}
+    v={state:statistics.fmean(q[state+"|"+action] for action in actions) if actions else 0.0 for state,actions in actions_by_state.items()}
+    losses={"behavior_cloning_loss":0.0,"conservative_q_loss":0.0,"expectile_value_loss":0.0,
+        "advantage_weighted_policy_loss":0.0,"risk_classification_loss":0.0,"ood_calibration_loss":0.0,
+        "world_model_consistency_loss":0.0}
+    for _ in range(80):
+        value_loss=0.0
+        for state,actions in actions_by_state.items():
+            weighted=[]
+            for action in actions:
+                key=state+"|"+action
+                delta=q.get(key,0.0)-v.get(state,0.0)
+                weight=expectile if delta>=0 else 1.0-expectile
+                weighted.append((weight,q.get(key,0.0),transitions[key]["count"]))
+                value_loss+=weight*delta*delta*transitions[key]["count"]
+            denominator=sum(weight*count for weight,_,count in weighted) or 1.0
+            target=sum(weight*value*count for weight,value,count in weighted)/denominator
+            v[state]=0.85*v.get(state,0.0)+0.15*target
+        q_loss=0.0
+        cql_loss=0.0
+        for key,row in transitions.items():
+            task,state,action=key.split("|",2)
+            next_state=row["next"].most_common(1)[0][0] if row["next"] else ""
+            target=row["reward"]/max(1,row["count"])+gamma*v.get(task+"|"+next_state,0.0)
+            state_key=task+"|"+state
+            action_values=[q.get(state_key+"|"+candidate,0.0) for candidate in actions_by_task.get(task,set())]
+            maximum=max(action_values,default=0.0)
+            logsum=maximum+math.log(sum(math.exp(min(40.0,value-maximum)) for value in action_values) or 1.0)
+            penalty=cql_alpha*(logsum-q.get(key,0.0))/math.sqrt(max(1,row["count"]))
+            conservative_target=target-penalty
+            error=q.get(key,0.0)-conservative_target
+            q[key]=0.88*q.get(key,0.0)+0.12*conservative_target
+            q_loss+=error*error*row["count"]
+            cql_loss+=max(0.0,logsum-q.get(key,0.0))*row["count"]
+        losses["expectile_value_loss"]=value_loss/max(1,len(eligible))
+        losses["conservative_q_loss"]=(q_loss+cql_alpha*cql_loss)/max(1,len(eligible))
+    behavior_state={}
+    value_state={}
+    risk_state={}
+    state_action_rows=defaultdict(list)
+    for key,row in transitions.items():
+        task,state,action=key.split("|",2)
+        state_action_rows[task+"|"+state].append((key,row,action))
+    for state,rows in state_action_rows.items():
+        weights=[]
+        for key,row,_ in rows:
+            advantage=q.get(key,0.0)-v.get(state,0.0)
+            weight=row["count"]*math.exp(max(-5.0,min(5.0,advantage/beta)))
+            weights.append(weight)
+        total=sum(weights) or 1.0
+        for (key,row,_),weight in zip(rows,weights):
+            count=max(1,row["count"])
+            success=(row["success"]+1)/(row["success"]+row["failure"]+2)
+            risk=(row["failure"]+1)/(row["success"]+row["failure"]+2)
+            uncertainty=min(1.0,1.0/math.sqrt(count)+0.25*risk)
+            behavior_state[key]={"count":count,"probability":round(weight/total,8),
+                "awr_weight":round(weight/count,8),"advantage":round(q[key]-v.get(state,0.0),8),
+                "human_override_rate":row["override"]/count}
+            value_state[key]={"count":count,"expected_return":q[key],"q_value":q[key],
+                "state_value":v.get(state,0.0),"success_probability":success,"failure_probability":risk,
+                "uncertainty":uncertainty,"reward_confidence":1.0-uncertainty}
+            risk_state[key]={"count":count,"risk_probability":risk,"failure_probability":risk,
+                "uncertainty":uncertainty,"human_override_rate":row["override"]/count}
+            probability=max(1e-9,weight/total)
+            losses["behavior_cloning_loss"]-=row["count"]*math.log(probability)
+            losses["advantage_weighted_policy_loss"]-=weight*math.log(probability)
+            losses["risk_classification_loss"]-=row["failure"]*math.log(max(1e-9,risk))
+            losses["risk_classification_loss"]-=row["success"]*math.log(max(1e-9,1.0-risk))
+            losses["ood_calibration_loss"]+=(uncertainty-1.0/math.sqrt(count))**2
+    behavior_prior={}
+    value_prior={}
+    risk_prior={}
+    for task,actions in actions_by_task.items():
+        keys=[key for key in transitions if key.startswith(task+"|") and key.rsplit("|",1)[-1] in actions]
+        by_action=defaultdict(list)
+        for key in keys:
+            by_action[key.rsplit("|",1)[-1]].append(key)
+        totals={action:sum(transitions[key]["count"] for key in values) for action,values in by_action.items()}
+        denominator=sum(totals.values()) or 1
+        for action,values in by_action.items():
+            prior_key=task+"|"+action
+            count=totals[action]
+            behavior_prior[prior_key]={"count":count,"probability":count/denominator,"awr_weight":1.0}
+            value_prior[prior_key]={"count":count,"q_value":statistics.fmean(q[key] for key in values),
+                "expected_return":statistics.fmean(q[key] for key in values),
+                "success_probability":statistics.fmean(value_state[key]["success_probability"] for key in values),
+                "failure_probability":statistics.fmean(value_state[key]["failure_probability"] for key in values),
+                "uncertainty":statistics.fmean(value_state[key]["uncertainty"] for key in values)}
+            risk_prior[prior_key]={"count":count,"risk_probability":statistics.fmean(risk_state[key]["risk_probability"] for key in values),
+                "failure_probability":statistics.fmean(risk_state[key]["failure_probability"] for key in values),
+                "uncertainty":statistics.fmean(risk_state[key]["uncertainty"] for key in values)}
+    normalizer=max(1,len(eligible))
+    for key in losses:
+        losses[key]=round(losses[key]/normalizer,8)
+    behavior_model={"schema_version":3,"algorithm":"tabular_advantage_weighted_behavior_policy",
+        "state_action":behavior_state,"action_prior":behavior_prior,"total_count":len(eligible),"default_task_id":default_task_id}
+    value_model={"schema_version":3,"algorithm":"implicit_q_learning_with_conservative_q_regularization",
+        "state_action":value_state,"action_prior":value_prior,"total_count":len(eligible),"default_task_id":default_task_id,
+        "expectile":expectile,"cql_alpha":cql_alpha,"gamma":gamma}
+    risk_model={"schema_version":3,"algorithm":"independent_failure_irreversible_and_ood_calibration",
+        "state_action":risk_state,"action_prior":risk_prior,"total_count":len(eligible),"default_task_id":default_task_id}
+    enough_models=len(eligible)>=max(150,VersionedThresholdConfig.review_min_accepted) and len(state_action_rows)>=8
+    diagnostics={"schema_version":1,"algorithm":"strict_offline_iql_cql_awr","losses":losses,
+        "objectives":["behavior_cloning","conservative_q","expectile_value","advantage_weighted_policy",
+            "risk_classification","ood_calibration","world_model_consistency"],"training_transitions":len(eligible),
+        "safety_shield_independent":True}
+    behavior_model["training_diagnostics"]=diagnostics
+    value_model["training_diagnostics"]=diagnostics
+    risk_model["training_diagnostics"]=diagnostics
     return behavior_model,value_model,risk_model,enough_models
 
 class ReviewExecution:
@@ -7871,11 +7987,13 @@ class ReviewExecution:
         self.host.store.replace_episode_trajectories(self.game["id"],experiences,current_build_hash())
         replay_bundles=build_anonymized_replay_bundles(experiences,current_build_hash())
         replay_paths=persist_replay_bundles(self.host.store.base,self.game["id"],replay_bundles)
-        task_induction=TaskInductionEngine.induce(experiences,self.game["id"])
-        temporal_termination_model=train_temporal_termination_model(experiences)
-        discovered_skills=AutomaticSkillDiscovery.discover(experiences)
         experience_portfolio=ExperienceReplayPortfolio.build(experiences)
-        behavior_model,value_model,risk_model,enough_models=build_offline_policy_models(experience_model,experiences,default_task_id)
+        training_experiences=ExperienceReplayPortfolio.partition(experiences,experience_portfolio,"train",MAX_TRAINING_SAMPLES)
+        semantic_encoder=train_shared_semantic_encoder(training_experiences)
+        task_induction=TaskInductionEngine.induce(training_experiences,self.game["id"])
+        temporal_termination_model=train_temporal_termination_model(training_experiences)
+        discovered_skills=AutomaticSkillDiscovery.discover(training_experiences)
+        behavior_model,value_model,risk_model,enough_models=build_offline_policy_models(experience_model,training_experiences,default_task_id)
         decision_calibration={"source":"holdout_auto_calibration" if enough_models else "cold_start_defaults","minimum_score_gap":max(6.0,min(24.0,12.0*(1.0-self.coverage)+6.0)),"margin_ratio":max(0.06,min(0.18,
             self.error_upper_95+0.06)),"maximum_risk_probability":max(0.20,min(0.48,0.48-self.error_upper_95)),"maximum_ood_uncertainty":max(0.52,min(0.78,0.78-self.error_upper_95)),
             "minimum_behavior_probability":0.03 if enough_models else 0.0,"minimum_behavior_gap":max(0.05,min(0.18,self.error_upper_95+0.05)),"holdout_count":self.holdout_count,"accepted_count":self.accepted,"coverage":self.coverage,"error_upper_95":self.error_upper_95}
@@ -7893,7 +8011,10 @@ class ReviewExecution:
             "training_samples":len(self.train),"holdout_samples":len(self.holdout),"invalid_samples":self.stats["invalid"],"action_clusters":len(self.action_clusters),"rejection_constraints":self.rejection_constraints,
             "prototypes":self.prototypes,"capture_backends":self.train_methods,"validation":self.validation,"generalization_evaluation":generalization,"training_checksums":self.train_checksums,
             "holdout_checksums":self.holdout_checksums,"sequence_model":self.sequence_model,"experiences":experiences,"experience_model":experience_model,"behavior_model":behavior_model,"value_model":value_model,
-            "risk_model":risk_model,"decision_calibration":decision_calibration,"episode_metrics":summarize_episode_metrics(experiences),"default_task_id":default_task_id,"task_ids":sorted({str(item.get("task_id",
+            "risk_model":risk_model,"offline_rl_training":value_model.get("training_diagnostics",{}),
+            "semantic_encoder":semantic_encoder,"deduplicated_training_count":len(training_experiences),
+            "decision_calibration":decision_calibration,"episode_metrics":summarize_episode_metrics(experiences),
+            "default_task_id":default_task_id,"task_ids":sorted({str(item.get("task_id",
             "default")) for item in tasks}),"task_definitions_checksum":task_definitions_checksum(tasks),"task_definitions":tasks,"skill_library":skill_library,"policy_score_weights":normalized_policy_score_weights(profile.get("policy_score_weights")),
             "decision_architecture":"task_planner+reusable_skill_policy+value_model+risk_model+independent_safety_shield","state_architecture":"objectized_multiscale_observation+semantic_objects+ocr_values+gru32+task_and_action_history",
             "semantic_action_schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"observation_schema_version":OBSERVATION_SCHEMA_VERSION,"skill_schema_version":SKILL_SCHEMA_VERSION,"state_key_algorithm_version":STATE_KEY_ALGORITHM_VERSION,
@@ -7909,14 +8030,21 @@ class ReviewExecution:
         for discovered in discovered_skills.get("skills",[]):
             self.model["skill_library"][str(discovered.get("skill_id"))]=dict(discovered)
     def build_model(self):
-        self._build_model_base(); experiences=self.model.get("experiences",[]); experience_model=self.model.get("experience_model",{})
-        self.model["candidate_ranker"]=LearnedCandidateRankingHead.train(experience_model,experiences,safe_int(self.model.get("sleep_seed"),0))
-        self.model["world_model"]=train_latent_world_model(experiences); self.model["auditable_transition_model"]=self.model["world_model"].get("auditable_transition_model",{})
-        self.model["learned_subgoal_planner"]=train_learned_subgoal_planner(experiences,self.model.get("task_definitions",[])); self.model["skill_contracts"]={key:dict(value) for key,value in SKILL_CONTRACTS.items()}
+        self._build_model_base()
+        experiences=self.model.get("experiences",[])
+        portfolio=self.model.get("experience_replay_portfolio",{})
+        training_experiences=ExperienceReplayPortfolio.partition(experiences,portfolio,"train",MAX_TRAINING_SAMPLES)
+        experience_model=self.model.get("experience_model",{})
+        self.model["candidate_ranker"]=LearnedCandidateRankingHead.train(
+            experience_model,training_experiences,safe_int(self.model.get("sleep_seed"),0),self.model.get("semantic_encoder"))
+        self.model["world_model"]=train_latent_world_model(training_experiences,self.model.get("semantic_encoder"))
+        self.model["world_model"]["semantic_encoder"]=self.model.get("semantic_encoder",{})
+        self.model["auditable_transition_model"]=self.model["world_model"].get("auditable_transition_model",{})
+        self.model["learned_subgoal_planner"]=train_learned_subgoal_planner(training_experiences,self.model.get("task_definitions",[])); self.model["skill_contracts"]={key:dict(value) for key,value in SKILL_CONTRACTS.items()}
         profile=self.host.store.load_game_profile(self.game["id"]); self.model["generalization_evaluation"]=GeneralizationEvaluator.evaluate(self.train,self.holdout,experiences,self.game["id"],str(profile.get("game_type","ui_game")))
         self.model["sleep_pipeline"]={"schema_version":2,"phases":list(SLEEP_PIPELINE_PHASES),"training_sample_limit":MAX_TRAINING_SAMPLES,"prototype_online_limit":MAX_PROTOTYPES,"stratified_sampling":True}
-        self.model["decision_architecture"]="goal_conditioned_bc+awr+iql+cql_ensemble+latent_rollout+hierarchical_predicate_planner+independent_safety_lease"
-        self.model["state_architecture"]="manual_fallback+read_only_shared_multiscale_backbone+low_rank_film_adapters+object_slots+motion+scene_graph+structured_memory"
+        self.model["decision_architecture"]="skill_generation+strict_offline_iql+cql+awr+risk_calibration+latent_rollout+hierarchical_predicate_planner+independent_safety_lease"
+        self.model["state_architecture"]="manual_fallback+read_only_shared_multiscale_backbone+low_rank_film_adapters+object_slots+tracked_relations+ocr_tokens+semantic_action_history+goal_embedding+persistent_memory"
         self.model["model_hierarchy"]={"shared_backbone":{"read_only":True,"updated_by_game_training":False},"game_type_adapter":{"kind":"low_rank_residual_film","rank":ADAPTER_RANK},
             "game_specific_adapter":{"kind":"low_rank_residual_film","rank":ADAPTER_RANK},"balanced_replay_required_for_shared_update":True,"distillation_required_for_shared_update":True,
             "parameter_change_constraint_required":True,"old_task_regression_required":True,"automatic_rollback_required":True}
@@ -9119,7 +9247,13 @@ class DataStore:
         return {"goal":"模仿已学习的鼠标操作并在不确定时停止","default_task_id":"default","allowed_families":["no_op","click|left","move","hover","scroll_v|1","scroll_v|-1"],"max_consecutive_failures":3,"exploration_enabled":False,
             "restart_action":None,"irreversible_target_whitelist":[],"success_states":[],"failure_states":[],"success_hash_distance":6,"failure_hash_distance":6,"terminal_confirm_frames":2,
             "success_reward":1.0,"failure_reward":-1.0,"step_penalty":-0.01,"progress_scale":0.5,"no_change_penalty":0.0,"repeat_penalty":0.0,"offline_discount":0.97,"awr_temperature":0.5,
-            "policy_score_weights":dict(DEFAULT_POLICY_SCORE_WEIGHTS),"capability_level":0,"keyboard_enabled":False,"sound_enabled":False,"gamepad_enabled":False,"semantic_keymap":{},"game_type":"ui_game","updated":0.0}
+            "policy_score_weights":dict(DEFAULT_POLICY_SCORE_WEIGHTS),"capability_level":0,
+            "keyboard_enabled":False,"sound_enabled":False,"gamepad_enabled":False,"semantic_keymap":{},
+            "modality_permissions":{
+                "keyboard":{"enabled":False,"data_mask":"semantic_only","model_version":"semantic_keyboard_v1","safety_permission":False},
+                "sound":{"enabled":False,"data_mask":"event_only_no_raw_audio","model_version":"audio_event_v1","safety_permission":False},
+                "gamepad":{"enabled":False,"data_mask":"semantic_only","model_version":"gamepad_semantic_v1","safety_permission":False}},
+            "game_type":"ui_game","updated":0.0}
     def load_game_profile(self,gid):
         profile=self.default_game_profile()
         try:
@@ -9155,9 +9289,21 @@ class DataStore:
         value["policy_score_weights"]=normalized_policy_score_weights(value.get("policy_score_weights"))
         value["exploration_enabled"]=bool(value.get("exploration_enabled",False))
         value["capability_level"]=safe_int(value.get("capability_level",0),0,0,4)
-        value["keyboard_enabled"]=bool(value.get("keyboard_enabled",False) and value["capability_level"]>=2)
-        value["sound_enabled"]=bool(value.get("sound_enabled",False) and value["capability_level"]>=3)
-        value["gamepad_enabled"]=bool(value.get("gamepad_enabled",False) and value["capability_level"]>=4)
+        value["keyboard_enabled"]=bool(value.get("keyboard_enabled",False))
+        value["sound_enabled"]=bool(value.get("sound_enabled",False))
+        value["gamepad_enabled"]=bool(value.get("gamepad_enabled",False))
+        permissions=value.get("modality_permissions",{}) if isinstance(value.get("modality_permissions"),dict) else {}
+        value["modality_permissions"]={
+            "keyboard":{"enabled":value["keyboard_enabled"],"data_mask":"semantic_only",
+                "model_version":str((permissions.get("keyboard") or {}).get("model_version","semantic_keyboard_v1")),
+                "safety_permission":value["keyboard_enabled"]},
+            "sound":{"enabled":value["sound_enabled"],"data_mask":"event_only_no_raw_audio",
+                "model_version":str((permissions.get("sound") or {}).get("model_version","audio_event_v1")),
+                "safety_permission":value["sound_enabled"]},
+            "gamepad":{"enabled":value["gamepad_enabled"],"data_mask":"semantic_only",
+                "model_version":str((permissions.get("gamepad") or {}).get("model_version","gamepad_semantic_v1")),
+                "safety_permission":value["gamepad_enabled"]},
+        }
         value["semantic_keymap"]={str(key):str(item) for key,item in (value.get("semantic_keymap",{}) if isinstance(value.get("semantic_keymap"),dict) else {}).items() if str(key) in SEMANTIC_KEY_ACTIONS and str(item)} if "SEMANTIC_KEY_ACTIONS" in globals() else {}
         value["game_type"]=str(value.get("game_type","ui_game"))[:64] or "ui_game"
         value["restart_action"]=normalize_action(value.get("restart_action")) if value.get("restart_action") else None
@@ -10215,7 +10361,10 @@ class DataStore:
         context["raw_feature_preserved"]=True
         context["neural_feature_version"]=NEURAL_FEATURE_VERSION if neural is not None else 0
         mask=context.get("modality_mask",{}) if isinstance(context.get("modality_mask"),dict) else {}
-        context["modality_mask"]={"rgb":True,"manual_vision":True,"neural_vision":neural is not None,"ocr":bool(mask.get("ocr",False)),"motion":bool(mask.get("motion",context.get("motion_channel_valid",False))),"keyboard":bool(mask.get("keyboard",False)),"audio":bool(mask.get("audio",False))}
+        context["modality_mask"]={"rgb":True,"manual_vision":True,"neural_vision":neural is not None,
+            "ocr":bool(mask.get("ocr",False)),"motion":bool(mask.get("motion",context.get("motion_channel_valid",False))),
+            "keyboard":bool(mask.get("keyboard",False)),"audio":bool(mask.get("audio",False)),
+            "gamepad":bool(mask.get("gamepad",False))}
         session_id=str(context.get("session_id") or "unspecified")
         capture_method=str(context.get("capture_method") or "unknown")
         repeat_policy=str(context.get("repeat_policy","one_shot"))
@@ -10359,7 +10508,7 @@ class DataStore:
             raise ValueError("样本上下文必须是字典")
         context.update({"session_id":row["session_id"],"capture_method":row["capture_method"],"repeat_policy":row["repeat_policy"]})
         mask=context.get("modality_mask",{}) if isinstance(context.get("modality_mask"),dict) else {}; context["modality_mask"]={"rgb":rgb is not None,"manual_vision":True,"neural_vision":neural is not None,"ocr":bool(mask.get("ocr",
-            False)),"motion":bool(mask.get("motion",context.get("motion_channel_valid",False))),"keyboard":bool(mask.get("keyboard",False)),"audio":bool(mask.get("audio",False))}
+            False)),"motion":bool(mask.get("motion",context.get("motion_channel_valid",False))),"keyboard":bool(mask.get("keyboard",False)),"audio":bool(mask.get("audio",False)),"gamepad":bool(mask.get("gamepad",False))}
         if not isinstance(context.get("data_lineage"),dict): context["data_lineage"]={"schema_version":DATA_LINEAGE_SCHEMA_VERSION,"lineage_id":str(row["fingerprint"]),"game_id":str(gid),"session_id":str(row["session_id"]),"capture_backend":str(row["capture_method"]),"legacy_backfill":True}
         semantic=normalize_semantic_action(action_payload) or normalize_semantic_action(context.get("semantic_action")) or semantic_action_from_coordinate(action)
         context["semantic_action"]=semantic
@@ -11775,17 +11924,22 @@ class TaskSettingsDialog:
         exploration=tk.BooleanVar(value=bool(profile.get("exploration_enabled",False)))
         ttk.Checkbutton(safety,text="不确定时允许安全探索（仅等待，不产生鼠标输入）",variable=exploration).grid(row=1,column=0,columnspan=3,sticky="w",pady=(6,0))
         capability_level=tk.IntVar(value=safe_int(profile.get("capability_level",0),0,0,4))
-        ttk.Label(safety,text="能力级别0-4（默认0；键盘、声音和手柄必须手动提高级别）").grid(row=2,column=0,columnspan=2,sticky="w",pady=(6,0))
+        keyboard_enabled=tk.BooleanVar(value=bool(profile.get("keyboard_enabled",False)))
+        sound_enabled=tk.BooleanVar(value=bool(profile.get("sound_enabled",False)))
+        gamepad_enabled=tk.BooleanVar(value=bool(profile.get("gamepad_enabled",False)))
+        ttk.Label(safety,text="OCR能力级别0-4；键盘、声音、手柄均由下方独立开关授权").grid(row=2,column=0,columnspan=2,sticky="w",pady=(6,0))
         ttk.Spinbox(safety,from_=0,to=4,textvariable=capability_level,width=6).grid(row=2,column=2,sticky="w",pady=(6,0))
-        restart=normalize_action(profile.get("restart_action"))
+        ttk.Checkbutton(safety,text="启用语义键盘数据与动作权限",variable=keyboard_enabled).grid(row=3,column=0,columnspan=3,sticky="w",pady=(6,0))
+        ttk.Checkbutton(safety,text="启用声音事件数据（不保存原始音频）",variable=sound_enabled).grid(row=4,column=0,columnspan=3,sticky="w",pady=(6,0))
+        ttk.Checkbutton(safety,text="启用语义手柄数据与动作权限",variable=gamepad_enabled).grid(row=5,column=0,columnspan=3,sticky="w",pady=(6,0))
         restart_enabled=tk.BooleanVar(value=bool(restart))
-        ttk.Checkbutton(safety,text="失败状态后执行一次左键单击重新开始",variable=restart_enabled).grid(row=3,column=0,columnspan=3,sticky="w",pady=(6,0))
+        ttk.Checkbutton(safety,text="失败状态后执行一次左键单击重新开始",variable=restart_enabled).grid(row=6,column=0,columnspan=3,sticky="w",pady=(6,0))
         restart_x=tk.StringVar(value=str(round((restart or {"path":[[0.5,0.5]]})["path"][-1][0],4)))
         restart_y=tk.StringVar(value=str(round((restart or {"path":[[0.5,0.5]]})["path"][-1][1],4)))
-        ttk.Label(safety,text="归一化X").grid(row=4,column=0,sticky="e",pady=(4,0))
-        ttk.Entry(safety,textvariable=restart_x,width=10).grid(row=4,column=1,sticky="w",pady=(4,0))
-        ttk.Label(safety,text="Y").grid(row=4,column=1,sticky="e",pady=(4,0))
-        ttk.Entry(safety,textvariable=restart_y,width=10).grid(row=4,column=2,sticky="w",pady=(4,0))
+        ttk.Label(safety,text="归一化X").grid(row=7,column=0,sticky="e",pady=(4,0))
+        ttk.Entry(safety,textvariable=restart_x,width=10).grid(row=7,column=1,sticky="w",pady=(4,0))
+        ttk.Label(safety,text="Y").grid(row=7,column=1,sticky="e",pady=(4,0))
+        ttk.Entry(safety,textvariable=restart_y,width=10).grid(row=7,column=2,sticky="w",pady=(4,0))
         state_frame=ttk.LabelFrame(frame,text="成功、失败状态",padding=10)
         state_frame.pack(fill="both",expand=True,pady=(10,0))
         success_states=set(str(value) for value in active_profile.get("success_states",[]))
@@ -11893,8 +12047,9 @@ class TaskSettingsDialog:
                 active_overlay=task_profile_overlay(profile,active_task)
                 value=dict(profile)
                 value.update({"default_task_id":state["task_id"],"goal":active_overlay.get("goal",""),"allowed_families":allowed,"max_consecutive_failures":safe_int(max_failures.get(),3,1,20),
-                        "exploration_enabled":bool(exploration.get()),"capability_level":safe_int(capability_level.get(),0,0,4),"keyboard_enabled":safe_int(capability_level.get(),0,0,4)>=2,
-                        "sound_enabled":safe_int(capability_level.get(),0,0,4)>=3,"gamepad_enabled":safe_int(capability_level.get(),0,0,4)>=4,"restart_action":restart_action,"success_states":active_overlay.get("success_states",[]),"failure_states":active_overlay.get("failure_states",[])})
+                        "exploration_enabled":bool(exploration.get()),"capability_level":safe_int(capability_level.get(),0,0,4),
+                        "keyboard_enabled":bool(keyboard_enabled.get()),"sound_enabled":bool(sound_enabled.get()),
+                        "gamepad_enabled":bool(gamepad_enabled.get()),"restart_action":restart_action,"success_states":active_overlay.get("success_states",[]),"failure_states":active_overlay.get("failure_states",[])})
                 app.store.save_game_profile(game["id"],value)
                 for task in tasks.values():
                     app.store.save_task(game["id"],task,False)
@@ -13402,7 +13557,7 @@ class AppModeMixin:
             item["success_probability"]=0.65*safe_float(item.get("success_probability"),0.0)+0.35*safe_float(prediction.get("success_probability"),0.0)
             item["risk_probability"]=0.65*safe_float(item.get("risk_probability"),0.0)+0.35*safe_float(prediction.get("failure_probability"),0.0)
             item["q_value"]=0.65*safe_float(item.get("q_value"),0.0)+0.35*safe_float(prediction.get("expected_reward"),0.0)
-            item["goal"]=str(runtime.get("task_goal",item.get("goal",""))); features=goal_conditioned_candidate_features(item,prediction,POLICY_INPUT_SIZE); outputs=LearnedCandidateRankingHead.forward(ranker,features)
+            item["goal"]=str(runtime.get("task_goal",item.get("goal",""))); item["semantic_encoder"]=runtime.get("semantic_encoder",{}); features=goal_conditioned_candidate_features(item,prediction,POLICY_INPUT_SIZE); outputs=LearnedCandidateRankingHead.forward(ranker,features)
             item["rule_audit_score"]=item.get("score"); item["world_model_prediction"]=prediction
             if outputs is None: item["ranker_fallback_used"]=True; continue
             utility=safe_float(outputs.get("utility"),0.5)-0.35*safe_float(outputs.get("risk_probability"),0.0)-0.22*safe_float(outputs.get("uncertainty"),0.0)+0.18*math.tanh(safe_float(outputs.get("expected_reward"),0.0))
@@ -18511,7 +18666,7 @@ def build_cli_parser():
     runtime_test.add_argument("request")
     runtime_test.add_argument("mode",choices=("STARTING","RUNNING","STOPPING"))
     tests=commands.add_parser("test")
-    tests.add_argument("kind",choices=("logic","fault","static","replay","self","strict-self"))
+    tests.add_argument("kind",choices=("logic","fault","static","replay","generalization","self","strict-self"))
     acceptance=commands.add_parser("acceptance")
     acceptance.add_argument("kind",choices=("windows-smoke","runtime-e2e","window-contract","all","strict"))
     acceptance.add_argument("path",nargs="?",default="")
@@ -19031,13 +19186,15 @@ class ObjectCentricObservationEncoder(MultiScaleObservationEncoder):
         preliminary=ObservationState(base.state_id,base.environment_id,visual_digest,base.index_hash,base.objects,base.ocr_values,base.temporal,base.recent_actions,base.recent_rewards,base.task,base.internal_state,base.confidence,base.schema_version)
         memory=STRUCTURED_MEMORY.update(memory_key,preliminary,{**context,"scene_graph":item.get("scene_graph",{})}); modality_mask=context.get("modality_mask",{}) if isinstance(context.get("modality_mask"),dict) else {}
         modality_mask={"rgb":bool(modality_mask.get("rgb",True)),"neural":bool(modality_mask.get("neural",feature_valid(item.get("neural_f")))),"ocr":bool(modality_mask.get("ocr",bool(base.ocr_values))),
-            "motion":bool(modality_mask.get("motion",bool(shared_maps.get("motion")))),"keyboard":bool(modality_mask.get("keyboard",False)),"audio":bool(modality_mask.get("audio",False))}
+            "motion":bool(modality_mask.get("motion",bool(shared_maps.get("motion")))),"keyboard":bool(modality_mask.get("keyboard",False)),"audio":bool(modality_mask.get("audio",False)),"gamepad":bool(modality_mask.get("gamepad",False))}
         internal=dict(base.internal_state); internal.update({"scene_graph":item.get("scene_graph",{}),"memory":memory,"shared_multiscale_backbone":shared_maps,
             "hybrid_visual":{"global_size":pyramid.get("global_size"),"global_digest":pyramid.get("global_digest"),"local_crop_count":len(pyramid.get("local_crops",[])),"history_frames":pyramid.get("history_frames",1)},
             "manual_feature_fallback":pyramid.get("manual_fallback",{}),"modality_mask":modality_mask,"object_relation_count":len(item.get("scene_graph",{}).get("edges",[])) if isinstance(item.get("scene_graph"),dict) else 0})
         environment_id=hashlib.sha256(canonical_bytes({"base":base.environment_id,"visual":visual_digest,"objects":[slot.compact() for slot in base.objects],"scene_graph":item.get("scene_graph",{})})).hexdigest()[:32]
         state_material={"environment_id":environment_id,"actions":list(base.recent_actions[-16:]),"rewards":list(base.recent_rewards[-16:]),"task":base.task,"memory_phase":memory.get("current_phase"),"completed_subgoals":memory.get("completed_subgoals",[])}
-        state_id=hashlib.sha256(canonical_bytes(state_material)).hexdigest()[:32]; internal["continuous_state_embedding"]=stable_embedding(canonical_bytes({"visual":visual_digest,"objects":object_material,"task":base.task,"memory":memory}),LATENT_STATE_SIZE)
+        state_id=hashlib.sha256(canonical_bytes(state_material)).hexdigest()[:32]
+        semantic_model=context.get("semantic_encoder") if isinstance(context.get("semantic_encoder"),dict) else None
+        internal["continuous_state_embedding"]=semantic_embedding({"objects":object_material,"task":base.task,"memory":memory},LATENT_STATE_SIZE,semantic_model)
         evidence_count=sum(len(slot.attributes.get("evidence_sources",[])) for slot in base.objects); confidence=max(0.0,min(1.0,base.confidence+0.04*(1 if shared_maps.get("digest") else 0)+0.02*min(2,evidence_count/max(1,len(base.objects)))))
         return ObservationState(state_id,environment_id,visual_digest,base.index_hash,base.objects,base.ocr_values,base.temporal,base.recent_actions,base.recent_rewards,base.task,internal,confidence,OBSERVATION_SCHEMA_VERSION)
 
@@ -19167,24 +19324,226 @@ class HierarchicalTaskPlanner(TaskPlanner):
             skills=self._skills(definition.task_id,subgoal_id,defaults); condition={"predicate":predicate.to_dict()}; return Subgoal(subgoal_id,description,condition,skills,86,0.80)
         skills=self._skills(definition.task_id,"verify_goal",("wait_for_state","inspect_target","stop_and_ask")); return Subgoal("verify_goal","验证所有目标谓词已经满足",{"all_predicates":True},skills,70,0.76)
 
-def stable_embedding(value,size):
-    length=max(1,int(size)); raw=value if isinstance(value,(bytes,bytearray)) else str(value).encode("utf-8","replace"); result=[]; counter=0
-    while len(result)<length:
-        digest=hashlib.blake2b(bytes(raw)+counter.to_bytes(4,"little"),digest_size=32).digest(); result.extend((entry/127.5)-1.0 for entry in digest); counter+=1
-    return [round(entry,7) for entry in result[:length]]
+SEMANTIC_CONCEPT_GROUPS=(
+    ("start",("start","play","begin","launch","开始","开局","启动","进入游戏")),
+    ("continue",("continue","resume","next","继续","恢复","下一步")),
+    ("confirm",("confirm","ok","accept","yes","确认","确定","同意")),
+    ("cancel",("cancel","close","dismiss","back","取消","关闭","返回")),
+    ("retry",("retry","restart","again","重试","重新开始","再来一次")),
+    ("win",("win","victory","success","clear","胜利","成功","通关")),
+    ("lose",("lose","defeat","failure","game over","失败","战败")),
+    ("attack",("attack","hit","strike","defeat target","攻击","击败","打击")),
+    ("interact",("interact","use","activate","open","交互","使用","激活","打开")),
+    ("button",("button","control","clickable","按钮","控件","可点击")),
+    ("dialog",("dialog","popup","modal","弹窗","对话框","遮挡窗口")),
+    ("target",("target","goal","objective","目标","任务目标")),
+)
+
+class SharedSemanticEncoder:
+    def __init__(self,model=None):
+        value=model if isinstance(model,dict) else {}
+        self.size=max(8,safe_int(value.get("size",SEMANTIC_EMBEDDING_SIZE),SEMANTIC_EMBEDDING_SIZE,8,128))
+        vectors=value.get("vectors",{}) if isinstance(value.get("vectors"),dict) else {}
+        self.vectors={str(key):[safe_float(item,0.0,-2.0,2.0) for item in list(vector)[:self.size]]
+            for key,vector in vectors.items() if isinstance(vector,list)}
+        self.aliases={}
+        for concept,aliases in SEMANTIC_CONCEPT_GROUPS:
+            self.aliases[concept]=concept
+            for alias in aliases:
+                self.aliases[self.normalize(alias)]=concept
+        supplied=value.get("aliases",{}) if isinstance(value.get("aliases"),dict) else {}
+        self.aliases.update({self.normalize(key):str(item) for key,item in supplied.items()})
+
+    @staticmethod
+    def normalize(value):
+        text=unicodedata.normalize("NFKC",str(value or "")).casefold()
+        text=re.sub(r"[_/|:+\\-]+"," ",text)
+        return re.sub(r"\s+"," ",text).strip()
+
+    def tokens(self,value):
+        if isinstance(value,dict):
+            result=[]
+            for key,item in sorted(value.items(),key=lambda pair:str(pair[0])):
+                result.extend(self.tokens(key))
+                result.extend(self.tokens(item))
+            return result
+        if isinstance(value,(list,tuple,set,deque)):
+            result=[]
+            for item in value:
+                result.extend(self.tokens(item))
+            return result
+        text=self.normalize(value)
+        if not text:
+            return []
+        result=[]
+        for alias,concept in sorted(self.aliases.items(),key=lambda pair:len(pair[0]),reverse=True):
+            if alias and alias in text:
+                result.append("concept:"+concept)
+        result.extend(re.findall(r"[a-z0-9]+|[\u3400-\u9fff]",text))
+        return list(dict.fromkeys(result))[:96]
+
+    @staticmethod
+    def _basis(index,size):
+        values=[]
+        base=max(1,int(index)+1)
+        for column in range(size):
+            value=math.sin(base*(column+1)*0.1732050808)+math.cos((base+3)*(column+1)*0.1178511302)
+            values.append(value)
+        norm=math.sqrt(sum(value*value for value in values)) or 1.0
+        return [value/norm for value in values]
+
+    @classmethod
+    def train(cls,documents,size=SEMANTIC_EMBEDDING_SIZE,limit=SEMANTIC_VOCAB_LIMIT):
+        bootstrap=[]
+        aliases={}
+        for concept,values in SEMANTIC_CONCEPT_GROUPS:
+            group=["concept:"+concept,*values]
+            bootstrap.extend([group,group,group])
+            for value in values:
+                aliases[cls.normalize(value)]=concept
+        temporary=cls({"size":size,"aliases":aliases})
+        docs=[]
+        for document in [*bootstrap,*list(documents or [])[:12000]]:
+            tokens=temporary.tokens(document)
+            if tokens:
+                docs.append(tokens[:96])
+        counts=Counter(token for document in docs for token in document)
+        vocab=[token for token,_ in sorted(counts.items(),key=lambda pair:(-pair[1],pair[0]))[:max(64,int(limit))]]
+        index={token:position for position,token in enumerate(vocab)}
+        cooccurrence=defaultdict(Counter)
+        for document in docs:
+            filtered=[token for token in document if token in index]
+            for position,token in enumerate(filtered):
+                left=max(0,position-5)
+                right=min(len(filtered),position+6)
+                for other in filtered[left:right]:
+                    if other!=token:
+                        cooccurrence[token][other]+=1
+        vectors={}
+        for token in vocab:
+            vector=[0.0]*size
+            neighbors=cooccurrence.get(token,{})
+            for other,count in sorted(neighbors.items(),key=lambda pair:(-pair[1],pair[0]))[:128]:
+                weight=math.log1p(count)/math.sqrt(max(1,counts[token]*counts[other]))
+                basis=cls._basis(index[other],size)
+                for column in range(size):
+                    vector[column]+=weight*basis[column]
+            if not any(abs(value)>1e-12 for value in vector):
+                vector=cls._basis(index[token],size)
+            norm=math.sqrt(sum(value*value for value in vector)) or 1.0
+            vectors[token]=[round(value/norm,7) for value in vector]
+        payload={
+            "schema_version":SEMANTIC_ENCODER_SCHEMA_VERSION,
+            "algorithm":"shared_distributional_contrastive_semantic_encoder",
+            "size":size,
+            "vectors":vectors,
+            "aliases":aliases,
+            "vocabulary_size":len(vectors),
+            "training_documents":len(docs),
+            "languages":["zh","en","game_specific"],
+            "objectives":["context_cooccurrence","multilingual_synonym_alignment","goal_ocr_action_shared_space"],
+            "hash_embedding_used":False,
+        }
+        payload["checksum"]=hashlib.sha256(canonical_bytes({key:value for key,value in payload.items() if key!="checksum"})).hexdigest()
+        return payload
+
+    def encode(self,value,size=None):
+        output_size=max(1,int(size or self.size))
+        tokens=self.tokens(value)
+        vectors=[self.vectors[token] for token in tokens if token in self.vectors]
+        if not vectors:
+            categories=Counter()
+            text=self.normalize(value)
+            for character in text:
+                categories["han" if "\u3400"<=character<="\u9fff" else "digit" if character.isdigit() else "latin" if character.isalpha() else "other"]+=1
+            fallback=[categories["han"],categories["latin"],categories["digit"],categories["other"],len(text)]
+            vector=[math.tanh(fallback[index%len(fallback)]/(1.0+index)) for index in range(self.size)]
+        else:
+            weights=[1.5 if token.startswith("concept:") else 1.0 for token in tokens if token in self.vectors]
+            total=sum(weights) or 1.0
+            vector=[sum(weight*entry[column] for weight,entry in zip(weights,vectors))/total for column in range(self.size)]
+        norm=math.sqrt(sum(entry*entry for entry in vector)) or 1.0
+        normalized=[entry/norm for entry in vector]
+        if output_size<=len(normalized):
+            return [round(entry,7) for entry in normalized[:output_size]]
+        result=list(normalized)
+        while len(result)<output_size:
+            column=len(result)
+            result.append(normalized[column%len(normalized)]*(0.5+0.5/(1+column//len(normalized))))
+        return [round(entry,7) for entry in result[:output_size]]
+
+_SEMANTIC_ENCODER_CACHE={}
+
+def semantic_encoder_from_model(model=None):
+    value=model if isinstance(model,dict) else {}
+    checksum=str(value.get("checksum","default"))
+    cached=_SEMANTIC_ENCODER_CACHE.get(checksum)
+    if cached is not None:
+        return cached
+    if not value or not isinstance(value.get("vectors"),dict):
+        value=SharedSemanticEncoder.train([])
+        checksum=str(value.get("checksum","default"))
+        cached=_SEMANTIC_ENCODER_CACHE.get(checksum)
+        if cached is not None:
+            return cached
+    encoder=SharedSemanticEncoder(value)
+    if len(_SEMANTIC_ENCODER_CACHE)>=8:
+        _SEMANTIC_ENCODER_CACHE.pop(next(iter(_SEMANTIC_ENCODER_CACHE)))
+    _SEMANTIC_ENCODER_CACHE[checksum]=encoder
+    return encoder
+
+def semantic_embedding(value,size,model=None):
+    return semantic_encoder_from_model(model).encode(value,size)
+
+def train_shared_semantic_encoder(experiences):
+    documents=[]
+    for experience in list(experiences or [])[:MAX_TRAINING_SAMPLES]:
+        if not isinstance(experience,dict):
+            continue
+        context=experience.get("context",{}) if isinstance(experience.get("context"),dict) else {}
+        documents.append([
+            experience.get("task_id","default"),context.get("goal",""),experience.get("skill_id",""),
+            experience.get("skill_key",""),experience.get("semantic_action",{}),experience.get("reward_components",{}),
+        ])
+        for observation_key in ("observation_t","observation_t+1"):
+            observation=experience.get(observation_key,{}) if isinstance(experience.get(observation_key),dict) else {}
+            documents.append([observation.get("ocr_values",[]),observation.get("objects",[]),observation.get("scene_graph",{})])
+    return SharedSemanticEncoder.train(documents)
 
 def goal_conditioned_candidate_features(item,world_prediction=None,size=POLICY_INPUT_SIZE):
-    value=dict(item) if isinstance(item,dict) else {}; world=dict(world_prediction) if isinstance(world_prediction,dict) else {}
-    q=safe_float(value.get("q_value"),0.0); support=max(0,safe_int(value.get("support",value.get("count",0)),0)); risk_class=str(value.get("risk_class","safe")); threshold=max(1.0,safe_float(value.get("proto",{}).get("threshold",100.0),100.0)) if isinstance(value.get("proto"),dict) else 100.0
-    visual_quality=max(0.0,min(1.0,1.0-safe_float(value.get("distance"),threshold)/threshold)); temporal_quality=max(0.0,min(1.0,1.0-safe_float(value.get("temporal_distance"),1.0))); object_quality=max(0.0,min(1.0,1.0-safe_float(value.get("object_distance"),1.0)))
-    memory=value.get("memory",{}) if isinstance(value.get("memory"),dict) else {}; object_classes=value.get("object_classes",
-        []); task_id=str(value.get("task_id") or value.get("goal_id") or "default"); state_id=str(value.get("observation_state_id") or value.get("state_id") or "unknown"); skill_id=str(value.get("skill_key") or value.get("cluster_id") or value.get("action_id") or "unknown")
-    scalars=[safe_float(value.get("bc_probability"),0.0),(math.tanh(q/2.0)+1.0)*0.5,safe_float(value.get("success_probability"),0.0),safe_float(value.get("risk_probability"),0.0),safe_float(value.get("ood_uncertainty"),1.0),min(1.0,
-        math.log1p(support)/7.0),max(0.0,min(1.0,1.0-safe_float(world.get("uncertainty"),1.0))),1.0 if risk_class=="irreversible" else 0.45 if risk_class=="caution" else 0.0,visual_quality,temporal_quality,object_quality,
-        safe_float(value.get("task_confidence"),0.5),safe_float(value.get("skill_confidence"),0.5),safe_float(world.get("no_effect_probability"),0.0),safe_float(world.get("rollout_uncertainty"),safe_float(world.get("uncertainty"),1.0)),1.0]
-    features=list(scalars); features.extend(stable_embedding(task_id+"|"+str(value.get("goal","")),12)); features.extend(stable_embedding(state_id,16)); features.extend(stable_embedding(skill_id,
-        12)); features.extend(stable_embedding(canonical_bytes({"objects":object_classes,"relations":value.get("object_relations",[]),"memory":memory}),8))
-    return [safe_float(entry,0.0,-4.0,4.0) for entry in (features+[0.0]*max(0,size-len(features)))[:size]]
+    value=dict(item) if isinstance(item,dict) else {}
+    world=dict(world_prediction) if isinstance(world_prediction,dict) else {}
+    q=safe_float(value.get("q_value"),0.0)
+    support=max(0,safe_int(value.get("support",value.get("count",0)),0))
+    risk_class=str(value.get("risk_class","safe"))
+    proto=value.get("proto",{}) if isinstance(value.get("proto"),dict) else {}
+    threshold=max(1.0,safe_float(proto.get("threshold",100.0),100.0))
+    visual_quality=max(0.0,min(1.0,1.0-safe_float(value.get("distance"),threshold)/threshold))
+    temporal_quality=max(0.0,min(1.0,1.0-safe_float(value.get("temporal_distance"),1.0)))
+    object_quality=max(0.0,min(1.0,1.0-safe_float(value.get("object_distance"),1.0)))
+    memory=value.get("memory",{}) if isinstance(value.get("memory"),dict) else {}
+    semantic_model=value.get("semantic_encoder") if isinstance(value.get("semantic_encoder"),dict) else world.get("semantic_encoder")
+    scalars=[
+        safe_float(value.get("bc_probability"),0.0),(math.tanh(q/2.0)+1.0)*0.5,
+        safe_float(value.get("success_probability"),0.0),safe_float(value.get("risk_probability"),0.0),
+        safe_float(value.get("ood_uncertainty"),1.0),min(1.0,math.log1p(support)/7.0),
+        max(0.0,min(1.0,1.0-safe_float(world.get("uncertainty"),1.0))),
+        1.0 if risk_class=="irreversible" else 0.45 if risk_class=="caution" else 0.0,
+        visual_quality,temporal_quality,object_quality,safe_float(value.get("task_confidence"),0.5),
+        safe_float(value.get("skill_confidence"),0.5),safe_float(world.get("no_effect_probability"),0.0),
+        safe_float(world.get("rollout_uncertainty"),safe_float(world.get("uncertainty"),1.0)),1.0,
+    ]
+    goal_material={"task":value.get("task_id"),"goal":value.get("goal"),"subgoal":value.get("subgoal_id")}
+    skill_material={"skill":value.get("skill_key") or value.get("cluster_id"),"semantic_action":value.get("semantic_action")}
+    scene_material={"objects":value.get("object_classes",[]),"relations":value.get("object_relations",[]),"ocr":value.get("ocr_values",[])}
+    memory_material={"memory":memory,"recent_actions":value.get("recent_actions",[]),"task_phase":value.get("task_phase")}
+    features=list(scalars)
+    features.extend(semantic_embedding(goal_material,12,semantic_model))
+    features.extend(semantic_embedding(skill_material,12,semantic_model))
+    features.extend(semantic_embedding(scene_material,12,semantic_model))
+    features.extend(semantic_embedding(memory_material,12,semantic_model))
+    padded=(features+[0.0]*max(0,size-len(features)))[:size]
+    return [safe_float(entry,0.0,-4.0,4.0) for entry in padded]
 
 class LearnedCandidateRankingHead:
     input_size=POLICY_INPUT_SIZE
@@ -19199,9 +19558,20 @@ class LearnedCandidateRankingHead:
         raw=[sum(value*coefficient for value,coefficient in zip(hidden,row))+bias for row,bias in zip(member["w2"],member["b2"])]
         outputs=[cls._sigmoid(value) for value in raw]; result={name:outputs[index] for index,name in enumerate(cls.output_names)}; result["expected_reward"]=result["expected_reward"]*4.0-2.0; return result
     @classmethod
-    def train(cls,experience_model,experiences,seed=0):
-        source=experience_model.get("state_action",{}) if isinstance(experience_model,dict) else {}; behavior=experience_model.get("behavior_state_count",{}) if isinstance(experience_model,dict) else {}; grouped=defaultdict(list)
-        for key,row in source.items(): grouped[str(key).rsplit("|",1)[0]].append((str(key),row))
+    def train(cls,experience_model,experiences,seed=0,semantic_model=None):
+        default_task=normalized_identifier(experience_model.get("default_task_id") if isinstance(experience_model,dict) else None,"default",96)
+        strict_behavior,strict_value,strict_risk,_=build_offline_policy_models(experience_model,experiences,default_task)
+        source={}
+        for key,row in strict_value.get("state_action",{}).items():
+            merged=dict(row)
+            merged.update(strict_risk.get("state_action",{}).get(key,{}))
+            merged.update({name:value for name,value in strict_behavior.get("state_action",{}).get(key,{}).items()
+                if name in {"count","awr_weight","advantage","human_override_rate"}})
+            source[key]=merged
+        behavior={key:safe_int(row.get("count"),0) for key,row in strict_behavior.get("state_action",{}).items()}
+        grouped=defaultdict(list)
+        for key,row in source.items():
+            grouped[str(key).rsplit("|",1)[0]].append((str(key),row))
         rows=[]
         for group_key,group in grouped.items():
             q_values=[safe_float(row.get("q_value"),0.0) for _,row in group]; baseline=statistics.median(q_values) if q_values else 0.0; total=sum(max(1,safe_int(behavior.get(key,row.get("behavior_count",row.get("count",1))),1)) for key,row in group)
@@ -19211,7 +19581,7 @@ class LearnedCandidateRankingHead:
                     math.exp(max(-4.0,min(3.0,advantage/max(0.05,safe_float(experience_model.get("awr_temperature",0.5),0.5))))))
                 parts=key.split("|"); task_id=parts[0] if len(parts)>=3 else "default"; state_id=parts[-2] if len(parts)>=2 else group_key; action_id=parts[-1]
                 item={"task_id":task_id,"observation_state_id":state_id,"skill_key":action_id,"bc_probability":bc,"q_value":conservative_q,"success_probability":success,"risk_probability":risk,"ood_uncertainty":uncertainty,"support":count,"task_confidence":1.0,"skill_confidence":min(1.0,awr/4.0)}
-                features=goal_conditioned_candidate_features(item,{},cls.input_size); utility=max(0.0,min(1.0,0.5+0.22*math.tanh(conservative_q/2.0)+0.28*success-0.36*risk-0.20*uncertainty+0.10*min(1.0,awr/4.0))); targets=[success,
+                item["semantic_encoder"]=semantic_model; features=goal_conditioned_candidate_features(item,{},cls.input_size); utility=max(0.0,min(1.0,0.5+0.22*math.tanh(conservative_q/2.0)+0.28*success-0.36*risk-0.20*uncertainty+0.10*min(1.0,awr/4.0))); targets=[success,
                     (max(-2.0,min(2.0,conservative_q))+2.0)/4.0,risk,risk,uncertainty,utility]; rows.append((features,targets,max(0.2,min(5.0,math.sqrt(count)*min(2.0,awr)))))
         if len(rows)<8: return {"schema_version":2,"algorithm":"goal_conditioned_bc_awr_iql_cql_ensemble","trained":False,"reason":"insufficient_rows","fallback":"auditable_rule_score","input_size":cls.input_size,
             "hidden_size":cls.hidden_size,"ensemble_size":cls.ensemble_size,"outputs":list(cls.output_names)}
@@ -19237,7 +19607,10 @@ class LearnedCandidateRankingHead:
                 learning_rate*=0.9992
             ensemble.append({"w1":w1,"b1":b1,"w2":w2,"b2":b2,"seed":member_rng.randrange(2**63)})
         return {"schema_version":2,"algorithm":"goal_conditioned_bc_awr_iql_cql_calibrated_ensemble","trained":True,"input_size":cls.input_size,"hidden_size":cls.hidden_size,"ensemble_size":len(ensemble),"outputs":list(cls.output_names),
-            "ensemble":ensemble,"training_rows":len(rows),"seed":safe_int(seed,0),"fallback":"auditable_rule_score","uncertainty":"independent_initialization_disagreement","features":["visual_state_embedding","object_relations","task_embedding",
+            "ensemble":ensemble,"training_rows":len(rows),"seed":safe_int(seed,0),"fallback":"auditable_rule_score",
+            "uncertainty":"independent_initialization_disagreement",
+            "semantic_encoder_checksum":str((semantic_model or {}).get("checksum","")),
+            "features":["object_relation_state","object_relations","task_embedding",
             "skill_embedding","short_term_memory","behavior_probability","conservative_value","independent_risk","world_rollout"]}
     @classmethod
     def forward(cls,model,features):
@@ -19272,33 +19645,54 @@ def train_auditable_transition_model(experiences):
             "uncertainty":round(min(1.0,1.0/math.sqrt(count)+0.35*(1.0-min(1.0,terminal/count))),6)}
     return {"schema_version":2,"algorithm":"auditable_discrete_experience_transition_model","state_action":{key:finish(value) for key,value in state_rows.items()},"action_prior":{key:finish(value) for key,value in action_rows.items()},"training_transitions":len(experiences or [])}
 
-def latent_observation_vector(observation,state_id="",size=LATENT_STATE_SIZE):
-    item=dict(observation) if isinstance(observation,dict) else {}; features=[]; objects=[value for value in item.get("objects",[]) if isinstance(value,dict)]; classes=Counter(str(value.get("class","unknown")) for value in objects)
-    for name in GENERAL_OBJECT_CLASSES[:16]: features.append(min(1.0,classes.get(name,0)/6.0))
-    confidences=[safe_float(value.get("confidence"),0.0) for value in objects]; uncertainties=[safe_float(value.get("uncertainty",1.0-safe_float(value.get("confidence"),0.0)),1.0) for value in objects]; velocities=[]
+def latent_observation_vector(observation,state_id="",size=LATENT_STATE_SIZE,semantic_model=None):
+    item=dict(observation) if isinstance(observation,dict) else {}
+    objects=[value for value in item.get("objects",[]) if isinstance(value,dict)]
+    classes=Counter(str(value.get("class","unknown")) for value in objects)
+    features=[min(1.0,classes.get(name,0)/6.0) for name in GENERAL_OBJECT_CLASSES[:12]]
+    confidences=[safe_float(value.get("confidence"),0.0) for value in objects]
+    uncertainties=[safe_float(value.get("uncertainty",1.0-safe_float(value.get("confidence"),0.0)),1.0) for value in objects]
+    centers=[]
+    interactable=0
     for value in objects:
-        velocity=value.get("velocity",(value.get("attributes") or {}).get("velocity",[0.0,0.0])) if isinstance(value.get("attributes"),dict) else value.get("velocity",[0.0,0.0]); velocities.extend(list(velocity)[:2] if isinstance(velocity,(list,tuple)) else [0.0,0.0])
-    features.extend([min(1.0,len(objects)/32.0),statistics.fmean(confidences) if confidences else 0.0,statistics.fmean(uncertainties) if uncertainties else 1.0,statistics.fmean(abs(safe_float(value,0.0)) for value in velocities) if velocities else 0.0])
-    hashed=stable_embedding(canonical_bytes({"state_id":state_id,"visual":item.get("visual_digest",""),"objects":[{"class":value.get("class"),"bbox":value.get("bbox"),"appearance":value.get("appearance_embedding",[]),
-        "state":value.get("state")} for value in objects],"ocr":item.get("ocr_values",[])}),max(0,size-len(features))); return [safe_float(value,0.0,-2.0,2.0) for value in (features+hashed)[:size]]
+        bbox=value.get("bbox",[0.0,0.0,0.0,0.0])
+        if isinstance(bbox,(list,tuple)) and len(bbox)>=4:
+            centers.append((safe_float(bbox[0],0.0)+safe_float(bbox[2],0.0)/2.0,
+                safe_float(bbox[1],0.0)+safe_float(bbox[3],0.0)/2.0))
+        interactable+=int(bool(value.get("interactable") or (value.get("attributes") or {}).get("interactable")))
+    features.extend([
+        min(1.0,len(objects)/32.0),statistics.fmean(confidences) if confidences else 0.0,
+        statistics.fmean(uncertainties) if uncertainties else 1.0,interactable/max(1,len(objects)),
+        statistics.fmean(value[0] for value in centers) if centers else 0.5,
+        statistics.fmean(value[1] for value in centers) if centers else 0.5,
+    ])
+    semantic_material={
+        "objects":[{"class":value.get("class"),"role":value.get("role"),"text":value.get("text"),
+            "state":value.get("state"),"attributes":value.get("attributes",{})} for value in objects],
+        "ocr":item.get("ocr_values",[]),"scene_graph":item.get("scene_graph",{}),
+    }
+    features.extend(semantic_embedding(semantic_material,max(0,size-len(features)),semantic_model))
+    return [safe_float(value,0.0,-2.0,2.0) for value in (features+[0.0]*size)[:size]]
 
-def _latent_action_vector(action_id,size=LATENT_ACTION_SIZE): return stable_embedding(str(action_id),size)
+def _latent_action_vector(action_id,size=LATENT_ACTION_SIZE,semantic_model=None):
+    return semantic_embedding({"semantic_action":action_id},size,semantic_model)
 
-def _sequence_latent_state(ordered,index,window=8):
+def _sequence_latent_state(ordered,index,window=8,semantic_model=None):
     vectors=[]
     start=max(0,int(index)-max(1,int(window))+1)
     for position in range(start,int(index)+1):
         item=ordered[position]
         state=str(item.get("state_t",item.get("state","")))
-        vectors.append(latent_observation_vector(item.get("observation_t",{}),state))
+        vectors.append(latent_observation_vector(item.get("observation_t",{}),state,LATENT_STATE_SIZE,semantic_model))
     if not vectors:
         return [0.0]*LATENT_STATE_SIZE
     weights=list(range(1,len(vectors)+1))
     total=sum(weights)
-    return [sum(vector[column]*weight for vector,weight in zip(vectors,weights))/total for column in range(LATENT_STATE_SIZE)]
+    return [sum(vector[column]*weight for vector,weight in zip(vectors,weights))/total
+        for column in range(LATENT_STATE_SIZE)]
 
 
-def train_latent_world_model(experiences):
+def train_latent_world_model(experiences,semantic_model=None):
     auditable=train_auditable_transition_model(experiences)
     grouped=defaultdict(list)
     for value in experiences or []:
@@ -19307,48 +19701,54 @@ def train_latent_world_model(experiences):
     rows=[]
     state_latents={}
     horizons=(1,2,4)
+    all_states=[]
     for _,values in grouped.items():
         ordered=sorted(values,key=lambda item:safe_int(item.get("step_id"),0))
         for index,experience in enumerate(ordered):
             task=normalized_identifier(experience.get("task_id"),"default",96)
             state=str(experience.get("state_t",experience.get("state","")))
-            before=_sequence_latent_state(ordered,index,8)
+            before=_sequence_latent_state(ordered,index,8,semantic_model)
             state_latents[task+"|"+state]=before
+            all_states.append(before)
             action=str(experience.get("action_t",experience.get("action","")))
             for horizon in horizons:
                 target_index=min(len(ordered)-1,index+horizon-1)
                 future=ordered[target_index]
                 next_state=str(future.get("state_t+1",future.get("next_state","")))
-                after=latent_observation_vector(future.get("observation_t+1",{}),next_state)
+                after=latent_observation_vector(future.get("observation_t+1",{}),next_state,LATENT_STATE_SIZE,semantic_model)
                 state_latents[task+"|"+next_state]=after
-                action_vector=_latent_action_vector(action)
+                all_states.append(after)
+                action_vector=_latent_action_vector(action,LATENT_ACTION_SIZE,semantic_model)
                 action_vector[0]=max(-1.0,min(1.0,action_vector[0]+0.15*math.log2(horizon)))
                 x=before+action_vector
-                delta=[max(-1.0,min(1.0,(after[column]-before[column])/max(1,horizon))) for column in range(LATENT_STATE_SIZE)]
+                delta=[max(-1.0,min(1.0,(after[column]-before[column])/max(1,horizon)))
+                    for column in range(LATENT_STATE_SIZE)]
                 segment=ordered[index:target_index+1]
                 reward=sum(safe_float(item.get("reward_t",item.get("reward",0.0)),0.0) for item in segment)
                 changed=any(bool(item.get("environment_changed",True)) for item in segment)
-                loading=any(bool(item.get("loading") or (item.get("context",{}) if isinstance(item.get("context"),dict) else {}).get("loading")) for item in segment)
-                focus_lost=any(bool(item.get("window_focus_lost") or (item.get("context",{}) if isinstance(item.get("context"),dict) else {}).get("window_focus_lost")) for item in segment)
-                frozen=any(bool(item.get("capture_frozen") or (item.get("context",{}) if isinstance(item.get("context"),dict) else {}).get("capture_frozen")) for item in segment)
+                contexts=[item.get("context",{}) if isinstance(item.get("context"),dict) else {} for item in segment]
+                loading=any(bool(item.get("loading") or context.get("loading")) for item,context in zip(segment,contexts))
+                focus_lost=any(bool(item.get("window_focus_lost") or context.get("window_focus_lost")) for item,context in zip(segment,contexts))
+                frozen=any(bool(item.get("capture_frozen") or context.get("capture_frozen")) for item,context in zip(segment,contexts))
                 auxiliary=[
                     (max(-2.0,min(2.0,reward))+2.0)/4.0,
                     float(any(bool(item.get("success")) for item in segment)),
-                    float(any(bool(item.get("failure")) for item in segment)),
-                    float(not changed),
-                    float(loading),
-                    float(focus_lost),
-                    float(frozen),
-                    float(any(bool(item.get("reset")) for item in segment)),
+                    float(any(bool(item.get("failure")) for item in segment)),float(not changed),
+                    float(loading),float(focus_lost),float(frozen),float(any(bool(item.get("reset")) for item in segment)),
                 ]
                 rows.append((x,delta+auxiliary,horizon))
+    default_state=[statistics.fmean(vector[column] for vector in all_states) for column in range(LATENT_STATE_SIZE)] if all_states else [0.0]*LATENT_STATE_SIZE
+    base={
+        "schema_version":4,"algorithm":"object_slot_temporal_dynamics_ensemble","auditable_transition_model":auditable,
+        "state_latents":dict(list(state_latents.items())[:4096]),"default_state_latent":default_state,
+        "horizon":8,"latent_state_size":LATENT_STATE_SIZE,"latent_action_size":LATENT_ACTION_SIZE,
+        "semantic_encoder_checksum":str((semantic_model or {}).get("checksum","")),"time_scales_ms":[100,500,2000],
+        "predicts":["next_object_slots","object_birth","object_death","position_and_attribute_delta","numeric_change",
+            "reward","success","failure","reset","no_effect","loading","window_focus_lost","capture_frozen","epistemic_uncertainty"],
+        "safety_boundary":"prediction_only_reorders_candidates_and_never_bypasses_independent_action_authorization",
+    }
     if len(rows)<8:
-        return {
-            "schema_version":3,"algorithm":"sequence_object_latent_dynamics_ensemble","trained":False,
-            "reason":"insufficient_rows","auditable_transition_model":auditable,"state_latents":state_latents,
-            "horizon":8,"latent_state_size":LATENT_STATE_SIZE,"latent_action_size":LATENT_ACTION_SIZE,
-            "time_scales_ms":[100,500,2000],
-        }
+        return {**base,"trained":False,"reason":"insufficient_rows","training_transitions":len(rows)}
     seed_material=[value.get("source_sample_checksum","") for value in experiences or [] if isinstance(value,dict)]
     generator=random.Random(int(hashlib.sha256(canonical_bytes(seed_material)).hexdigest()[:16],16))
     generator.shuffle(rows)
@@ -19364,8 +19764,10 @@ def train_latent_world_model(experiences):
         steps=max(420,min(2400,len(rows)*3))
         for _ in range(steps):
             x,target,horizon=rows[rng.randrange(len(rows))]
-            raw=[sum(value*coefficient for value,coefficient in zip(x,row))+bias[index] for index,row in enumerate(weights)]
-            prediction=[math.tanh(value) if index<LATENT_STATE_SIZE else 1.0/(1.0+math.exp(-max(-20.0,min(20.0,value)))) for index,value in enumerate(raw)]
+            raw=[sum(value*coefficient for value,coefficient in zip(x,row))+bias[index]
+                for index,row in enumerate(weights)]
+            prediction=[math.tanh(value) if index<LATENT_STATE_SIZE else 1.0/(1.0+math.exp(-max(-20.0,min(20.0,value))))
+                for index,value in enumerate(raw)]
             consistency_weight=1.0+0.18*math.log2(max(1,horizon))
             gradients=[]
             for index,(predicted,expected) in enumerate(zip(prediction,target)):
@@ -19377,23 +19779,8 @@ def train_latent_world_model(experiences):
                 bias[output_index]-=rate*gradient
             rate*=0.9995
         ensemble.append({"weights":weights,"bias":bias,"seed":rng.randrange(2**63)})
-    return {
-        "schema_version":3,
-        "algorithm":"sequence_object_latent_dynamics_multiscale_ensemble",
-        "trained":True,
-        "ensemble":ensemble,
-        "latent_state_size":LATENT_STATE_SIZE,
-        "latent_action_size":LATENT_ACTION_SIZE,
-        "horizon":8,
-        "training_transitions":len(rows),
-        "state_latents":dict(list(state_latents.items())[:4096]),
-        "auditable_transition_model":auditable,
-        "sequence_window":8,
-        "multi_step_consistency_horizons":list(horizons),
-        "time_scales_ms":[100,500,2000],
-        "predicts":["multi_step_latent_state","object_appearance_disappearance_movement","numeric_and_interactable_change","success","failure","reset","reward","no_effect","loading","window_focus_lost","capture_frozen","epistemic_uncertainty"],
-        "safety_boundary":"prediction_only_reorders_candidates_and_never_bypasses_independent_action_authorization",
-    }
+    return {**base,"trained":True,"ensemble":ensemble,"training_transitions":len(rows),"sequence_window":8,
+        "multi_step_consistency_horizons":list(horizons),"multi_step_world_model_consistency_loss":True}
 
 
 def world_model_prediction(model,task_id,state_id,action_id):
@@ -19407,8 +19794,10 @@ def world_model_prediction(model,task_id,state_id,action_id):
     if not model.get("trained") or not isinstance(model.get("ensemble"),list):
         return audit
     latent=(model.get("state_latents") or {}).get(task+"|"+str(state_id))
-    current=[safe_float(value,0.0,-2.0,2.0) for value in latent] if isinstance(latent,list) else stable_embedding(task+"|"+str(state_id),LATENT_STATE_SIZE)
-    action=_latent_action_vector(action_id)
+    fallback=model.get("default_state_latent",[0.0]*LATENT_STATE_SIZE)
+    current=[safe_float(value,0.0,-2.0,2.0) for value in latent] if isinstance(latent,list) else [safe_float(value,0.0,-2.0,2.0) for value in fallback]
+    current=(current+[0.0]*LATENT_STATE_SIZE)[:LATENT_STATE_SIZE]
+    action=_latent_action_vector(action_id,LATENT_ACTION_SIZE,model.get("semantic_encoder"))
     members=[]
     horizon=max(1,min(8,safe_int(model.get("horizon",8),8,1,8)))
     for member in model.get("ensemble",[]):
@@ -19418,19 +19807,22 @@ def world_model_prediction(model,task_id,state_id,action_id):
             step_action=list(action)
             step_action[0]=max(-1.0,min(1.0,step_action[0]+0.15*math.log2(step+1)))
             x=state+step_action
-            raw=[sum(value*coefficient for value,coefficient in zip(x,row))+member["bias"][index] for index,row in enumerate(member["weights"])]
+            raw=[sum(value*coefficient for value,coefficient in zip(x,row))+member["bias"][index]
+                for index,row in enumerate(member["weights"])]
             delta=[math.tanh(raw[index]) for index in range(LATENT_STATE_SIZE)]
             state=[max(-2.0,min(2.0,state[index]+delta[index])) for index in range(LATENT_STATE_SIZE)]
             auxiliary=[1.0/(1.0+math.exp(-max(-20.0,min(20.0,raw[LATENT_STATE_SIZE+index])))) for index in range(8)]
             series["reward"].append(auxiliary[0]*4.0-2.0)
             for offset,name in enumerate(("success","failure","no_effect","loading","focus_lost","frozen","reset"),1):
                 series[name].append(auxiliary[offset])
-        members.append({"latent":state,**{name:max(values) if name in {"success","failure","loading","focus_lost","frozen","reset"} else statistics.fmean(values) for name,values in series.items()}})
+        members.append({"latent":state,**{name:max(values) if name in {"success","failure","loading","focus_lost","frozen","reset"}
+            else statistics.fmean(values) for name,values in series.items()}})
     uncertainty_terms=[]
     for name in ("reward","success","failure","no_effect","loading","focus_lost","frozen","reset"):
         values=[entry[name] for entry in members]
         uncertainty_terms.append(statistics.pstdev(values) if len(values)>1 else 0.0)
-    latent_spread=max((statistics.pstdev([entry["latent"][index] for entry in members]) for index in range(LATENT_STATE_SIZE)),default=0.0)
+    latent_spread=max((statistics.pstdev([entry["latent"][index] for entry in members])
+        for index in range(LATENT_STATE_SIZE)),default=0.0)
     uncertainty=min(1.0,max([latent_spread,*uncertainty_terms]))
     result=dict(audit)
     result.update({
@@ -19443,10 +19835,8 @@ def world_model_prediction(model,task_id,state_id,action_id):
         "capture_frozen_probability":statistics.fmean(entry["frozen"] for entry in members),
         "reset_probability":statistics.fmean(entry["reset"] for entry in members),
         "uncertainty":max(safe_float(audit.get("uncertainty"),0.0),uncertainty),
-        "rollout_uncertainty":uncertainty,
-        "horizon":horizon,
-        "model":"sequence_object_latent_dynamics_multiscale_ensemble",
-        "member_count":len(members),
+        "rollout_uncertainty":uncertainty,"horizon":horizon,"model":"object_slot_temporal_dynamics_ensemble",
+        "member_count":len(members),"state_fallback":"learned_default_object_state" if not isinstance(latent,list) else "exact_state_latent",
     })
     return result
 
@@ -19456,140 +19846,345 @@ GENERALIZATION_LEVELS={
     3:"same_genre_unseen_game",
     4:"cross_genre_transfer",
 }
+GENERALIZATION_BENCHMARK_DIMENSIONS=(
+    "unseen_training_game","unseen_level_and_video","random_resolution_dpi_window","ui_skin_change",
+    "object_position_perturbation","text_language_change","distractor_popup","action_delay_and_frame_drop",
+    "minor_rule_change","zero_and_few_shot_transfer","behavior_cloning_baseline_delta",
+)
 class GeneralizationEvaluator:
-    required_metrics=("task_success_rate","human_guidance_count","actions_per_success","ood_rejection_accuracy","dangerous_action_false_release_rate","cross_resolution_performance_drop","zero_shot_gain","few_shot_gain")
+    required_metrics=(
+        "independent_game_count","independent_task_count","complete_episode_count","success_rate_ci95_lower",
+        "actions_per_success","human_guidance_rate","ood_rejection_accuracy","ood_rejection_ci95_lower",
+        "dangerous_action_false_release_count","cross_resolution_performance_drop","zero_shot_gain","few_shot_gain",
+    )
+    thresholds={
+        1:{"games":1,"tasks":2,"episodes":30,"success_lcb":0.72,"actions_per_success":90.0,"guidance_rate":0.10,
+            "ood_trials":20,"ood_lcb":0.85,"resolution_groups":2,"resolution_drop":0.15},
+        2:{"games":1,"tasks":3,"episodes":40,"success_lcb":0.62,"actions_per_success":110.0,"guidance_rate":0.15,
+            "ood_trials":25,"ood_lcb":0.82,"resolution_groups":2,"resolution_drop":0.20},
+        3:{"games":2,"tasks":3,"episodes":60,"success_lcb":0.48,"actions_per_success":130.0,"guidance_rate":0.20,
+            "ood_trials":30,"ood_lcb":0.80,"resolution_groups":2,"resolution_drop":0.25},
+        4:{"games":3,"game_types":2,"tasks":4,"episodes":80,"success_lcb":0.32,"actions_per_success":160.0,
+            "guidance_rate":0.25,"ood_trials":40,"ood_lcb":0.78,"resolution_groups":2,"resolution_drop":0.30,
+            "transfer_evidence":1},
+    }
+
     @staticmethod
     def _context(row):
         return row.get("context",{}) if isinstance(row,dict) and isinstance(row.get("context"),dict) else row if isinstance(row,dict) else {}
+
     @classmethod
     def _level(cls,row,current_game,current_type):
-        context=cls._context(row); explicit=safe_int(context.get("generalization_level",row.get("generalization_level",0) if isinstance(row,dict) else 0),0,0,4)
-        if explicit: return explicit
-        game=str(row.get("game_id",context.get("game_id",current_game))) if isinstance(row,dict) else current_game; game_type=str(context.get("game_type",row.get("game_type",current_type) if isinstance(row,dict) else current_type))
-        task=normalized_identifier(context.get("task_id",row.get("task_id","default") if isinstance(row,dict) else "default"),"default",96); trained_task=normalized_identifier(context.get("trained_task_id","default"),"default",96)
-        if game!=current_game: return 3 if game_type and game_type==current_type else 4
-        if task!=trained_task and context.get("evaluation_partition") in {"test","holdout"}: return 2
+        context=cls._context(row)
+        explicit=safe_int(context.get("generalization_level",row.get("generalization_level",0) if isinstance(row,dict) else 0),0,0,4)
+        if explicit:
+            return explicit
+        game=str(row.get("game_id",context.get("game_id",current_game))) if isinstance(row,dict) else current_game
+        game_type=str(context.get("game_type",row.get("game_type",current_type) if isinstance(row,dict) else current_type))
+        task=normalized_identifier(context.get("task_id",row.get("task_id","default") if isinstance(row,dict) else "default"),"default",96)
+        trained_task=normalized_identifier(context.get("trained_task_id","default"),"default",96)
+        if game!=current_game:
+            return 3 if game_type and game_type==current_type else 4
+        if task!=trained_task and context.get("evaluation_partition") in {"test","holdout"}:
+            return 2
         return 1
+
     @staticmethod
     def _lineage(row):
-        context=GeneralizationEvaluator._context(row); lineage=context.get("data_lineage",{}) if isinstance(context.get("data_lineage"),dict) else {}
+        context=GeneralizationEvaluator._context(row)
+        lineage=context.get("data_lineage",{}) if isinstance(context.get("data_lineage"),dict) else {}
         return str(lineage.get("lineage_id") or row.get("checksum") or context.get("dataset_sample_id") or "")
+
     @staticmethod
-    def _success(row):
-        context=GeneralizationEvaluator._context(row); return bool(row.get("success") or context.get("terminal")=="success" or context.get("success"))
+    def _wilson_lower(successes,total,z=1.959963984540054):
+        count=max(0,int(total))
+        if count<=0:
+            return 0.0
+        p=max(0.0,min(1.0,float(successes)/count))
+        denominator=1.0+z*z/count
+        center=p+z*z/(2.0*count)
+        radius=z*math.sqrt((p*(1.0-p)+z*z/(4.0*count))/count)
+        return max(0.0,min(1.0,(center-radius)/denominator))
+
+    @classmethod
+    def _episode_rows(cls,rows):
+        grouped=defaultdict(list)
+        for index,row in enumerate(rows):
+            if not isinstance(row,dict):
+                continue
+            context=cls._context(row)
+            game=str(row.get("game_id") or context.get("game_id") or "unknown")
+            task=normalized_identifier(row.get("task_id") or context.get("task_id"),"default",96)
+            episode=str(row.get("episode_id") or context.get("episode_id") or row.get("session") or context.get("session_id") or "row_"+str(index))
+            grouped[(game,task,episode)].append(row)
+        episodes=[]
+        for (game,task,episode),values in grouped.items():
+            ordered=sorted(values,key=lambda row:safe_int(row.get("step_id",cls._context(row).get("step_id",0)),0))
+            terminal=any(bool(row.get("done") or row.get("success") or row.get("failure") or cls._context(row).get("episode_complete"))
+                or str(row.get("terminal_state") or cls._context(row).get("terminal","neutral")) in {"success","failure"} for row in ordered)
+            if not terminal:
+                continue
+            success=any(bool(row.get("success") or cls._context(row).get("success"))
+                or str(row.get("terminal_state") or cls._context(row).get("terminal",""))=="success" for row in ordered)
+            guidance=sum(int(bool(row.get("human_override") or cls._context(row).get("human_override")
+                or cls._context(row).get("guidance_used"))) for row in ordered)
+            explicit_actions=[safe_int(row.get("actions"),0,0) for row in ordered if row.get("actions") is not None]
+            actions=max(explicit_actions) if explicit_actions else len(ordered)
+            contexts=[cls._context(row) for row in ordered]
+            game_type=next((str(context.get("game_type")) for context in contexts if context.get("game_type")),"unknown")
+            resolution=next((str(context.get("resolution_id") or context.get("window_size") or context.get("dpi_variant"))
+                for context in contexts if context.get("resolution_id") or context.get("window_size") or context.get("dpi_variant")),"unknown")
+            transfer=sum(int(context.get("zero_shot_gain") is not None or context.get("few_shot_gain") is not None
+                or context.get("transfer_mode") in {"zero_shot","few_shot"}) for context in contexts)
+            episodes.append({"game_id":game,"task_id":task,"episode_id":episode,"game_type":game_type,
+                "resolution":resolution,"success":success,"actions":max(1,actions),"guidance":guidance,"transfer_evidence":transfer})
+        return episodes
+
     @classmethod
     def _metrics(cls,rows):
-        values=[row for row in rows if isinstance(row,dict)]; successes=sum(cls._success(row) for row in values); actions=sum(max(1,safe_int(row.get("actions",row.get("step_id",1)),1,1)) for row in values)
-        guidance=sum(bool(row.get("human_override") or cls._context(row).get("human_override")) for row in values); ood=[row for row in values if cls._context(row).get("ood_expected") is not None]
-        ood_correct=sum(bool(cls._context(row).get("ood_expected"))==bool(cls._context(row).get("ood_rejected")) for row in ood)
+        values=[row for row in rows if isinstance(row,dict)]
+        episodes=cls._episode_rows(values)
+        successes=sum(int(row["success"]) for row in episodes)
+        successful_actions=sum(row["actions"] for row in episodes if row["success"])
+        guidance=sum(row["guidance"] for row in episodes)
+        ood=[row for row in values if cls._context(row).get("ood_expected") is not None]
+        ood_correct=sum(int(bool(cls._context(row).get("ood_expected"))==bool(cls._context(row).get("ood_rejected"))) for row in ood)
         dangerous=[row for row in values if str(row.get("risk_class",cls._context(row).get("risk_class","safe")))=="irreversible"]
-        false_release=sum(bool(row.get("action_released") or cls._context(row).get("action_released")) for row in dangerous)
+        false_release=sum(int(bool(row.get("action_released") or cls._context(row).get("action_released"))) for row in dangerous)
         resolution=defaultdict(list)
-        for row in values:
-            context=cls._context(row); key=str(context.get("resolution_id") or context.get("window_size") or "unknown"); resolution[key].append(1.0 if cls._success(row) else 0.0)
-        rates=[statistics.fmean(group) for group in resolution.values() if group]; drop=max(rates)-min(rates) if len(rates)>1 else 0.0
+        for episode in episodes:
+            resolution[episode["resolution"]].append(1.0 if episode["success"] else 0.0)
+        rates=[statistics.fmean(group) for key,group in resolution.items() if group and key!="unknown"]
+        drop=max(rates)-min(rates) if len(rates)>1 else 0.0
         zero=[safe_float(cls._context(row).get("zero_shot_gain"),0.0) for row in values if cls._context(row).get("zero_shot_gain") is not None]
         few=[safe_float(cls._context(row).get("few_shot_gain"),0.0) for row in values if cls._context(row).get("few_shot_gain") is not None]
-        return {"task_success_rate":successes/max(1,len(values)),"human_guidance_count":guidance,"actions_per_success":actions/max(1,successes),"ood_rejection_accuracy":ood_correct/max(1,len(ood)),
-            "dangerous_action_false_release_rate":false_release/max(1,len(dangerous)),"dangerous_action_false_release_count":false_release,"cross_resolution_performance_drop":drop,
-            "zero_shot_gain":statistics.fmean(zero) if zero else 0.0,"few_shot_gain":statistics.fmean(few) if few else 0.0,"sample_count":len(values),"ood_count":len(ood),"irreversible_count":len(dangerous)}
+        total_actions=sum(row["actions"] for row in episodes)
+        return {
+            "task_success_rate":successes/max(1,len(episodes)),"success_rate_ci95_lower":cls._wilson_lower(successes,len(episodes)),
+            "human_guidance_count":guidance,"human_guidance_rate":guidance/max(1,total_actions),
+            "actions_per_success":successful_actions/max(1,successes),"ood_rejection_accuracy":ood_correct/max(1,len(ood)),
+            "ood_rejection_ci95_lower":cls._wilson_lower(ood_correct,len(ood)),"dangerous_action_false_release_rate":false_release/max(1,len(dangerous)),
+            "dangerous_action_false_release_count":false_release,"cross_resolution_performance_drop":drop,
+            "zero_shot_gain":statistics.fmean(zero) if zero else 0.0,"few_shot_gain":statistics.fmean(few) if few else 0.0,
+            "zero_shot_count":len(zero),"few_shot_count":len(few),"raw_sample_count":len(values),"complete_episode_count":len(episodes),
+            "independent_game_count":len({row["game_id"] for row in episodes}),"independent_task_count":len({(row["game_id"],row["task_id"]) for row in episodes}),
+            "independent_game_type_count":len({row["game_type"] for row in episodes if row["game_type"]!="unknown"}),
+            "resolution_group_count":len({row["resolution"] for row in episodes if row["resolution"]!="unknown"}),
+            "transfer_evidence_count":sum(row["transfer_evidence"] for row in episodes),"ood_count":len(ood),"irreversible_count":len(dangerous),
+        }
+
     @classmethod
     def evaluate(cls,train_rows,test_rows,transfer_rows,current_game="",current_type=""):
-        train=[row for row in train_rows if isinstance(row,dict)]; tests=[row for row in test_rows if isinstance(row,dict)]; transfer=[row for row in transfer_rows if isinstance(row,dict)]
-        train_ids={cls._lineage(row) for row in train if cls._lineage(row)}; result={"schema_version":GENERALIZATION_SCHEMA_VERSION,"claim_policy":"only isolated datasets may support a level","levels":{},"required_metrics":list(cls.required_metrics)}
+        train=[row for row in train_rows if isinstance(row,dict)]
+        candidates=[row for row in [*list(test_rows or []),*list(transfer_rows or [])] if isinstance(row,dict)]
+        train_ids={cls._lineage(row) for row in train if cls._lineage(row)}
+        result={"schema_version":GENERALIZATION_SCHEMA_VERSION,
+            "claim_policy":"a level is claimable only after isolated, sufficiently powered, metric-gated evaluation",
+            "levels":{},"required_metrics":list(cls.required_metrics),"thresholds":cls.thresholds,
+            "benchmark_dimensions":list(GENERALIZATION_BENCHMARK_DIMENSIONS)}
         for level,name in GENERALIZATION_LEVELS.items():
-            rows=tests if level==1 else [row for row in transfer if cls._level(row,current_game,current_type)==level and str(cls._context(row).get("evaluation_partition","")) in {"test","holdout"}]
-            test_ids={cls._lineage(row) for row in rows if cls._lineage(row)}; overlap=sorted(train_ids.intersection(test_ids)); metrics=cls._metrics(rows)
-            isolated=bool(rows and test_ids and not overlap); passed=bool(isolated and metrics["dangerous_action_false_release_count"]==0)
-            result["levels"][str(level)]={"name":name,"evaluated":bool(rows),"isolated":isolated,"passed":passed,"train_test_lineage_overlap":overlap[:32],"metrics":metrics,
-                "reason":"" if passed else "missing isolated evaluation data" if not rows else "data lineage overlap" if overlap else "irreversible dangerous action was released" if metrics["dangerous_action_false_release_count"] else "missing lineage identifiers"}
-        result["all_claimed_levels_safe"]=all(not row["evaluated"] or row["metrics"]["dangerous_action_false_release_count"]==0 for row in result["levels"].values()); return result
+            rows=[]
+            for row in candidates:
+                context=cls._context(row)
+                partition=str(context.get("evaluation_partition",row.get("evaluation_partition","")))
+                if partition not in {"test","holdout"}:
+                    continue
+                if cls._level(row,current_game,current_type)==level:
+                    rows.append(row)
+            test_ids={cls._lineage(row) for row in rows if cls._lineage(row)}
+            missing_lineage=sum(1 for row in rows if not cls._lineage(row))
+            overlap=sorted(train_ids.intersection(test_ids))
+            metrics=cls._metrics(rows)
+            threshold=cls.thresholds[level]
+            sample_reasons=[]
+            if metrics["independent_game_count"]<threshold["games"]:
+                sample_reasons.append("independent_games")
+            if metrics["independent_task_count"]<threshold["tasks"]:
+                sample_reasons.append("independent_tasks")
+            if metrics["complete_episode_count"]<threshold["episodes"]:
+                sample_reasons.append("complete_episodes")
+            if metrics["ood_count"]<threshold["ood_trials"]:
+                sample_reasons.append("ood_trials")
+            if metrics["resolution_group_count"]<threshold["resolution_groups"]:
+                sample_reasons.append("resolution_groups")
+            if metrics["independent_game_type_count"]<threshold.get("game_types",0):
+                sample_reasons.append("independent_game_types")
+            if metrics["transfer_evidence_count"]<threshold.get("transfer_evidence",0):
+                sample_reasons.append("zero_or_few_shot_transfer_evidence")
+            isolation_reasons=[]
+            if missing_lineage:
+                isolation_reasons.append("missing_lineage_identifiers")
+            if overlap:
+                isolation_reasons.append("train_test_lineage_overlap")
+            isolated=bool(rows and test_ids and not isolation_reasons)
+            if not rows or sample_reasons or isolation_reasons:
+                status="not_evaluated"
+                failures=[]
+            else:
+                failures=[]
+                checks=(
+                    (metrics["success_rate_ci95_lower"]>=threshold["success_lcb"],"success_confidence_lower_bound"),
+                    (metrics["actions_per_success"]<=threshold["actions_per_success"],"actions_per_success"),
+                    (metrics["human_guidance_rate"]<=threshold["guidance_rate"],"human_guidance_rate"),
+                    (metrics["ood_rejection_ci95_lower"]>=threshold["ood_lcb"],"ood_rejection_confidence_lower_bound"),
+                    (metrics["cross_resolution_performance_drop"]<=threshold["resolution_drop"],"cross_resolution_drop"),
+                    (metrics["dangerous_action_false_release_count"]==0,"dangerous_action_false_release"),
+                )
+                failures=[name for passed,name in checks if not passed]
+                status="passed" if not failures else "failed"
+            result["levels"][str(level)]={
+                "name":name,"status":status,"evaluated":status in {"passed","failed"},"claim_allowed":status=="passed",
+                "isolated":isolated,"passed":status=="passed","train_test_lineage_overlap":overlap[:32],
+                "missing_lineage_count":missing_lineage,"sample_sufficiency_failures":sample_reasons,
+                "metric_failures":failures,"metrics":metrics,"thresholds":threshold,
+                "reason":"" if status=="passed" else ",".join([*sample_reasons,*isolation_reasons,*failures]),
+            }
+        result["claimed_levels"]=[int(level) for level,row in result["levels"].items() if row["claim_allowed"]]
+        result["all_claimed_levels_safe"]=all(row["metrics"]["dangerous_action_false_release_count"]==0
+            for row in result["levels"].values() if row["claim_allowed"])
+        return result
 
 class TerminalEvidenceFusion:
-    success_tokens=("victory","win","success","completed","clear","胜利","成功","完成","通关","继续")
+    success_tokens=("victory","win","success","completed","clear","胜利","成功","完成","通关")
     failure_tokens=("defeat","failure","failed","game over","lose","失败","战败","重试","重新开始")
+
     @classmethod
     def classify(cls,policy,feature):
         value=policy.state_hash(feature)
         success_hash,success_distance=policy._hash_probability(value,policy.success_states,policy.success_hash_distance)
         failure_hash,failure_distance=policy._hash_probability(value,policy.failure_states,policy.failure_hash_distance)
-        success_score=0.30*success_hash if success_distance<=policy.success_hash_distance+2 else 0.0
-        failure_score=0.30*failure_hash if failure_distance<=policy.failure_hash_distance+2 else 0.0
-        evidence=[]; progress=0.0
+        success_score=0.28*success_hash if success_distance<=policy.success_hash_distance+2 else 0.0
+        failure_score=0.28*failure_hash if failure_distance<=policy.failure_hash_distance+2 else 0.0
+        success_sources=set(["visual_structure"] if success_score>0 else [])
+        failure_sources=set(["visual_structure"] if failure_score>0 else [])
+        evidence=[]
+        progress=0.0
         semantic=SEMANTIC_EVENT_HUB.latest(policy.game_id or None,1.8)
         if semantic:
             progress=max(-1.0,min(1.0,safe_float(semantic.get("progress"),0.0)))
-            if semantic.get("terminal")=="success": success_score+=0.62; evidence.append("semantic_event:success")
-            if semantic.get("terminal")=="failure": failure_score+=0.62; evidence.append("semantic_event:failure")
+            if semantic.get("terminal")=="success":
+                success_score+=0.58
+                success_sources.add("round_state_transition")
+                evidence.append("semantic_event:success")
+            if semantic.get("terminal")=="failure":
+                failure_score+=0.58
+                failure_sources.add("round_state_transition")
+                evidence.append("semantic_event:failure")
         perception=PERCEPTION_EVIDENCE_HUB.latest(None,2.0)
-        texts=[]
         if perception:
-            texts=[str(value).strip().casefold() for value in perception.get("texts",[]) if str(value).strip()]
+            texts=[str(item).strip().casefold() for item in perception.get("texts",[]) if str(item).strip()]
             for obj in perception.get("objects",[]):
-                if not isinstance(obj,dict): continue
-                role=str(obj.get("role","")).casefold(); object_class=str(obj.get("class","")).casefold(); text=str(obj.get("text","")).casefold()
-                combined=role+" "+object_class+" "+text
-                if any(token in combined for token in cls.success_tokens): success_score+=0.24; evidence.append("object:"+str(obj.get("track_id") or role or object_class))
-                if any(token in combined for token in cls.failure_tokens): failure_score+=0.24; evidence.append("object:"+str(obj.get("track_id") or role or object_class))
+                if not isinstance(obj,dict):
+                    continue
+                combined=" ".join((str(obj.get("role","")),str(obj.get("class","")),str(obj.get("text","")))).casefold()
+                if any(token in combined for token in cls.success_tokens):
+                    success_score+=0.22
+                    success_sources.add("object_semantics")
+                    evidence.append("object:success")
+                if any(token in combined for token in cls.failure_tokens):
+                    failure_score+=0.22
+                    failure_sources.add("object_semantics")
+                    evidence.append("object:failure")
             joined=" ".join(texts)
-            if any(token in joined for token in cls.success_tokens): success_score+=0.28; evidence.append("ocr:success_keyword")
-            if any(token in joined for token in cls.failure_tokens): failure_score+=0.28; evidence.append("ocr:failure_keyword")
-            motion=[safe_float(value,0.0) for value in perception.get("motion",[])]
+            if any(token in joined for token in cls.success_tokens):
+                success_score+=0.25
+                success_sources.add("ocr_semantics")
+                evidence.append("ocr:success")
+            if any(token in joined for token in cls.failure_tokens):
+                failure_score+=0.25
+                failure_sources.add("ocr_semantics")
+                evidence.append("ocr:failure")
+            motion=[safe_float(item,0.0) for item in perception.get("motion",[])]
             if len(motion)>=3 and statistics.fmean(motion[-3:])<1.5:
-                if success_score>0.25: success_score+=0.08; evidence.append("animation:stopped")
-                if failure_score>0.25: failure_score+=0.08; evidence.append("animation:stopped")
+                if success_score>0.20:
+                    success_score+=0.10
+                    success_sources.add("stable_frames")
+                if failure_score>0.20:
+                    failure_score+=0.10
+                    failure_sources.add("stable_frames")
+                evidence.append("frames:stable")
         learned=temporal_termination_prediction(policy.profile.get("temporal_termination_model"),policy,perception)
         learned_success=safe_float(learned.get("success"),0.0,0.0,1.0)
         learned_failure=safe_float(learned.get("failure"),0.0,0.0,1.0)
         learned_reset=safe_float(learned.get("reset"),0.0,0.0,1.0)
         learned_progress=safe_float(learned.get("progress"),0.0,0.0,1.0)
         learned_stalled=safe_float(learned.get("stalled"),0.0,0.0,1.0)
-        rule_success=max(0.0,min(1.0,success_score))
-        rule_failure=max(0.0,min(1.0,failure_score))
-        conflict=bool(learned and (rule_success>=0.60 and learned_failure>=0.60 or rule_failure>=0.60 and learned_success>=0.60))
-        if learned:
-            support=safe_int(learned.get("support"),0)
-            weight=min(0.45,0.12+0.06*math.log1p(support)) if learned.get("exact") else 0.08
-            success_score=(1.0-weight)*rule_success+weight*learned_success
-            failure_score=(1.0-weight)*rule_failure+weight*learned_failure
-            progress=max(progress,learned_progress-learned_stalled)
-            evidence.append("temporal_model:"+("exact" if learned.get("exact") else "prior"))
+        if learned and learned.get("exact") and safe_int(learned.get("support"),0)>=3:
+            if learned_success>=0.70:
+                success_sources.add("temporal_transition_model")
+            if learned_failure>=0.70:
+                failure_sources.add("temporal_transition_model")
+            weight=min(0.42,0.12+0.06*math.log1p(safe_int(learned.get("support"),0)))
+            success_score=(1.0-weight)*success_score+weight*learned_success
+            failure_score=(1.0-weight)*failure_score+weight*learned_failure
+            evidence.append("temporal_model:exact")
+        progress=max(progress,learned_progress-learned_stalled)
+        semantic_success=bool(success_sources.intersection({"object_semantics","ocr_semantics","round_state_transition"}))
+        semantic_failure=bool(failure_sources.intersection({"object_semantics","ocr_semantics","round_state_transition"}))
+        corroborated_success=semantic_success and len(success_sources)>=2
+        corroborated_failure=semantic_failure and len(failure_sources)>=2
         success_probability=max(0.0,min(1.0,success_score))
         failure_probability=max(0.0,min(1.0,failure_score))
-        strict_success=success_probability>=0.76 and success_probability>=failure_probability+0.10
-        strict_failure=failure_probability>=0.76 and failure_probability>success_probability+0.10
-        high_learned_success=learned_success>=0.94 and learned_failure<=0.10
-        high_learned_failure=learned_failure>=0.94 and learned_success<=0.10
-        candidate="" if conflict else "success" if strict_success or high_learned_success else "failure" if strict_failure or high_learned_failure else ""
+        conflict=bool(corroborated_success and corroborated_failure
+            or success_probability>=0.65 and learned_failure>=0.70
+            or failure_probability>=0.65 and learned_success>=0.70)
+        candidate=""
+        if not conflict and corroborated_success and success_probability>=0.72 and success_probability>=failure_probability+0.10:
+            candidate="success"
+        elif not conflict and corroborated_failure and failure_probability>=0.72 and failure_probability>success_probability+0.10:
+            candidate="failure"
+        insufficient=bool(not candidate and max(success_probability,failure_probability)>=0.60)
         confidence=max(success_probability,failure_probability,0.55 if abs(progress)>0 else 0.0)
-        if conflict:
+        if conflict or insufficient:
             confidence=min(confidence,0.49)
-            evidence.append("terminal_conflict_requires_guidance")
+            evidence.append("terminal_requires_semantic_guidance")
         return {
             "candidate":candidate,"success_probability":success_probability,"failure_probability":failure_probability,
-            "reset_probability":learned_reset,"progress_probability":learned_progress,
-            "stalled_probability":learned_stalled,"progress_score":progress,"evidence":evidence[:16],
-            "reward_confidence":confidence,"conflict":conflict,"requires_guidance":conflict,
-            "learned_evidence":learned,"hash_evidence":{"success_distance":success_distance,"failure_distance":failure_distance}}
+            "reset_probability":learned_reset,"progress_probability":learned_progress,"stalled_probability":learned_stalled,
+            "progress_score":progress,"evidence":evidence[:16],"reward_confidence":confidence,"conflict":conflict,
+            "requires_guidance":bool(conflict or insufficient),"independent_success_sources":sorted(success_sources),
+            "independent_failure_sources":sorted(failure_sources),"minimum_independent_sources":2,
+            "learned_evidence":learned,"hash_evidence":{"success_distance":success_distance,"failure_distance":failure_distance},
+        }
 
 class CapabilityProfile:
     def __init__(self,profile=None):
         source=dict(profile) if isinstance(profile,dict) else {}
-        self.level=safe_int(source.get("capability_level",0),0,0,4)
-        self.keyboard_enabled=bool(source.get("keyboard_enabled",False) and self.level>=2)
-        self.sound_enabled=bool(source.get("sound_enabled",False) and self.level>=3)
-        self.gamepad_enabled=bool(source.get("gamepad_enabled",False) and self.level>=4)
-        self.semantic_keymap={str(key):str(value) for key,value in (source.get("semantic_keymap",{}) if isinstance(source.get("semantic_keymap"),dict) else {}).items() if str(key) in SEMANTIC_KEY_ACTIONS and str(value)}
+        permissions=source.get("modality_permissions",{}) if isinstance(source.get("modality_permissions"),dict) else {}
+        self.keyboard_enabled=bool(source.get("keyboard_enabled",False))
+        self.sound_enabled=bool(source.get("sound_enabled",False))
+        self.gamepad_enabled=bool(source.get("gamepad_enabled",False))
+        self.level=max(safe_int(source.get("capability_level",0),0,0,4),1 if source.get("ocr_enabled") else 0,
+            2 if self.keyboard_enabled else 0,3 if self.sound_enabled else 0,4 if self.gamepad_enabled else 0)
+        self.permissions={
+            "keyboard":{**(permissions.get("keyboard",{}) if isinstance(permissions.get("keyboard"),dict) else {}),
+                "enabled":self.keyboard_enabled,"data_mask":"semantic_only","model_version":"semantic_keyboard_v1",
+                "safety_permission":self.keyboard_enabled},
+            "sound":{**(permissions.get("sound",{}) if isinstance(permissions.get("sound"),dict) else {}),
+                "enabled":self.sound_enabled,"data_mask":"event_only_no_raw_audio","model_version":"audio_event_v1",
+                "safety_permission":self.sound_enabled},
+            "gamepad":{**(permissions.get("gamepad",{}) if isinstance(permissions.get("gamepad"),dict) else {}),
+                "enabled":self.gamepad_enabled,"data_mask":"semantic_only","model_version":"gamepad_semantic_v1",
+                "safety_permission":self.gamepad_enabled},
+        }
+        self.semantic_keymap={str(key):str(value) for key,value in (source.get("semantic_keymap",{})
+            if isinstance(source.get("semantic_keymap"),dict) else {}).items() if str(key) in SEMANTIC_KEY_ACTIONS and str(value)}
+
     def authorize(self,capability):
         name=str(capability)
-        if name=="ocr": return self.level>=1
-        if name=="keyboard": return self.keyboard_enabled
-        if name=="sound": return self.sound_enabled
-        if name=="gamepad": return self.gamepad_enabled
+        if name=="ocr":
+            return self.level>=1
+        if name in self.permissions:
+            value=self.permissions[name]
+            return bool(value.get("enabled") and value.get("safety_permission"))
         return name=="mouse"
+
     def to_dict(self):
-        return {"capability_level":self.level,"capability_name":CAPABILITY_LEVEL_NAMES[self.level],"keyboard_enabled":self.keyboard_enabled,"sound_enabled":self.sound_enabled,"gamepad_enabled":self.gamepad_enabled,"semantic_keymap":dict(self.semantic_keymap),
-            "audio_representation":"event_only_no_raw_audio","keyboard_representation":"semantic_action_to_game_keymap"}
+        return {"capability_level":self.level,"capability_name":CAPABILITY_LEVEL_NAMES[self.level],
+            "keyboard_enabled":self.keyboard_enabled,"sound_enabled":self.sound_enabled,"gamepad_enabled":self.gamepad_enabled,
+            "semantic_keymap":dict(self.semantic_keymap),"modality_permissions":self.permissions,
+            "audio_representation":"event_only_no_raw_audio","keyboard_representation":"semantic_action_to_game_keymap",
+            "gamepad_representation":"semantic_action_only"}
 
 class AdapterHierarchyManager:
     def __init__(self,base):
@@ -20197,69 +20792,220 @@ def reward_exploitation_signal(history,record):
 
 
 class AutomaticSkillDiscovery:
+    @staticmethod
+    def _objects(observation):
+        value=observation if isinstance(observation,dict) else {}
+        return [item for item in value.get("objects",[]) if isinstance(item,dict)]
+
     @classmethod
     def discover(cls,experiences):
         grouped=defaultdict(list)
         for value in experiences or []:
             if isinstance(value,dict):
-                grouped[str(value.get("episode_id") or value.get("session") or "legacy")].append(value)
-        patterns=defaultdict(lambda:{"count":0,"success":0,"games":set(),"types":set(),"starts":Counter(),"ends":Counter(),"risk":"safe"})
-        for _,values in grouped.items():
+                key=(str(value.get("game_id","")),str(value.get("episode_id") or value.get("session") or "legacy"))
+                grouped[key].append(value)
+        options=defaultdict(lambda:{"episodes":set(),"success":0,"games":set(),"types":set(),"themes":set(),
+            "starts":Counter(),"roles":Counter(),"relations":Counter(),"ends":Counter(),"actions":Counter(),
+            "recoveries":Counter(),"parameters":Counter(),"risk":"safe"})
+        for (game_id,episode_id),values in grouped.items():
             ordered=sorted(values,key=lambda item:safe_int(item.get("step_id"),0))
-            actions=[str(value.get("skill_id") or value.get("skill_key") or value.get("action_t") or value.get("action") or "") for value in ordered]
-            episode_success=any(bool(value.get("success")) or str(value.get("terminal_state"))=="success" for value in ordered)
-            for size in range(2,min(7,len(actions)+1)):
-                for index in range(0,len(actions)-size+1):
-                    sequence=tuple(actions[index:index+size])
-                    if not all(sequence):
-                        continue
-                    row=patterns[sequence]
-                    row["count"]+=1
-                    row["success"]+=int(episode_success)
-                    sample=ordered[index]
-                    row["games"].add(str(sample.get("game_id","")))
-                    context=sample.get("context",{}) if isinstance(sample.get("context"),dict) else {}
-                    row["types"].add(str(context.get("game_type","unknown")))
-                    before=sample.get("observation_t",{}) if isinstance(sample.get("observation_t"),dict) else {}
-                    after=ordered[min(len(ordered)-1,index+size-1)].get("observation_t+1",{}) if isinstance(ordered[min(len(ordered)-1,index+size-1)].get("observation_t+1"),dict) else {}
-                    row["starts"].update(str(value.get("class","unknown")) for value in before.get("objects",[]) if isinstance(value,dict))
-                    row["ends"].update(str(value.get("class","unknown")) for value in after.get("objects",[]) if isinstance(value,dict))
-                    semantic=normalize_semantic_action(sample.get("semantic_action"))
-                    if str((semantic or {}).get("risk_class","safe"))=="irreversible":
+            segments=[]
+            current=[]
+            current_subgoal=None
+            for value in ordered:
+                subgoal=str(value.get("subgoal_id") or "advance_goal")
+                if current and subgoal!=current_subgoal:
+                    segments.append(current)
+                    current=[]
+                current_subgoal=subgoal
+                current.append(value)
+                context=value.get("context",{}) if isinstance(value.get("context"),dict) else {}
+                if value.get("done") or context.get("subgoal_completed") or value.get("success") or value.get("failure"):
+                    segments.append(current)
+                    current=[]
+                    current_subgoal=None
+            if current:
+                segments.append(current)
+            for segment in segments:
+                if not segment:
+                    continue
+                first=segment[0]
+                last=segment[-1]
+                before=first.get("observation_t",{}) if isinstance(first.get("observation_t"),dict) else {}
+                after=last.get("observation_t+1",{}) if isinstance(last.get("observation_t+1"),dict) else {}
+                before_objects=cls._objects(before)
+                after_objects=cls._objects(after)
+                before_classes=Counter(str(item.get("class","unknown")) for item in before_objects)
+                after_classes=Counter(str(item.get("class","unknown")) for item in after_objects)
+                appeared=after_classes-before_classes
+                disappeared=before_classes-after_classes
+                context=first.get("context",{}) if isinstance(first.get("context"),dict) else {}
+                action_keys=[]
+                for item in segment:
+                    action=str(item.get("skill_id") or item.get("skill_key") or item.get("action_t") or item.get("action") or "")
+                    if action:
+                        action_keys.append(action)
+                effect={"appeared":sorted(appeared.elements()),"disappeared":sorted(disappeared.elements()),
+                    "terminal":str(last.get("terminal_state","neutral")),"subgoal":str(first.get("subgoal_id") or "advance_goal")}
+                initiation={"classes":sorted(before_classes),"roles":sorted(str(item.get("role","")) for item in before_objects if item.get("role")),
+                    "relations":sorted(str(edge.get("relation","")) for edge in (before.get("scene_graph",{}) or {}).get("edges",[]) if isinstance(edge,dict))}
+                identity=hashlib.sha256(canonical_bytes({"initiation":initiation,"effect":effect,
+                    "action_families":[value.split("|")[0] for value in action_keys]})).hexdigest()[:20]
+                row=options[identity]
+                row["episodes"].add(game_id+"|"+episode_id)
+                row["success"]+=int(any(bool(item.get("success")) for item in segment)
+                    or str(last.get("terminal_state"))=="success" or bool(context.get("subgoal_completed")))
+                row["games"].add(game_id)
+                row["types"].add(str(context.get("game_type","unknown")))
+                row["themes"].add(str(context.get("ui_variant") or context.get("theme") or "unknown"))
+                row["starts"].update(before_classes)
+                row["roles"].update(initiation["roles"])
+                row["relations"].update(initiation["relations"])
+                row["ends"].update({"appear:"+key:value for key,value in appeared.items()})
+                row["ends"].update({"disappear:"+key:value for key,value in disappeared.items()})
+                row["actions"].update(action_keys)
+                for item in segment:
+                    semantic_parameter=normalize_semantic_action(item.get("semantic_action")) or {}
+                    target_parameter=semantic_parameter.get("target",{}) if isinstance(semantic_parameter.get("target"),dict) else {}
+                    parameter=str(target_parameter.get("role") or target_parameter.get("class") or "")
+                    if parameter:
+                        row["parameters"][parameter]+=1
+                if any(bool(item.get("failure")) for item in segment):
+                    row["recoveries"]["wait_redetect_then_guidance"]+=1
+                else:
+                    row["recoveries"]["retry_once_then_guidance"]+=1
+                for item in segment:
+                    semantic=normalize_semantic_action(item.get("semantic_action"))
+                    risk=str((semantic or {}).get("risk_class","safe"))
+                    if risk=="irreversible":
                         row["risk"]="irreversible"
-                    elif str((semantic or {}).get("risk_class","safe"))=="caution" and row["risk"]=="safe":
+                    elif risk=="caution" and row["risk"]=="safe":
                         row["risk"]="caution"
         discovered=[]
-        for sequence,row in sorted(patterns.items(),key=lambda pair:(pair[1]["success"],pair[1]["count"],len(pair[0])),reverse=True):
-            if row["count"]<2 or row["success"]<1:
+        for identity,row in sorted(options.items(),key=lambda pair:(len(pair[1]["episodes"]),pair[1]["success"]),reverse=True):
+            support=len(row["episodes"])
+            if support<3:
                 continue
-            scope="global" if len({value for value in row["games"] if value})>=3 else "game_type" if len({value for value in row["games"] if value})>=2 else "single_game"
-            identity=hashlib.sha256(canonical_bytes(sequence)).hexdigest()[:20]
+            success_rate=row["success"]/max(1,support)
+            lower=GeneralizationEvaluator._wilson_lower(row["success"],support)
+            games={value for value in row["games"] if value}
+            themes={value for value in row["themes"] if value and value!="unknown"}
+            types={value for value in row["types"] if value and value!="unknown"}
+            if len(games)>=3 and (len(themes)>=2 or len(types)>=2) and lower>=0.55 and row["risk"]!="irreversible":
+                scope="global"
+            elif len(games)>=2 and lower>=0.50 and row["risk"]!="irreversible":
+                scope="game_type"
+            else:
+                scope="single_game"
+            action_policy=[value for value,_ in row["actions"].most_common(8)]
             discovered.append({
-                "schema_version":SKILL_DISCOVERY_SCHEMA_VERSION,"skill_id":"discovered_"+identity,
-                "scope":scope,"trigger_conditions":{"object_classes":[value for value,_ in row["starts"].most_common(12)]},
-                "action_sequence":list(sequence),
-                "termination_conditions":{"object_classes":[value for value,_ in row["ends"].most_common(12)]},
-                "support":row["count"],"success_rate":round(row["success"]/max(1,row["count"]),6),
-                "applicable_game_types":sorted(row["types"]),"applicable_games":sorted(row["games"]),
-                "risk_level":row["risk"],
+                "schema_version":SKILL_DISCOVERY_SCHEMA_VERSION,"skill_id":"option_"+identity,"scope":scope,
+                "initiation_set":{"object_classes":[value for value,_ in row["starts"].most_common(12)],
+                    "object_roles":[value for value,_ in row["roles"].most_common(12)],
+                    "relations":[value for value,_ in row["relations"].most_common(12)]},
+                "parameterized_policy":{"action_distribution":action_policy,
+                    "target_role_parameters":[value for value,_ in row["parameters"].most_common(12) if value]},
+                "termination":{"effects":[value for value,_ in row["ends"].most_common(12)],"stop_on_terminal":True,
+                    "stop_on_subgoal_change":True},
+                "failure_recovery":row["recoveries"].most_common(1)[0][0] if row["recoveries"] else "stop_and_ask",
+                "support_episodes":support,"success_rate":round(success_rate,6),"success_rate_ci95_lower":round(lower,6),
+                "applicable_game_types":sorted(types),"applicable_games":sorted(games),"ui_theme_count":len(themes),
+                "risk_level":row["risk"],"promotion_rule":"global_requires_cross_game_or_cross_theme_evidence",
             })
             if len(discovered)>=128:
                 break
-        return {"schema_version":SKILL_DISCOVERY_SCHEMA_VERSION,"hierarchy":["global","game_type","single_game"],"skills":discovered}
+        return {"schema_version":SKILL_DISCOVERY_SCHEMA_VERSION,"algorithm":"object_effect_option_induction",
+            "hierarchy":["global","game_type","single_game"],"skills":discovered}
 
 
 class ExperienceReplayPortfolio:
-    categories=("immutable_raw","deduplicated_training","high_value_failure","human_correction","terminal_boundary","ood_and_danger_negative","cross_game_skill")
+    categories=("immutable_raw","deduplicated_training","high_value_failure","human_correction",
+        "terminal_boundary","ood_and_danger_negative","cross_game_skill")
+
+    @staticmethod
+    def _context(item):
+        return item.get("context",{}) if isinstance(item,dict) and isinstance(item.get("context"),dict) else {}
+
     @classmethod
-    def build(cls,experiences,limit=MAX_TRAINING_SAMPLES):
-        buckets={name:[] for name in cls.categories}
+    def _group_key(cls,item):
+        context=cls._context(item)
+        return "|".join((str(item.get("game_id") or context.get("game_id") or "unknown"),
+            normalized_identifier(item.get("task_id") or context.get("task_id"),"default",96),
+            str(context.get("level_id") or context.get("level") or "unknown"),
+            str(item.get("session") or context.get("session_id") or item.get("episode_id") or "unknown")))
+
+    @classmethod
+    def _dedup_key(cls,item):
+        context=cls._context(item)
+        observation=item.get("observation_t",{}) if isinstance(item.get("observation_t"),dict) else {}
+        visual=str(context.get("perceptual_hash") or observation.get("perceptual_hash") or observation.get("visual_digest") or "")
+        objects=[]
+        for value in observation.get("objects",[]) if isinstance(observation.get("objects"),list) else []:
+            if not isinstance(value,dict):
+                continue
+            bbox=value.get("bbox",[0.0,0.0,0.0,0.0])
+            coarse=[round(safe_float(entry,0.0)*8)/8 for entry in list(bbox)[:4]] if isinstance(bbox,(list,tuple)) else []
+            objects.append((str(value.get("class","unknown")),str(value.get("role","")),str(value.get("text","")),coarse))
+        scene=hashlib.sha256(canonical_bytes(sorted(objects))).hexdigest()[:20]
+        semantic=normalize_semantic_action(item.get("semantic_action"))
+        action=semantic_action_signature(semantic) if semantic is not None else str(item.get("action_t") or item.get("action") or "")
+        return hashlib.sha256(canonical_bytes({"visual":visual[:32],"scene":scene,"action":action})).hexdigest()
+
+    @classmethod
+    def _priority(cls,item):
+        context=cls._context(item)
+        score=2.0*safe_float(context.get("model_disagreement",item.get("uncertainty",0.0)),0.0)
+        score+=1.5*abs(safe_float(item.get("td_error",item.get("prediction_error",0.0)),0.0))
+        score+=2.0*int(bool(item.get("human_override")))+1.8*int(bool(item.get("success") or item.get("failure")))
+        score+=1.4*int(bool(context.get("ood")))+1.2*int(bool(context.get("cross_game_transfer")))
+        score+=1.0*int(bool(item.get("failure")))+0.8*int(bool(context.get("rare_relation")))
+        return score
+
+    @classmethod
+    def deduplicate(cls,experiences,limit=MAX_TRAINING_SAMPLES):
+        representatives={}
         for item in experiences or []:
             if not isinstance(item,dict):
                 continue
-            context=item.get("context",{}) if isinstance(item.get("context"),dict) else {}
-            buckets["immutable_raw"].append(item)
-            buckets["deduplicated_training"].append(item)
+            key=cls._dedup_key(item)
+            previous=representatives.get(key)
+            if previous is None or cls._priority(item)>cls._priority(previous):
+                representatives[key]=item
+        by_family=defaultdict(list)
+        for key,item in representatives.items():
+            semantic=normalize_semantic_action(item.get("semantic_action"))
+            family=semantic_action_family_key(semantic) if semantic is not None else str(item.get("action_t") or "unknown").split("|")[0]
+            by_family[family].append((cls._priority(item),key,item))
+        ordered=[]
+        family_rows=[sorted(values,key=lambda row:(-row[0],row[1])) for values in by_family.values()]
+        index=0
+        while len(ordered)<max(1,int(limit)) and any(index<len(values) for values in family_rows):
+            for values in family_rows:
+                if index<len(values) and len(ordered)<max(1,int(limit)):
+                    ordered.append(values[index][2])
+            index+=1
+        return ordered
+
+    @classmethod
+    def partition(cls,experiences,portfolio,split="train",limit=MAX_TRAINING_SAMPLES):
+        value=portfolio if isinstance(portfolio,dict) else {}
+        manifest=value.get("immutable_training_manifest",{}) if isinstance(value.get("immutable_training_manifest"),dict) else {}
+        rows=manifest.get("rows",[]) if isinstance(manifest.get("rows"),list) else []
+        selected={str(row.get("dedup_key")) for row in rows if isinstance(row,dict) and row.get("split")==split}
+        deduplicated=cls.deduplicate(experiences,limit)
+        if not selected:
+            return deduplicated if split=="train" else []
+        return [item for item in deduplicated if cls._dedup_key(item) in selected]
+
+    @classmethod
+    def build(cls,experiences,limit=MAX_TRAINING_SAMPLES):
+        raw=[item for item in experiences or [] if isinstance(item,dict)]
+        deduplicated=cls.deduplicate(raw,limit)
+        buckets={name:[] for name in cls.categories}
+        buckets["immutable_raw"]=raw
+        buckets["deduplicated_training"]=deduplicated
+        for item in raw:
+            context=cls._context(item)
             if item.get("failure") or safe_float(item.get("reward_t",0.0),0.0)<-0.2:
                 buckets["high_value_failure"].append(item)
             if item.get("human_override") or context.get("human_correction"):
@@ -20271,22 +21017,38 @@ class ExperienceReplayPortfolio:
                 buckets["ood_and_danger_negative"].append(item)
             if context.get("generalization_level",0) in {3,4} or context.get("cross_game_transfer"):
                 buckets["cross_game_skill"].append(item)
-        summary={name:len(values) for name,values in buckets.items()}
-        priority=[]
-        for item in experiences or []:
-            if not isinstance(item,dict):
-                continue
-            context=item.get("context",{}) if isinstance(item.get("context"),dict) else {}
-            score=2.0*safe_float(context.get("model_disagreement",item.get("uncertainty",0.0)),0.0)+1.5*abs(safe_float(item.get("td_error",item.get("prediction_error",0.0)),0.0))
-            score+=2.0*int(bool(item.get("human_override")))+1.8*int(bool(item.get("success") or item.get("failure")))+1.4*int(bool(context.get("ood")))+1.2*int(bool(context.get("cross_game_transfer")))
-            priority.append((score,str(item.get("source_sample_checksum",""))))
-        priority.sort(reverse=True)
-        return {
-            "schema_version":EXPERIENCE_PORTFOLIO_SCHEMA_VERSION,"categories":summary,
-            "priority_keys":[value for _,value in priority[:max(1,min(int(limit),4096))]],
-            "priority_formula":["model_disagreement","td_or_prediction_error","rare_task_or_relation",
-                "human_correction","danger_boundary","terminal_state","cross_game_value"],
-        }
+        groups=defaultdict(list)
+        for item in deduplicated:
+            groups[cls._group_key(item)].append(item)
+        group_names=sorted(groups,key=lambda value:hashlib.sha256(value.encode("utf-8","replace")).hexdigest())
+        split_groups={"train":[],"validation":[],"test":[]}
+        for index,group in enumerate(group_names):
+            if len(group_names)<3:
+                split="train" if index==0 else "test"
+            else:
+                bucket=index%20
+                split="train" if bucket<14 else "validation" if bucket<17 else "test"
+            split_groups[split].append(group)
+        split_sets={name:set(values) for name,values in split_groups.items()}
+        overlap=bool(split_sets["train"]&split_sets["validation"] or split_sets["train"]&split_sets["test"]
+            or split_sets["validation"]&split_sets["test"])
+        manifest_rows=[]
+        for item in deduplicated:
+            group=cls._group_key(item)
+            split=next(name for name,values in split_sets.items() if group in values)
+            manifest_rows.append({"dedup_key":cls._dedup_key(item),"group":group,"split":split,
+                "source_checksum":str(item.get("source_sample_checksum",""))})
+        manifest={"schema_version":2,"immutable":True,"group_fields":["game","task","level","session"],
+            "raw_count":len(raw),"deduplicated_count":len(deduplicated),"rows":manifest_rows,
+            "split_groups":split_groups,"group_overlap":overlap}
+        manifest["checksum"]=hashlib.sha256(canonical_bytes(manifest)).hexdigest()
+        priority=sorted(((cls._priority(item),str(item.get("source_sample_checksum",""))) for item in raw),reverse=True)
+        return {"schema_version":EXPERIENCE_PORTFOLIO_SCHEMA_VERSION,"categories":{name:len(values) for name,values in buckets.items()},
+            "deduplication":{"algorithm":"perceptual_scene_graph_semantic_action","removed":len(raw)-len(deduplicated),
+                "rare_and_hard_negative_retention":True,"action_family_balancing":True},
+            "immutable_training_manifest":manifest,"priority_keys":[value for _,value in priority[:max(1,min(int(limit),4096))]],
+            "priority_formula":["model_disagreement","td_or_prediction_error","rare_task_or_relation","human_correction",
+                "danger_boundary","terminal_state","cross_game_value"]}
 
 
 class ModelPromotionGate:
@@ -20369,6 +21131,39 @@ def assert_single_default_component_assignment(path=None):
     return True
 
 
+def generalization_contract_suite():
+    train=[{"checksum":"train-only","context":{"data_lineage":{"lineage_id":"train-only"}}}]
+    rows=[]
+    for index in range(40):
+        success=index<36
+        for step in range(2):
+            rows.append({"game_id":"g1","task_id":"task_"+str(index%2),"episode_id":"episode_"+str(index),
+                "step_id":step,"done":step==1,"success":success and step==1,"failure":not success and step==1,
+                "risk_class":"safe","context":{"evaluation_partition":"test","generalization_level":1,
+                    "resolution_id":"r"+str(index%2),"game_type":"ui_game","ood_expected":index%2==0,
+                    "ood_rejected":index%2==0,"data_lineage":{"lineage_id":"test_"+str(index)+"_"+str(step)}}})
+    passed=GeneralizationEvaluator.evaluate(train,rows,[],"g1","ui_game")
+    insufficient=GeneralizationEvaluator.evaluate(train,rows[:10],[],"g1","ui_game")
+    level=passed["levels"]["1"]
+    strict=bool(level["status"]=="passed" and level["metrics"]["success_rate_ci95_lower"]>=level["thresholds"]["success_lcb"])
+    not_evaluated=insufficient["levels"]["1"]["status"]=="not_evaluated"
+    semantic_model=SharedSemanticEncoder.train([])
+    encoder=semantic_encoder_from_model(semantic_model)
+    start=encoder.encode("Start button",16)
+    begin=encoder.encode("开始按钮",16)
+    unrelated=encoder.encode("defeat enemy",16)
+    cosine=lambda first,second:sum(a*b for a,b in zip(first,second))/(math.sqrt(sum(a*a for a in first))*math.sqrt(sum(b*b for b in second)) or 1.0)
+    semantic=cosine(start,begin)>cosine(start,unrelated)
+    return strict and not_evaluated and semantic,{"strict_pass":strict,"insufficient_not_evaluated":not_evaluated,
+        "semantic_alignment":semantic,"level":level}
+
+
+def run_generalization_contract_tests():
+    passed,checks=generalization_contract_suite()
+    result={"test":"generalization-contract","status":"passed" if passed else "failed","checks":checks}
+    sys.stdout.write(json.dumps(result,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n")
+    return 0 if passed else 1
+
 def replay_contract_suite():
     semantic=normalize_semantic_action({"action_type":"click","target":{"class":"button","instance":"primary"},"parameters":{"button":"left"},"risk_class":"safe"})
     experiences=[{
@@ -20443,7 +21238,8 @@ def dispatch_cli(arguments):
         request=_validated_worker_path(arguments.request,"运行库测试请求文件",True)
         return runtime_installer_test_worker(str(request),arguments.mode)
     if command=="test":
-        return {"logic":run_logic_contract_tests,"fault":run_fault_injection_tests,"static":run_static_contract_tests,"replay":run_replay_contract_tests,"self":run_self_test,
+        return {"logic":run_logic_contract_tests,"fault":run_fault_injection_tests,"static":run_static_contract_tests,
+            "replay":run_replay_contract_tests,"generalization":run_generalization_contract_tests,"self":run_self_test,
             "strict-self":run_strict_requirement_tests}[arguments.kind]()
     if command=="acceptance":
         target=str(arguments.path or "")
