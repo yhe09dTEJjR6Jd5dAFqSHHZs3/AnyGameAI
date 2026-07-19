@@ -69,10 +69,14 @@ SUPPORTED_BUTTONS={"left","right","middle"}
 SUPPORTED_KINDS={"no_op","click","double_click","long_press","drag","scroll_v","scroll_h","move","hover"}
 BASIC_SAFE_FAMILIES={"no_op","click|left","move","hover"}
 REPEAT_POLICIES={"one_shot","repeatable","hold_until_change","rate_limited"}
-SEMANTIC_ACTION_SCHEMA_VERSION=1
-TRAJECTORY_SCHEMA_VERSION=3
+SEMANTIC_ACTION_SCHEMA_VERSION=2
+TRAJECTORY_SCHEMA_VERSION=4
 TASK_SCHEMA_VERSION=1
 SEMANTIC_TARGET_FALLBACK_CLASSES={"screen_point","coordinate_fallback","screen","none"}
+SEMANTIC_RISK_CLASSES={"safe","caution","irreversible"}
+SEMANTIC_IRREVERSIBLE_CLASSES={"purchase_button","delete_button","exit_button","overwrite_button","format_button","reset_button","confirm_purchase","confirm_delete","confirm_exit","confirm_overwrite"}
+SEMANTIC_AMBIGUITY_MARGIN=0.35
+SEMANTIC_TARGET_MIN_CONFIDENCE=0.30
 MODE_IDLE="IDLE"
 MODE_STARTING="STARTING"
 MODE_RUNNING="RUNNING"
@@ -757,7 +761,7 @@ def profile_checksum(profile):
     value.pop("updated",None)
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 def model_binding_from_samples(samples):
-    paths=set(); classes=set(); norms=set(); aspects=[]; dpis=[]; methods=set()
+    paths=set(); classes=set(); norms=set(); aspects=[]; dpis=[]; methods=set(); sizes=[]
     for item in samples:
         context=item.get("context",{}) if isinstance(item,dict) else {}
         path=os.path.normcase(str(context.get("process_path","")))
@@ -765,6 +769,7 @@ def model_binding_from_samples(samples):
         norm=context.get("content_rect_norm")
         aspect=context.get("content_aspect")
         dpi=context.get("dpi")
+        rect=context.get("content_rect") or context.get("client_rect")
         method=str(item.get("capture_method") or context.get("capture_method") or "")
         if path:
             paths.add(path)
@@ -776,11 +781,14 @@ def model_binding_from_samples(samples):
             aspects.append(float(aspect))
         if finite_number(dpi) and int(dpi)>0:
             dpis.append(int(dpi))
+        if isinstance(rect,(list,tuple)) and len(rect)>=4 and finite_number(rect[2]) and finite_number(rect[3]):
+            sizes.append([safe_int(rect[2],0,1,32768),safe_int(rect[3],0,1,32768)])
         if method:
             methods.add(method)
-    return {"process_paths":sorted(paths),"window_classes":sorted(classes),"content_rect_norms":[list(value) for value in sorted(norms)],
-        "content_aspect_min":min(aspects) if aspects else 0.0,"content_aspect_max":max(aspects) if aspects else 0.0,"dpi_min":min(dpis) if dpis else 0,"dpi_max":max(dpis) if dpis else 0,
-        "capture_methods":sorted(methods),"window_rule_version":WINDOW_RULE_VERSION,"capture_backend_version":CAPTURE_BACKEND_VERSION}
+    identity={"process_paths":sorted(paths),"window_classes":sorted(classes),"window_rule_version":WINDOW_RULE_VERSION}
+    adaptation={"content_rect_norms":[list(value) for value in sorted(norms)],"content_aspect_min":min(aspects) if aspects else 0.0,"content_aspect_max":max(aspects) if aspects else 0.0,"dpi_min":min(dpis) if dpis else 0,
+        "dpi_max":max(dpis) if dpis else 0,"capture_methods":sorted(methods),"content_sizes":sizes[:128],"capture_backend_version":CAPTURE_BACKEND_VERSION,"allow_proportional_resolution":True,"allow_dpi_recalibration":True,"allow_backend_revalidation":True}
+    return {**identity,**adaptation,"safety_identity":identity,"visual_adaptation":adaptation,"binding_schema_version":2}
 class ThreadLocalSQLite:
     def __init__(self,path,read_only=False):
         self.path=Path(path)
@@ -1680,7 +1688,7 @@ def _bounded_json_mapping(value,maximum=16384):
 @dataclass(frozen=True)
 class SemanticAction:
     action_type:str
-    target_class:str
+    target_class:str=""
     target_instance:str=""
     target_index:int=-1
     target_text:str=""
@@ -1688,17 +1696,30 @@ class SemanticAction:
     parameters:dict=field(default_factory=dict)
     coordinate_fallback:dict=field(default_factory=dict)
     attributes:dict=field(default_factory=dict)
+    source_target:dict=field(default_factory=dict)
+    destination_target:dict=field(default_factory=dict)
+    source_offset:tuple=(0.0,0.0)
+    target_offset:tuple=(0.0,0.0)
+    risk_class:str="safe"
     def to_dict(self):
-        target={"class":self.target_class}
+        base={"class":self.target_class or "none"}
         if self.target_instance:
-            target["instance"]=self.target_instance
+            base["instance"]=self.target_instance
         if self.target_index>=0:
-            target["index"]=self.target_index
+            base["index"]=self.target_index
         if self.target_text:
-            target["text"]=self.target_text
+            base["text"]=self.target_text
         if self.attributes:
-            target["attributes"]=dict(self.attributes)
-        result={"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"action_type":self.action_type,"target":target,"offset":[round(float(self.offset[0]),6),round(float(self.offset[1]),6)],"parameters":dict(self.parameters)}
+            base["attributes"]=dict(self.attributes)
+        result={"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"action_type":self.action_type,"parameters":dict(self.parameters),"risk_class":self.risk_class if self.risk_class in SEMANTIC_RISK_CLASSES else "safe"}
+        if self.action_type=="drag":
+            result["source"]=dict(self.source_target or base)
+            result["target"]=dict(self.destination_target or base)
+            result["source_offset"]=[round(float(self.source_offset[0]),6),round(float(self.source_offset[1]),6)]
+            result["target_offset"]=[round(float(self.target_offset[0]),6),round(float(self.target_offset[1]),6)]
+        else:
+            result["target"]=base
+            result["offset"]=[round(float(self.offset[0]),6),round(float(self.offset[1]),6)]
         if self.coordinate_fallback:
             result["coordinate_fallback"]=dict(self.coordinate_fallback)
         return result
@@ -1707,13 +1728,11 @@ class SemanticAction:
         normalized=normalize_semantic_action(value)
         if normalized is None:
             raise ValueError("语义动作无效")
-        target=normalized["target"]
-        return cls(
-            normalized["action_type"],target["class"],str(target.get("instance","")),
-            safe_int(target.get("index",-1),-1,-1,1000000),str(target.get("text","")),
-            tuple(normalized["offset"]),dict(normalized.get("parameters",{})),
-            dict(normalized.get("coordinate_fallback",{})),dict(target.get("attributes",{})),
-        )
+        target=normalized.get("target",{})
+        source=normalized.get("source",{})
+        base=source if normalized["action_type"]=="drag" else target
+        return cls(normalized["action_type"],str(base.get("class","")),str(base.get("instance","")),safe_int(base.get("index",-1),-1,-1,1000000),str(base.get("text","")),tuple(normalized.get("offset",[0.0,0.0])),
+            dict(normalized.get("parameters",{})),dict(normalized.get("coordinate_fallback",{})),dict(base.get("attributes",{})),dict(source),dict(target),tuple(normalized.get("source_offset",[0.0,0.0])),tuple(normalized.get("target_offset",[0.0,0.0])),str(normalized.get("risk_class","safe")))
 
 @dataclass(frozen=True)
 class GroundedAction:
@@ -1865,95 +1884,209 @@ def task_profile_overlay(profile,task):
         value["failure_hash_distance"]=safe_int(failure.get("hash_distance",value.get("failure_hash_distance",6)),6,0,32)
     return value
 
+def _normalize_semantic_target(value,default_class=""):
+    if isinstance(value,str):
+        value={"class":value}
+    source=dict(value) if isinstance(value,dict) else {}
+    target_class=str(source.get("class") or source.get("category") or source.get("target_class") or default_class)[:200]
+    if not target_class:
+        return None
+    result={"class":target_class}
+    instance=source.get("instance",source.get("target_instance",""))
+    if instance not in (None,""):
+        result["instance"]=str(instance)[:200]
+    index=source.get("index",source.get("target_index",-1))
+    if finite_number(index) and int(index)>=0:
+        result["index"]=safe_int(index,-1,0,1000000)
+    text=str(source.get("text") or source.get("target_text") or "")[:500]
+    if text:
+        result["text"]=text
+    attributes=_bounded_json_mapping(source.get("attributes") or source.get("target_attributes"))
+    if attributes:
+        result["attributes"]=attributes
+    return result
+
+def semantic_target_risk(target):
+    item=target if isinstance(target,dict) else {}
+    value=(str(item.get("class",""))+" "+str(item.get("text",""))).casefold()
+    irreversible=("purchase","buy","delete","remove","exit","quit","overwrite","format","reset","购买","支付","删除","退出","覆盖","格式化","重置","清空")
+    caution=("confirm","submit","save","install","equip","sell","确认","提交","保存","安装","装备","出售")
+    if any(token in value for token in irreversible) or str(item.get("class","")) in SEMANTIC_IRREVERSIBLE_CLASSES:
+        return "irreversible"
+    if any(token in value for token in caution):
+        return "caution"
+    return "safe"
+
 def normalize_semantic_action(action):
     try:
         if isinstance(action,SemanticAction):
             action=action.to_dict()
         if isinstance(action,GroundedAction):
-            action=action.to_dict().get("semantic_action")
+            action=action.semantic_action
+        if isinstance(action,dict) and isinstance(action.get("semantic_action"),dict):
+            action=action.get("semantic_action")
         if not isinstance(action,dict):
             return None
-        source=action.get("semantic_action") if isinstance(action.get("semantic_action"),dict) else action
-        action_type=str(source.get("action_type") or source.get("type") or "")
+        source=dict(action)
+        action_type=str(source.get("action_type") or source.get("type") or source.get("kind") or "")
         if action_type not in SUPPORTED_KINDS:
             return None
-        raw_target=source.get("target")
-        if isinstance(raw_target,str):
-            raw_target={"class":raw_target}
-        target=dict(raw_target) if isinstance(raw_target,dict) else {}
-        target_class=str(target.get("class") or target.get("category") or source.get("target_class") or ("none" if action_type=="no_op" else ""))[:200]
-        if not target_class:
-            return None
-        normalized_target={"class":target_class}
-        instance=target.get("instance",source.get("target_instance",""))
-        if instance not in (None,""):
-            normalized_target["instance"]=str(instance)[:200]
-        index=target.get("index",source.get("target_index",-1))
-        if finite_number(index) and int(index)>=0:
-            normalized_target["index"]=safe_int(index,-1,0,1000000)
-        text_value=str(target.get("text") or source.get("target_text") or "")[:500]
-        if text_value:
-            normalized_target["text"]=text_value
-        attributes=_bounded_json_mapping(target.get("attributes") or source.get("target_attributes"))
-        if attributes:
-            normalized_target["attributes"]=attributes
-        raw_offset=source.get("offset",source.get("relative_offset",[0.0,0.0]))
-        if not isinstance(raw_offset,(list,tuple)) or len(raw_offset)<2 or not finite_number(raw_offset[0]) or not finite_number(raw_offset[1]):
-            raw_offset=[0.0,0.0]
-        offset=[round(max(-2.0,min(2.0,float(raw_offset[0]))),6),round(max(-2.0,min(2.0,float(raw_offset[1]))),6)]
-        parameters=_bounded_json_mapping(source.get("parameters") or source.get("execution_parameters"))
-        fallback_source=source.get("coordinate_fallback") or source.get("fallback_action")
-        fallback=_normalize_coordinate_action(fallback_source) if isinstance(fallback_source,dict) else None
-        result={"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"action_type":action_type,"target":normalized_target,"offset":offset,"parameters":parameters}
-        if fallback:
+        parameters=_bounded_json_mapping(source.get("parameters"))
+        fallback=_normalize_coordinate_action(source.get("coordinate_fallback")) if isinstance(source.get("coordinate_fallback"),dict) else None
+        result={"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"action_type":action_type,"parameters":parameters}
+        if action_type=="no_op":
+            result["target"]={"class":"none"}
+            result["offset"]=[0.0,0.0]
+            result["parameters"]["duration"]=safe_float(parameters.get("duration",source.get("duration",0.35)),0.35,0.05,3.0)
+            result["risk_class"]="safe"
+            return result
+        if action_type=="drag":
+            raw_source=source.get("source") or source.get("drag_source")
+            raw_target=source.get("destination") or source.get("drop_target") or source.get("target_destination")
+            if raw_source is None:
+                raw_source=source.get("target")
+            elif raw_target is None:
+                raw_target=source.get("target")
+            source_target=_normalize_semantic_target(raw_source)
+            destination_target=_normalize_semantic_target(raw_target) if raw_target is not None else None
+            if source_target is None:
+                return None
+            if destination_target is None:
+                destination_target={"class":"coordinate_fallback","instance":"drag_vector"}
+            result["source"]=source_target
+            result["target"]=destination_target
+            for name,raw in (("source_offset",source.get("source_offset",source.get("offset",[0.0,0.0]))),("target_offset",source.get("target_offset",[0.0,0.0]))):
+                if not isinstance(raw,(list,tuple)) or len(raw)<2 or not finite_number(raw[0]) or not finite_number(raw[1]):
+                    raw=[0.0,0.0]
+                result[name]=[safe_float(raw[0],0.0,-2.0,2.0),safe_float(raw[1],0.0,-2.0,2.0)]
+        else:
+            raw_target=source.get("target")
+            if raw_target is None:
+                raw_target={"class":source.get("target_class") or ("coordinate_fallback" if fallback else "")}
+                if source.get("target_instance"):
+                    raw_target["instance"]=source.get("target_instance")
+                if source.get("target_text"):
+                    raw_target["text"]=source.get("target_text")
+            target=_normalize_semantic_target(raw_target,"none" if action_type=="no_op" else "")
+            if target is None:
+                return None
+            result["target"]=target
+            offset=source.get("offset",[0.0,0.0])
+            if not isinstance(offset,(list,tuple)) or len(offset)<2 or not finite_number(offset[0]) or not finite_number(offset[1]):
+                offset=[0.0,0.0]
+            result["offset"]=[safe_float(offset[0],0.0,-2.0,2.0),safe_float(offset[1],0.0,-2.0,2.0)]
+        explicit=str(source.get("risk_class") or parameters.get("risk_class") or "")
+        targets=[result.get("source",{}),result.get("target",{})]
+        inferred=max((semantic_target_risk(value) for value in targets),key=lambda value:{"safe":0,"caution":1,"irreversible":2}.get(value,0))
+        result["risk_class"]=explicit if explicit in SEMANTIC_RISK_CLASSES and {"safe":0,"caution":1,"irreversible":2}[explicit]>={"safe":0,"caution":1,"irreversible":2}[inferred] else inferred
+        if fallback is not None:
             result["coordinate_fallback"]=fallback
+        if action_type in {"click","double_click","long_press","drag"}:
+            result["parameters"]["button"]=str(parameters.get("button",source.get("button","left")))
+            result["parameters"]["duration"]=safe_float(parameters.get("duration",source.get("duration",0.1)),0.1,0.03,3.0)
+        elif action_type in {"scroll_v","scroll_h"}:
+            result["parameters"]["delta"]=safe_int(parameters.get("delta",source.get("delta",120)),120,-960,960)
+            result["parameters"]["duration"]=safe_float(parameters.get("duration",source.get("duration",0.08)),0.08,0.03,1.0)
+        else:
+            result["parameters"]["duration"]=safe_float(parameters.get("duration",source.get("duration",0.1)),0.1,0.03,3.0)
+        if action_type=="drag" and "drag_vector" not in result["parameters"]:
+            vector=source.get("drag_vector",source.get("vector"))
+            if isinstance(vector,(list,tuple)) and len(vector)>=2 and finite_number(vector[0]) and finite_number(vector[1]):
+                result["parameters"]["drag_vector"]=[safe_float(vector[0],0.0,-1.0,1.0),safe_float(vector[1],0.0,-1.0,1.0)]
         return result
     except (TypeError,ValueError,OverflowError):
         return None
 
 def semantic_action_from_coordinate(action):
     item=_normalize_coordinate_action(action)
-    if not item:
+    if item is None:
         return None
-    parameters={key:item[key] for key in ("button","duration","delta") if key in item}
+    parameters={key:value for key,value in item.items() if key not in {"kind","path"}}
     target={"class":"coordinate_fallback","instance":action_family_key(item)}
     if item.get("path"):
         point=item["path"][-1]
         target["attributes"]={"point":[round(point[0],6),round(point[1],6)]}
-    return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"action_type":item["kind"],"target":target,"offset":[0.0,0.0],"parameters":parameters,"coordinate_fallback":item}
+    result={"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"action_type":item["kind"],"target":target,"offset":[0.0,0.0],"parameters":parameters,"coordinate_fallback":item,
+        "risk_class":"caution" if item["kind"] in {"double_click","long_press","drag"} or item.get("button") in {"right","middle"} else "safe"}
+    if item["kind"]=="drag":
+        result["source"]=dict(target)
+        result["target"]={"class":"coordinate_fallback","instance":"drag_destination","attributes":{"point":[round(item["path"][-1][0],6),round(item["path"][-1][1],6)]}}
+        result["source_offset"]=[0.0,0.0]
+        result["target_offset"]=[0.0,0.0]
+    return result
+
+def _semantic_identity(target):
+    item=target if isinstance(target,dict) else {}
+    return {"class":str(item.get("class","")),"instance":str(item.get("instance","")),"index":safe_int(item.get("index",-1),-1),"text":str(item.get("text","")).strip().casefold(),"attributes":item.get("attributes",{}) if isinstance(item.get("attributes"),dict) else {}}
 
 def semantic_action_signature(action):
     item=normalize_semantic_action(action)
-    if not item:
-        return ""
-    target=item["target"]
-    identity={"action_type":item["action_type"],"target_class":target.get("class",""),"target_instance":target.get("instance",""),"target_index":target.get("index",-1),"target_text":target.get("text",""),"offset":item.get("offset",[0.0,0.0]),"parameters":item.get("parameters",{})}
-    return hashlib.sha256(canonical_bytes(identity)).hexdigest()[:24]
+    if item is None:
+        coordinate=_normalize_coordinate_action(action)
+        return "coordinate|"+action_signature(coordinate) if coordinate else ""
+    payload={"action_type":item["action_type"],"risk_class":item.get("risk_class","safe"),"parameters":item.get("parameters",{})}
+    if item["action_type"]=="drag":
+        payload.update({"source":_semantic_identity(item.get("source")),"target":_semantic_identity(item.get("target")),"source_offset":item.get("source_offset",[0.0,0.0]),"target_offset":item.get("target_offset",[0.0,0.0])})
+    else:
+        payload.update({"target":_semantic_identity(item.get("target")),"offset":item.get("offset",[0.0,0.0])})
+    if all(str(value.get("class","")) in SEMANTIC_TARGET_FALLBACK_CLASSES for value in (item.get("source",{}),item.get("target",{})) if isinstance(value,dict)) and item.get("coordinate_fallback"):
+        payload["coordinate_fallback_signature"]=action_signature(item["coordinate_fallback"])
+    return "semantic|"+hashlib.sha256(canonical_bytes(payload)).hexdigest()[:32]
+
+def semantic_action_family_key(action):
+    item=normalize_semantic_action(action)
+    if item is None:
+        coordinate=_normalize_coordinate_action(action)
+        return "coordinate|"+action_family_key(coordinate) if coordinate else ""
+    kind=item["action_type"]
+    if kind=="drag":
+        return "semantic|drag|"+str(item.get("source",{}).get("class",""))+"->"+str(item.get("target",{}).get("class",""))
+    return "semantic|"+kind+"|"+str(item.get("target",{}).get("class",""))
+
+def semantic_action_distance(first,second):
+    a=normalize_semantic_action(first)
+    b=normalize_semantic_action(second)
+    if a is None or b is None or semantic_action_family_key(a)!=semantic_action_family_key(b):
+        return float("inf")
+    if a["action_type"]=="drag":
+        identities=((a.get("source",{}),b.get("source",{})),(a.get("target",{}),b.get("target",{})))
+        offsets=(a.get("source_offset",[0.0,0.0]),b.get("source_offset",[0.0,0.0]),a.get("target_offset",[0.0,0.0]),b.get("target_offset",[0.0,0.0]))
+    else:
+        identities=((a.get("target",{}),b.get("target",{})),)
+        offsets=(a.get("offset",[0.0,0.0]),b.get("offset",[0.0,0.0]))
+    penalty=0.0
+    for left,right in identities:
+        li=_semantic_identity(left); ri=_semantic_identity(right)
+        if li["class"].casefold()!=ri["class"].casefold():
+            return float("inf")
+        if li["instance"] and ri["instance"] and li["instance"].casefold()!=ri["instance"].casefold():
+            penalty+=0.5
+        if li["text"] and ri["text"] and li["text"]!=ri["text"]:
+            penalty+=0.25
+    pairs=list(zip(offsets[0::2],offsets[1::2]))
+    offset_gap=sum(math.hypot(float(left[0])-float(right[0]),float(left[1])-float(right[1])) for left,right in pairs)/max(1,len(pairs))
+    return penalty+0.2*offset_gap
+
+def sample_semantic_action(item):
+    if not isinstance(item,dict):
+        return normalize_semantic_action(item) or semantic_action_from_coordinate(item)
+    context=item.get("context",{}) if isinstance(item.get("context"),dict) else {}
+    return normalize_semantic_action(item.get("semantic_action")) or normalize_semantic_action(context.get("semantic_action")) or normalize_semantic_action(item.get("a")) or semantic_action_from_coordinate(item.get("a"))
 
 def _normalized_semantic_target(value,index):
     if not isinstance(value,dict):
         return None
-    raw_box=value.get("bbox") or value.get("box") or value.get("rect")
-    if not isinstance(raw_box,(list,tuple)) or len(raw_box)!=4 or not all(finite_number(item) for item in raw_box):
-        center=value.get("center")
-        if not isinstance(center,(list,tuple)) or len(center)<2 or not all(finite_number(item) for item in center[:2]):
-            return None
-        raw_box=[float(center[0])-0.01,float(center[1])-0.01,0.02,0.02]
-    left=max(0.0,min(1.0,float(raw_box[0]))); top=max(0.0,min(1.0,float(raw_box[1])))
-    width=max(0.002,min(1.0-left,float(raw_box[2]))); height=max(0.002,min(1.0-top,float(raw_box[3])))
+    bbox=value.get("bbox",value.get("norm",value.get("rect")))
+    if not isinstance(bbox,(list,tuple)) or len(bbox)<4 or not all(finite_number(item) for item in bbox[:4]):
+        return None
+    left,top,width,height=[safe_float(item,0.0,0.0,1.0) for item in bbox[:4]]
+    if width<=0 or height<=0 or left+width>1.001 or top+height>1.001:
+        return None
     target_class=str(value.get("target_class") or value.get("class") or value.get("category") or value.get("type") or "")[:200]
     if not target_class:
         return None
-    return {
-        "class":target_class,
-        "instance":str(value.get("instance") or value.get("id") or value.get("name") or "")[:200],
-        "index":safe_int(value.get("index",index),index,0,1000000),
-        "text":str(value.get("text") or value.get("label") or "")[:500],
-        "attributes":_bounded_json_mapping(value.get("attributes")),
-        "bbox":[left,top,width,height],
-        "confidence":safe_float(value.get("confidence",1.0),1.0,0.0,1.0),
-        "source":str(value.get("source") or "detector")[:100],
-    }
+    return {"class":target_class,"instance":str(value.get("instance",value.get("id","")))[:200],"index":safe_int(value.get("index",index),index,0,1000000),"text":str(value.get("text",value.get("label","")))[:500],
+        "attributes":_bounded_json_mapping(value.get("attributes")),"bbox":[left,top,width,height],"confidence":safe_float(value.get("confidence",1.0),1.0,0.0,1.0),"source":str(value.get("source") or "detector")[:100],"risk_class":str(value.get("risk_class") or semantic_target_risk(value))}
 
 def _semantic_target_score(request,candidate):
     if str(request.get("class","")).casefold()!=str(candidate.get("class","")).casefold():
@@ -1977,66 +2110,246 @@ def _semantic_target_score(request,candidate):
     requested_attributes=request.get("attributes",{}) if isinstance(request.get("attributes"),dict) else {}
     candidate_attributes=candidate.get("attributes",{}) if isinstance(candidate.get("attributes"),dict) else {}
     for key,value in requested_attributes.items():
+        if key in {"point","patch_hash"}:
+            continue
         if key not in candidate_attributes or candidate_attributes[key]!=value:
             return None
         score+=0.5
     return score
 
+def _select_semantic_target(request,targets,role):
+    ranked=[]
+    for index,value in enumerate(targets or []):
+        candidate=_normalized_semantic_target(value,index)
+        if candidate is None or candidate["confidence"]<SEMANTIC_TARGET_MIN_CONFIDENCE:
+            continue
+        score=_semantic_target_score(request,candidate)
+        if score is not None:
+            ranked.append((score,candidate))
+    ranked.sort(key=lambda item:(item[0],item[1]["confidence"]),reverse=True)
+    if not ranked:
+        return None,{"role":role,"reason":"target_not_found","candidates":0}
+    ambiguous=False
+    if len(ranked)>1:
+        gap=ranked[0][0]-ranked[1][0]
+        first=ranked[0][1]["bbox"]; second=ranked[1][1]["bbox"]
+        ambiguous=gap<SEMANTIC_AMBIGUITY_MARGIN and _rect_iou(first,second)<0.75
+    if ambiguous:
+        return None,{"role":role,"reason":"multiple_high_similarity_targets","candidates":len(ranked),"top_scores":[round(ranked[0][0],6),round(ranked[1][0],6)]}
+    return ranked[0][1],{"role":role,"reason":"matched","candidates":len(ranked),"score":round(ranked[0][0],6)}
+
+def _semantic_target_point(selected,offset):
+    left,top,width,height=selected["bbox"]
+    return [max(0.0,min(1.0,left+width*0.5+float(offset[0])*width*0.5)),max(0.0,min(1.0,top+height*0.5+float(offset[1])*height*0.5))]
+
+def _semantic_fallback_allowed(semantic,targets):
+    risk=str(semantic.get("risk_class","safe"))
+    descriptors=[semantic.get("source",{}),semantic.get("target",{})]
+    classes={str(item.get("class","")) for item in descriptors if isinstance(item,dict)}
+    return bool(semantic.get("coordinate_fallback") and risk!="irreversible" and (not targets or classes and classes.issubset(SEMANTIC_TARGET_FALLBACK_CLASSES)))
+
 def ground_semantic_action(action,targets=None,allow_fallback=True):
     semantic=normalize_semantic_action(action)
     if semantic is None:
         coordinate=_normalize_coordinate_action(action.get("grounded_action")) if isinstance(action,dict) and isinstance(action.get("grounded_action"),dict) else _normalize_coordinate_action(action)
-        return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic_action_from_coordinate(coordinate),"grounded_action":coordinate,"grounding":{"source":"coordinate","confidence":1.0,"fallback_used":False}} if coordinate else None
+        return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic_action_from_coordinate(coordinate),"grounded_action":coordinate,"grounding":{"source":"coordinate","confidence":1.0,"fallback_used":False,"risk_class":"safe"}} if coordinate else None
     action_type=semantic["action_type"]
     if action_type=="no_op":
         coordinate=_normalize_coordinate_action({"kind":"no_op","duration":semantic.get("parameters",{}).get("duration",0.35)})
-        return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic,"grounded_action":coordinate,"grounding":{"source":"semantic","confidence":1.0,"fallback_used":False}}
-    requested=semantic["target"]
-    candidates=[]
-    for index,value in enumerate(targets or []):
-        candidate=_normalized_semantic_target(value,index)
-        if candidate is not None:
-            score=_semantic_target_score(requested,candidate)
-            if score is not None:
-                candidates.append((score,candidate))
-    selected=max(candidates,key=lambda item:(item[0],item[1]["confidence"]))[1] if candidates else None
-    if selected is None:
-        fallback=_normalize_coordinate_action(semantic.get("coordinate_fallback")) if allow_fallback else None
-        if fallback is None:
-            return None
-        return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic,"grounded_action":fallback,"grounding":{"source":"coordinate_fallback","confidence":0.0,"fallback_used":True,"reason":"target_not_found"}}
-    left,top,width,height=selected["bbox"]
-    offset=semantic.get("offset",[0.0,0.0])
-    point=[max(0.0,min(1.0,left+width*0.5+float(offset[0])*width*0.5)),max(0.0,min(1.0,top+height*0.5+float(offset[1])*height*0.5))]
+        return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic,"grounded_action":coordinate,"grounding":{"source":"semantic","confidence":1.0,"fallback_used":False,"risk_class":"safe"}}
+    target_values=list(targets or [])
     parameters=semantic.get("parameters",{})
-    duration=parameters.get("duration",0.1)
-    if action_type in {"click","double_click","long_press","move","hover"}:
-        coordinate={"kind":action_type,"path":[point],"duration":duration}
-        if action_type in {"click","double_click","long_press"}:
-            coordinate["button"]=parameters.get("button","left")
-    elif action_type=="drag":
-        vector=parameters.get("drag_vector",parameters.get("vector",[0.0,0.0]))
-        if not isinstance(vector,(list,tuple)) or len(vector)<2 or not finite_number(vector[0]) or not finite_number(vector[1]):
-            vector=[0.0,0.0]
-        end=[max(0.0,min(1.0,point[0]+float(vector[0]))),max(0.0,min(1.0,point[1]+float(vector[1])))]
-        coordinate={"kind":"drag","button":parameters.get("button","left"),"path":[point,end],"duration":parameters.get("duration",0.45)}
-    elif action_type in {"scroll_v","scroll_h"}:
-        coordinate={"kind":action_type,"delta":parameters.get("delta",120),"path":[point],"duration":parameters.get("duration",0.08)}
+    matches=[]
+    selected=[]
+    if action_type=="drag":
+        source,source_meta=_select_semantic_target(semantic.get("source",{}),target_values,"source")
+        matches.append(source_meta)
+        destination_request=semantic.get("target",{})
+        destination=None
+        destination_meta={"role":"target","reason":"vector_fallback","candidates":0}
+        if str(destination_request.get("class","")) not in SEMANTIC_TARGET_FALLBACK_CLASSES:
+            destination,destination_meta=_select_semantic_target(destination_request,target_values,"target")
+        matches.append(destination_meta)
+        if source is None or destination_meta.get("reason")=="multiple_high_similarity_targets" or source_meta.get("reason")=="multiple_high_similarity_targets":
+            fallback=_normalize_coordinate_action(semantic.get("coordinate_fallback")) if allow_fallback and _semantic_fallback_allowed(semantic,target_values) else None
+            return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic,"grounded_action":fallback,"grounding":{"source":"coordinate_fallback" if fallback else "semantic","confidence":0.0,
+                "fallback_used":bool(fallback),"reason":source_meta.get("reason") if source is None else destination_meta.get("reason"),"matches":matches,"risk_class":semantic.get("risk_class","safe"),"ambiguous":any(item.get("reason")=="multiple_high_similarity_targets" for item in matches)}}
+        start=_semantic_target_point(source,semantic.get("source_offset",[0.0,0.0]))
+        if destination is not None:
+            end=_semantic_target_point(destination,semantic.get("target_offset",[0.0,0.0]))
+            selected=[source,destination]
+        else:
+            vector=parameters.get("drag_vector",parameters.get("vector",[0.0,0.0]))
+            if not isinstance(vector,(list,tuple)) or len(vector)<2 or not finite_number(vector[0]) or not finite_number(vector[1]):
+                vector=[0.0,0.0]
+            end=[max(0.0,min(1.0,start[0]+float(vector[0]))),max(0.0,min(1.0,start[1]+float(vector[1])))]
+            selected=[source]
+        coordinate={"kind":"drag","button":parameters.get("button","left"),"path":[start,end],"duration":parameters.get("duration",0.45)}
     else:
-        coordinate=None
+        target,target_meta=_select_semantic_target(semantic.get("target",{}),target_values,"target")
+        matches.append(target_meta)
+        if target is None:
+            fallback=_normalize_coordinate_action(semantic.get("coordinate_fallback")) if allow_fallback and _semantic_fallback_allowed(semantic,target_values) else None
+            return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic,"grounded_action":fallback,"grounding":{"source":"coordinate_fallback" if fallback else "semantic","confidence":0.0,
+                "fallback_used":bool(fallback),"reason":target_meta.get("reason","target_not_found"),"matches":matches,"risk_class":semantic.get("risk_class","safe"),"ambiguous":target_meta.get("reason")=="multiple_high_similarity_targets"}}
+        point=_semantic_target_point(target,semantic.get("offset",[0.0,0.0]))
+        selected=[target]
+        duration=parameters.get("duration",0.1)
+        if action_type in {"click","double_click","long_press","move","hover"}:
+            coordinate={"kind":action_type,"path":[point],"duration":duration}
+            if action_type in {"click","double_click","long_press"}:
+                coordinate["button"]=parameters.get("button","left")
+        elif action_type in {"scroll_v","scroll_h"}:
+            coordinate={"kind":action_type,"delta":parameters.get("delta",120),"path":[point],"duration":parameters.get("duration",0.08)}
+        else:
+            coordinate=None
     grounded=_normalize_coordinate_action(coordinate) if coordinate else None
     if grounded is None:
         return None
-    grounding={
-        "source":selected["source"],"confidence":round(selected["confidence"],6),
-        "fallback_used":False,"target_bbox":[round(value,6) for value in selected["bbox"]],
-        "target_class":selected["class"],"target_instance":selected["instance"],
-        "target_index":selected["index"],
-    }
-    return {
-        "schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic,
-        "grounded_action":grounded,"grounding":grounding,
-    }
+    confidence=min((item["confidence"] for item in selected),default=0.0)
+    grounding={"source":"semantic_detector","confidence":round(confidence,6),"fallback_used":False,"matches":matches,"risk_class":semantic.get("risk_class","safe"),"target_bboxes":[[round(value,
+        6) for value in item["bbox"]] for item in selected],"target_classes":[item["class"] for item in selected],"ambiguous":False}
+    return {"schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"semantic_action":semantic,"grounded_action":grounded,"grounding":grounding}
+
+def semantic_text_class(text,norm=None):
+    value=str(text or "").strip().casefold()
+    groups=(("confirm_button",("确认","确定","ok","confirm","continue","继续","同意","yes")),("cancel_button",("取消","cancel","返回","back","no")),("purchase_button",("购买","支付","buy","purchase","pay")),("delete_button",("删除","移除",
+        "delete","remove")),("exit_button",("退出","离开","quit","exit")),("overwrite_button",("覆盖","overwrite")),("save_button",("保存","save")),("start_button",("开始","start","play")),("restart_button",("重新开始","重试","restart",
+        "retry")),("inventory_item",("背包","inventory","item","道具")),("equipment_slot",("装备","equipment","slot")))
+    for name,tokens in groups:
+        if any(token in value for token in tokens):
+            return name
+    if value:
+        return "text_button"
+    if isinstance(norm,(list,tuple)) and len(norm)>=4 and float(norm[2])>float(norm[3])*2.5 and float(norm[3])<0.12:
+        return "status_bar"
+    return "interactive_region"
+
+def _frame_rgb_source(frame):
+    preview=preview_rgb_bytes(frame.get("preview_rgb")) if isinstance(frame,dict) else None
+    if preview is not None:
+        return preview,safe_int(frame.get("preview_width",PREVIEW_W),PREVIEW_W,1,8192),safe_int(frame.get("preview_height",PREVIEW_H),PREVIEW_H,1,8192)
+    rgb=sample_rgb_bytes(frame.get("rgb")) if isinstance(frame,dict) else None
+    return (rgb,FEATURE_W,FEATURE_H) if rgb is not None else (None,0,0)
+
+def _crop_semantic_patch(frame,norm,out_w=24,out_h=14):
+    source,width,height=_frame_rgb_source(frame)
+    if source is None or not isinstance(norm,(list,tuple)) or len(norm)<4:
+        return None
+    x=max(0,min(width-1,round(float(norm[0])*width))); y=max(0,min(height-1,round(float(norm[1])*height)))
+    right=max(x+1,min(width,round((float(norm[0])+float(norm[2]))*width))); bottom=max(y+1,min(height,round((float(norm[1])+float(norm[3]))*height)))
+    crop=bytearray((right-x)*(bottom-y)*3)
+    position=0
+    for row in range(y,bottom):
+        start=(row*width+x)*3; end=(row*width+right)*3
+        block=source[start:end]
+        crop[position:position+len(block)]=block
+        position+=len(block)
+    resized=resize_rgb(bytes(crop),right-x,bottom-y,out_w,out_h)
+    return {"width":out_w,"height":out_h,"sha256":hashlib.sha256(resized).hexdigest(),"data_b85":base64.b85encode(zlib.compress(resized,6)).decode("ascii")}
+
+def detect_semantic_targets(frame,maximum=24):
+    values=[]
+    runtime=globals().get("CURRENT_OCR_RUNTIME")
+    if runtime is not None and getattr(runtime,"ready",False):
+        try:
+            regions=runtime.candidate_regions(frame,max(8,min(24,int(maximum))))
+        except (RuntimeError,ValueError,TypeError,CaptureUnavailable):
+            regions=[]
+        for index,region in enumerate(regions):
+            norm=region.get("norm") if isinstance(region,dict) else None
+            if not isinstance(norm,(list,tuple)) or len(norm)<4:
+                continue
+            text=str(region.get("text","")).strip()
+            target_class=semantic_text_class(text,norm)
+            instance="primary" if target_class in {"confirm_button","purchase_button","delete_button","exit_button","overwrite_button","start_button","restart_button"} else ""
+            target={"class":target_class,"instance":instance,"index":index,"text":text,"bbox":[round(float(item),6) for item in norm[:4]],"confidence":max(SEMANTIC_TARGET_MIN_CONFIDENCE,min(1.0,
+                safe_float(region.get("score",0.5),0.5)/3.0)),"source":"ocr_ui_detector" if text else "visual_region_detector"}
+            target["risk_class"]=semantic_target_risk(target)
+            patch=_crop_semantic_patch(frame,target["bbox"])
+            if patch is not None:
+                target["attributes"]={"patch_hash":patch["sha256"]}
+            values.append(target)
+    unique=[]
+    for item in sorted(values,key=lambda value:(value.get("confidence",0.0),bool(value.get("text"))),reverse=True):
+        if any(str(item.get("class"))==str(old.get("class")) and _rect_iou(item["bbox"],old["bbox"])>0.70 for old in unique):
+            continue
+        unique.append(item)
+        if len(unique)>=int(maximum):
+            break
+    return unique
+
+def semantic_target_at_point(targets,point,maximum_distance=0.12):
+    if not isinstance(point,(list,tuple)) or len(point)<2:
+        return None
+    px,py=float(point[0]),float(point[1])
+    ranked=[]
+    for index,value in enumerate(targets or []):
+        target=_normalized_semantic_target(value,index)
+        if target is None:
+            continue
+        x,y,w,h=target["bbox"]
+        inside=x<=px<=x+w and y<=py<=y+h
+        cx=x+w*0.5; cy=y+h*0.5
+        distance=0.0 if inside else math.hypot(px-cx,py-cy)
+        if inside or distance<=maximum_distance:
+            ranked.append((0 if inside else 1,distance,-target["confidence"],target))
+    return sorted(ranked,key=lambda item:item[:3])[0][3] if ranked else None
+
+def _target_descriptor_for_action(target):
+    if not isinstance(target,dict):
+        return None
+    result={key:target[key] for key in ("class","instance","index","text") if key in target and target[key] not in (None,"")}
+    attributes=target.get("attributes",{}) if isinstance(target.get("attributes"),dict) else {}
+    if attributes:
+        result["attributes"]={key:value for key,value in attributes.items() if key!="point"}
+    return result
+
+def semantic_action_from_interaction(action,targets=None):
+    coordinate=_normalize_coordinate_action(action)
+    if coordinate is None:
+        return normalize_semantic_action(action)
+    kind=coordinate["kind"]
+    if kind=="no_op":
+        return normalize_semantic_action({"action_type":"no_op","target":{"class":"none"},"parameters":{"duration":coordinate.get("duration",0.35)}})
+    path=coordinate.get("path") or [[0.5,0.5]]
+    source_target=semantic_target_at_point(targets,path[0])
+    end_target=semantic_target_at_point(targets,path[-1])
+    parameters={key:value for key,value in coordinate.items() if key not in {"kind","path"}}
+    if kind=="drag" and source_target is not None and end_target is not None:
+        value={"action_type":"drag","source":_target_descriptor_for_action(source_target),"target":_target_descriptor_for_action(end_target),"source_offset":[0.0,0.0],"target_offset":[0.0,0.0],"parameters":parameters,"coordinate_fallback":coordinate}
+    elif end_target is not None:
+        value={"action_type":kind,"target":_target_descriptor_for_action(end_target),"offset":[0.0,0.0],"parameters":parameters,"coordinate_fallback":coordinate}
+    else:
+        return semantic_action_from_coordinate(coordinate)
+    value["risk_class"]=max((semantic_target_risk(source_target),semantic_target_risk(end_target)),key=lambda item:{"safe":0,"caution":1,"irreversible":2}.get(item,0))
+    return normalize_semantic_action(value)
+
+def semantic_context_payload(frame,semantic):
+    targets=list(frame.get("semantic_targets",[])) if isinstance(frame,dict) else []
+    compact=[]
+    for value in targets[:32]:
+        item={key:value.get(key) for key in ("class","instance","index","text","bbox","confidence","source","risk_class") if value.get(key) not in (None,"")}
+        attributes=value.get("attributes",{}) if isinstance(value.get("attributes"),dict) else {}
+        if attributes:
+            item["attributes"]=attributes
+        compact.append(item)
+    descriptors=[]
+    if isinstance(semantic,dict):
+        descriptors.extend([semantic.get("source"),semantic.get("target")])
+    hits=[]
+    crops=[]
+    for descriptor in descriptors:
+        if not isinstance(descriptor,dict):
+            continue
+        selected,_=_select_semantic_target(descriptor,targets,"sample")
+        if selected is None:
+            continue
+        hits.append({key:selected.get(key) for key in ("class","instance","index","text","bbox","confidence","source","risk_class")})
+        patch=_crop_semantic_patch(frame,selected.get("bbox"))
+        if patch is not None:
+            crops.append({"target_class":selected.get("class",""),"target_instance":selected.get("instance",""),"patch":patch})
+    return {"semantic_targets":compact,"action_hit_targets":hits,"object_local_crops":crops,"semantic_detection_version":2}
 
 def _normalize_coordinate_action(action):
     try:
@@ -2300,6 +2613,44 @@ def visual_distance(a,b):
             value+=SQUARED_DIFF[int(first[index])-int(second[index])+255]
         total+=weight*value/PIXELS
     return total
+def object_semantic_signature(targets):
+    values=[]
+    for item in targets or []:
+        if isinstance(item,dict):
+            values.append((str(item.get("class","")),str(item.get("instance","")),str(item.get("text","")).strip().casefold(),str(item.get("attributes",{}).get("patch_hash",""))))
+    return hashlib.sha256(canonical_bytes(sorted(values))).hexdigest()[:24] if values else ""
+
+def object_set_distance(first,second):
+    def keys(values):
+        result=[]
+        for item in values or []:
+            if isinstance(item,dict):
+                result.append((str(item.get("class","")),str(item.get("instance","")),str(item.get("text","")).strip().casefold()))
+        return Counter(result)
+    a=keys(first); b=keys(second)
+    if not a and not b:
+        return 0.0
+    intersection=sum((a&b).values())
+    union=sum((a|b).values())
+    return 1.0-intersection/max(1,union)
+
+def dual_feature_distance(raw_first,raw_second,neural_first=None,neural_second=None):
+    raw=feature_distance(raw_first,raw_second)
+    if feature_valid(neural_first) and feature_valid(neural_second):
+        neural=feature_distance(neural_first,neural_second)
+        return 0.38*raw+0.62*neural
+    return raw
+
+def sample_state_distance(first,second):
+    if not isinstance(first,dict) or not isinstance(second,dict):
+        return float("inf")
+    visual=dual_feature_distance(first.get("f"),second.get("f"),first.get("neural_f"),second.get("neural_f"))
+    first_context=first.get("context",{}) if isinstance(first.get("context"),dict) else {}
+    second_context=second.get("context",{}) if isinstance(second.get("context"),dict) else {}
+    objects=object_set_distance(first_context.get("semantic_targets",[]),second_context.get("semantic_targets",[]))
+    task_gap=0.0 if normalized_identifier(first_context.get("task_id"),"default",96)==normalized_identifier(second_context.get("task_id"),"default",96) else 1.0
+    return visual*(1.0+0.12*objects+0.08*task_gap)
+
 def runtime_feature_distance(feature,prototype):
     if not feature_valid(feature) or not isinstance(prototype,dict):
         return float("inf")
@@ -2432,21 +2783,24 @@ def temporal_from_context(context):
     raw_deltas=source.get("recent_frame_deltas",[])
     if not isinstance(raw_deltas,(list,tuple)):
         raw_deltas=[]
-    deltas=[]
-    for value in raw_deltas[:4]:
-        if finite_number(value):
-            deltas.append(safe_float(value,0.0,0.0,5000.0))
+    deltas=[safe_float(value,0.0,0.0,5000.0) for value in raw_deltas[-32:] if finite_number(value)]
     raw_actions=source.get("recent_actions",[])
     if not isinstance(raw_actions,(list,tuple)):
         raw_actions=[]
     actions=[]
-    for value in raw_actions[:4]:
-        try:
-            text=str(value)
-        except Exception:
-            text=""
+    for value in raw_actions[-32:]:
+        text=str(value) if value is not None else ""
         if text:
             actions.append(text)
+    raw_results=source.get("recent_action_results",source.get("action_results",[]))
+    if not isinstance(raw_results,(list,tuple)):
+        raw_results=[]
+    results=[]
+    for value in raw_results[-32:]:
+        if isinstance(value,dict):
+            results.append({"state":str(value.get("state") or value.get("result") or "neutral"),"changed":bool(value.get("changed",True)),"reason":str(value.get("no_change_reason") or value.get("reason") or ""),"reward":safe_float(value.get("reward",0.0),0.0,-10.0,10.0)})
+        else:
+            results.append({"state":str(value),"changed":True,"reason":"","reward":0.0})
     cursor=source.get("cursor")
     if not isinstance(cursor,(list,tuple)) or len(cursor)<2 or not finite_number(cursor[0]) or not finite_number(cursor[1]):
         cursor=None
@@ -2459,30 +2813,142 @@ def temporal_from_context(context):
         size=[safe_int(size[0],1,1,100000),safe_int(size[1],1,1,100000)]
     recent_count=safe_int(source.get("recent_frame_count",0),0,0,1000)
     dpi=safe_int(source.get("dpi",0),0,0,10000)
-    state_duration=safe_float(source.get("state_duration",0.0),0.0,0.0,60.0)
-    return {"recent_frame_count":recent_count,"recent_frame_deltas":deltas,"recent_actions":actions,"previous_action_changed_frame":bool(source.get("previous_action_changed_frame",True)),
-        "state_duration":state_duration,"cursor":cursor,"window_size":size,"dpi":dpi,"capture_method":str(source.get("capture_method","unknown")),"complete":bool(recent_count>=3 and len(deltas)>=2
-            and len(actions)>=2 and cursor is not None and size is not None)}
+    state_duration=safe_float(source.get("state_duration",0.0),0.0,0.0,120.0)
+    task_phase=str(source.get("task_phase") or source.get("phase") or "unknown")[:96]
+    failure_count=safe_int(source.get("failure_count",source.get("consecutive_failures",0)),0,0,100)
+    object_signature=str(source.get("object_signature") or "")[:128]
+    no_change_reason=str(source.get("no_change_reason") or "")[:64]
+    return {"recent_frame_count":recent_count,"recent_frame_deltas":deltas,"recent_actions":actions,"recent_action_results":results,"previous_action_changed_frame":bool(source.get("previous_action_changed_frame",True)),
+        "state_duration":state_duration,"cursor":cursor,"window_size":size,"dpi":dpi,"capture_method":str(source.get("capture_method","unknown")),"task_phase":task_phase,"failure_count":failure_count,
+        "object_signature":object_signature,"no_change_reason":no_change_reason,"complete":bool(recent_count>=3 and len(deltas)>=2 and len(actions)>=2 and cursor is not None and size is not None)}
+
+class TemporalStateEncoder:
+    def __init__(self,seed=0,hidden_size=24,input_size=12):
+        self.seed=safe_int(seed,0,0,2**63-1)
+        self.hidden_size=max(8,min(64,safe_int(hidden_size,24,8,64)))
+        self.input_size=max(8,min(32,safe_int(input_size,12,8,32)))
+        generator=random.Random(self.seed^0x47525532)
+        scale=1.0/math.sqrt(self.input_size+self.hidden_size)
+        self.wz=[[generator.uniform(-scale,scale) for _ in range(self.input_size+self.hidden_size)] for _ in range(self.hidden_size)]
+        self.wr=[[generator.uniform(-scale,scale) for _ in range(self.input_size+self.hidden_size)] for _ in range(self.hidden_size)]
+        self.wh=[[generator.uniform(-scale,scale) for _ in range(self.input_size+self.hidden_size)] for _ in range(self.hidden_size)]
+        self.bz=[generator.uniform(-0.08,0.08) for _ in range(self.hidden_size)]
+        self.br=[generator.uniform(-0.08,0.08) for _ in range(self.hidden_size)]
+        self.bh=[generator.uniform(-0.08,0.08) for _ in range(self.hidden_size)]
+    @staticmethod
+    def _sigmoid(value):
+        return 1.0/(1.0+math.exp(-max(-30.0,min(30.0,value))))
+    @staticmethod
+    def _hash_vector(text,count=4):
+        digest=hashlib.blake2b(str(text).encode("utf-8","replace"),digest_size=max(4,count)).digest()
+        return [digest[index]/127.5-1.0 for index in range(count)]
+    def _tokens(self,context):
+        item=temporal_from_context(context)
+        length=max(3,min(32,max(len(item["recent_frame_deltas"])+1,len(item["recent_actions"]),len(item["recent_action_results"]))))
+        deltas=[0.0]*(length-len(item["recent_frame_deltas"]))+item["recent_frame_deltas"][-length:]
+        actions=["<START>"]*(length-len(item["recent_actions"]))+item["recent_actions"][-length:]
+        results=[{"state":"neutral","changed":True,"reason":"","reward":0.0}]*(length-len(item["recent_action_results"]))+item["recent_action_results"][-length:]
+        phase=self._hash_vector(item["task_phase"],2)
+        object_values=self._hash_vector(item["object_signature"],2)
+        tokens=[]
+        for index in range(length):
+            result=results[index]
+            state=str(result.get("state","neutral"))
+            state_value=1.0 if state=="success" else -1.0 if state=="failure" else 0.35 if state in {"progress","changed"} else 0.0
+            reason=self._hash_vector(result.get("reason",item["no_change_reason"]),1)[0]
+            action_values=self._hash_vector(actions[index],3)
+            values=[min(1.0,deltas[index]/600.0),*action_values,state_value,1.0 if result.get("changed",True) else -1.0,max(-1.0,min(1.0,safe_float(result.get("reward",0.0),0.0))),reason,*phase,*object_values]
+            tokens.append((values+[0.0]*self.input_size)[:self.input_size])
+        return tokens
+    def encode(self,context):
+        hidden=[0.0]*self.hidden_size
+        for token in self._tokens(context):
+            combined=token+hidden
+            update=[self._sigmoid(sum(weight*value for weight,value in zip(row,combined))+bias) for row,bias in zip(self.wz,self.bz)]
+            reset=[self._sigmoid(sum(weight*value for weight,value in zip(row,combined))+bias) for row,bias in zip(self.wr,self.br)]
+            candidate_input=token+[reset[index]*hidden[index] for index in range(self.hidden_size)]
+            candidate=[math.tanh(sum(weight*value for weight,value in zip(row,candidate_input))+bias) for row,bias in zip(self.wh,self.bh)]
+            hidden=[(1.0-update[index])*hidden[index]+update[index]*candidate[index] for index in range(self.hidden_size)]
+        norm=math.sqrt(sum(value*value for value in hidden)) or 1.0
+        return [round(value/norm,7) for value in hidden]
+    def manifest(self):
+        return {"schema_version":1,"backend":"cpu_gru","seed":self.seed,"hidden_size":self.hidden_size,"input_size":self.input_size,"history_frames":32,"history_actions":32,"history_results":32}
+
+_TEMPORAL_ENCODERS={}
+def temporal_state_embedding(context,seed=0,hidden_size=24):
+    key=(safe_int(seed,0,0,2**63-1),safe_int(hidden_size,24,8,64))
+    encoder=_TEMPORAL_ENCODERS.get(key)
+    if encoder is None:
+        encoder=TemporalStateEncoder(key[0],key[1])
+        _TEMPORAL_ENCODERS[key]=encoder
+        if len(_TEMPORAL_ENCODERS)>8:
+            _TEMPORAL_ENCODERS.pop(next(iter(_TEMPORAL_ENCODERS)))
+    return encoder.encode(context)
+
+def temporal_embedding_distance(first,second):
+    if not isinstance(first,(list,tuple)) or not isinstance(second,(list,tuple)) or len(first)!=len(second) or not first:
+        return 1.0
+    return min(1.0,math.sqrt(sum((float(a)-float(b))**2 for a,b in zip(first,second))/len(first))/0.5)
+
 def temporal_distance(first,second):
     a=temporal_from_context(first)
     b=temporal_from_context(second)
     if not a.get("complete") or not b.get("complete"):
         return 1.0
     length=max(len(a["recent_frame_deltas"]),len(b["recent_frame_deltas"]),1)
-    da=list(a["recent_frame_deltas"])+[0.0]*length
-    db=list(b["recent_frame_deltas"])+[0.0]*length
+    da=[0.0]*(length-len(a["recent_frame_deltas"]))+list(a["recent_frame_deltas"])
+    db=[0.0]*(length-len(b["recent_frame_deltas"]))+list(b["recent_frame_deltas"])
     frame_gap=sum(min(1.0,abs(da[index]-db[index])/300.0) for index in range(length))/length
-    actions_a=a["recent_actions"][-4:]
-    actions_b=b["recent_actions"][-4:]
+    actions_a=a["recent_actions"][-16:]
+    actions_b=b["recent_actions"][-16:]
     action_length=max(len(actions_a),len(actions_b),1)
     action_gap=sum(1.0 for index in range(1,action_length+1) if (actions_a[-index] if index<=len(actions_a) else "")!=(actions_b[-index] if index<=len(actions_b) else ""))/action_length
+    result_a=a["recent_action_results"][-16:]
+    result_b=b["recent_action_results"][-16:]
+    result_length=max(len(result_a),len(result_b),1)
+    result_gap=0.0
+    for index in range(1,result_length+1):
+        left=result_a[-index] if index<=len(result_a) else {}
+        right=result_b[-index] if index<=len(result_b) else {}
+        result_gap+=0.5*float(str(left.get("state",""))!=str(right.get("state","")))+0.3*float(bool(left.get("changed",True))!=bool(right.get("changed",True)))+0.2*min(1.0,abs(safe_float(left.get("reward",0.0),0.0)-safe_float(right.get("reward",0.0),0.0)))
+    result_gap/=result_length
     cursor_gap=math.hypot(a["cursor"][0]-b["cursor"][0],a["cursor"][1]-b["cursor"][1])/math.sqrt(2.0)
-    duration_gap=min(1.0,abs(a["state_duration"]-b["state_duration"])/5.0)
+    duration_gap=min(1.0,abs(a["state_duration"]-b["state_duration"])/8.0)
     change_gap=0.0 if a["previous_action_changed_frame"]==b["previous_action_changed_frame"] else 1.0
     size_gap=0.0 if a["window_size"]==b["window_size"] else 1.0
     dpi_gap=min(1.0,abs(a["dpi"]-b["dpi"])/96.0)
     backend_gap=0.0 if a["capture_method"]==b["capture_method"] else 1.0
-    return 0.25*frame_gap+0.25*action_gap+0.12*cursor_gap+0.10*duration_gap+0.08*change_gap+0.07*size_gap+0.05*dpi_gap+0.08*backend_gap
+    phase_gap=0.0 if a["task_phase"]==b["task_phase"] else 1.0
+    failure_gap=min(1.0,abs(a["failure_count"]-b["failure_count"])/4.0)
+    object_gap=0.0 if a["object_signature"]==b["object_signature"] else 1.0
+    return 0.19*frame_gap+0.18*action_gap+0.14*result_gap+0.08*cursor_gap+0.07*duration_gap+0.05*change_gap+0.04*size_gap+0.03*dpi_gap+0.05*backend_gap+0.07*phase_gap+0.04*failure_gap+0.06*object_gap
+
+def classify_no_change_state(before_frame,after_frame,target=None,calibration=None):
+    if after_frame is None:
+        return {"reason":"capture_failed","counts_as_failure":False,"should_wait":False,"confidence":1.0}
+    if after_frame.get("capture_frozen") or after_frame.get("frozen_backend") or after_frame.get("stale"):
+        return {"reason":"capture_failed","counts_as_failure":False,"should_wait":False,"confidence":0.95}
+    if after_frame.get("black_frame") or after_frame.get("protected_or_black"):
+        return {"reason":"loading_or_black_screen","counts_as_failure":False,"should_wait":True,"confidence":0.80}
+    if target is not None:
+        try:
+            hwnd=safe_int(target.get("hwnd",0),0)
+            if hwnd and os.name=="nt" and int(ctypes.windll.user32.GetForegroundWindow() or 0)!=hwnd:
+                return {"reason":"target_lost_focus","counts_as_failure":False,"should_wait":False,"confidence":1.0}
+        except (AttributeError,OSError,TypeError,ValueError):
+            pass
+    before=before_frame.get("f") if isinstance(before_frame,dict) else before_frame
+    after=after_frame.get("f") if isinstance(after_frame,dict) else after_frame
+    delta=visual_distance(before,after) if feature_valid(before) and feature_valid(after) else 0.0
+    settings=calibration if isinstance(calibration,dict) else {}
+    noise=max(1.0,safe_float(settings.get("noise",4.0),4.0))
+    if delta>max(noise*4.0,safe_float(settings.get("post_action_change",45.0),45.0)*0.45):
+        return {"reason":"animation_in_progress","counts_as_failure":False,"should_wait":True,"confidence":0.75,"delta":delta}
+    duration=safe_float(after_frame.get("time",0.0),0.0)-safe_float(before_frame.get("time",0.0),0.0) if isinstance(before_frame,dict) else 0.0
+    if duration<max(0.18,safe_float(settings.get("input_delay",0.24),0.24)):
+        return {"reason":"result_delayed","counts_as_failure":False,"should_wait":True,"confidence":0.70,"delta":delta}
+    return {"reason":"action_ineffective","counts_as_failure":True,"should_wait":False,"confidence":0.72,"delta":delta}
+
 class CaptureProcessWorker:
     def __init__(self,bridge,key):
         self.bridge=bridge
@@ -4852,11 +5318,14 @@ class FrameBuffer:
         self.interval=self.base_interval
         self.motion_interval=max(0.05,min(0.25,float(motion_interval)))
         self.purpose=str(purpose or "")
-        self.need_preview=self.purpose=="teaching"
-        self.preview_interval=1.0/11.0
+        self.need_preview=self.purpose in {"teaching","learning","training"}
+        self.preview_interval=1.0/(11.0 if self.purpose=="teaching" else 7.0)
         self.preview_active=threading.Event()
         if self.need_preview:
             self.preview_active.set()
+        self.semantic_targets=[]
+        self.semantic_last_time=0.0
+        self.semantic_interval=0.18 if self.purpose=="training" else 0.28
         self.frames=deque(maxlen=max(12,int(float(hz)*float(seconds))+4))
         self.lock=threading.RLock()
         self.condition=threading.Condition(self.lock)
@@ -4989,6 +5458,14 @@ class FrameBuffer:
                         "stale":bool(captured.get("stale")),"stable_frame":bool(captured.get("stable_frame")),"black_frame":bool(captured.get("black_frame")),
                         "protected_or_black":bool(captured.get("protected_or_black")),"capture_frozen":bool(captured.get("capture_frozen")),"frozen_backend":bool(captured.get("frozen_backend")),
                         "backend_changed":bool(captured.get("backend_changed"))}
+                    if self.need_preview and frame.get("preview_rgb") is not None and stamp-self.semantic_last_time>=self.semantic_interval:
+                        try:
+                            self.semantic_targets=detect_semantic_targets(frame,24)
+                            self.semantic_last_time=stamp
+                        except (RuntimeError,ValueError,TypeError,CaptureUnavailable) as error:
+                            self.last_error=str(error)
+                    frame["semantic_targets"]=[dict(value) for value in self.semantic_targets]
+                    frame["object_signature"]=hashlib.sha256(canonical_bytes([[value.get("class"),value.get("instance"),value.get("text"),value.get("attributes",{}).get("patch_hash")] for value in frame["semantic_targets"]])).hexdigest()[:24] if frame["semantic_targets"] else ""
                     with self.condition:
                         self.frames.append(frame)
                         self.sequence+=1
@@ -5150,7 +5627,7 @@ class AskQuestionProducer:
         self.thread.start()
         return self
     def request(self,recent_actions,state_since):
-        payload={"recent_actions":list(recent_actions)[-4:],"state_since":float(state_since)}
+        payload={"recent_actions":list(recent_actions)[-32:],"recent_action_results":[],"state_since":float(state_since)}
         try:
             while True:
                 self.requests.get_nowait()
@@ -5175,67 +5652,58 @@ class AskQuestionProducer:
         usable=[frame for frame in frames if frame.get("usable_for_teaching")]
         if not usable:
             raise CaptureUnavailable(self.frame_buffer.last_error or "没有可用于指导的画面")
-        selected=usable[-1]
-        selected_ranked=[]
-        selected_priority=float("inf")
+        selected=usable[-1]; selected_ranked=[]; selected_priority=float("inf"); selected_decision={}
         candidates=usable[-28:]
         if not self.prototypes:
-            return selected,[]
+            return selected,[],{}
         for candidate_frame in candidates:
-            if self.stop_event.is_set() or self.context.callbacks.should_stop():
+            if self.stop_event.is_set() or self.app.should_stop():
                 raise InputStopped("指导题目生成已停止")
             temporal=self.app.build_temporal_context(self.frame_buffer,candidate_frame,payload["recent_actions"],payload["state_since"])
-            temporal["previous_action_changed_frame"]=True
-            ranked=self.app.rank_action_candidates(candidate_frame["f"],self.prototypes,"",18,temporal,candidate_frame.get("coarse"))
+            temporal.update({"previous_action_changed_frame":True,"object_signature":str(candidate_frame.get("object_signature","")),"recent_action_results":payload.get("recent_action_results",[])})
+            ranked=self.app.rank_action_candidates(candidate_frame["f"],self.prototypes,"",18,temporal,candidate_frame.get("coarse"),candidate_frame.get("neural_f"),candidate_frame.get("semantic_targets",[]))
             if not ranked:
-                priority=-2.0
+                priority=-4.0; decision={"guidance_trigger":["no_candidate"],"accepted":False}
             else:
                 decision=self.app.evaluate_action_candidates(ranked)
-                gap=(ranked[1]["score"]-ranked[0]["score"])/max(1.0,ranked[0]["score"]) if len(ranked)>1 else 10.0
-                priority=gap-3.0 if decision.get("ambiguous") else gap-1.0 if not decision.get("accepted") else gap
+                gap=(ranked[1]["score"]-ranked[0]["score"])/max(1.0,abs(ranked[0]["score"])) if len(ranked)>1 else 10.0
+                trigger_count=len(decision.get("guidance_trigger",[]))
+                novelty=1.0 if candidate_frame.get("new_semantic_objects") else 0.0
+                priority=gap-2.0*trigger_count-1.5*novelty
             if priority<selected_priority:
-                selected_priority=priority
-                selected=candidate_frame
-                selected_ranked=ranked
-        return selected,selected_ranked
+                selected_priority=priority; selected=candidate_frame; selected_ranked=ranked; selected_decision=decision
+        return selected,selected_ranked,selected_decision
     def _make_choices(self,question_frame,ranked):
-        choices=[]
-        signatures=set()
-        for item in ranked[:4]:
-            action=normalize_action(item["a"])
-            signature=action_signature(action)
+        choices=[]; signatures=set()
+        for item in ranked[:6]:
+            semantic=normalize_semantic_action(item.get("semantic_action") or item.get("proto",{}).get("semantic_action")) or semantic_action_from_coordinate(item.get("a"))
+            signature=semantic_action_signature(semantic)
             if signature and signature not in signatures:
                 signatures.add(signature)
-                choices.append({"a":action,"repeat_policy":str(item["proto"].get("repeat_policy","one_shot")),"cluster_id":item["cluster_id"]})
-            if len(choices)>=3:
-                break
+                choices.append({"a":semantic,"coordinate_action":normalize_action(item.get("a")),"repeat_policy":str(item["proto"].get("repeat_policy","one_shot")),"cluster_id":item["cluster_id"],
+                    "risk_class":str(semantic.get("risk_class","safe")),"policy_probability":safe_float(item.get("bc_probability",0.0),0.0),"value_probability":safe_float(item.get("success_probability",0.0),0.0),"risk_probability":safe_float(item.get("risk_probability",0.0),0.0)})
+            if len(choices)>=3: break
         if not choices and self.historical:
             query=question_frame.get("coarse")
-            if not isinstance(query,(bytes,bytearray)) or len(query)!=COARSE_LEN:
-                query=coarse_feature(question_frame["f"])
+            if not isinstance(query,(bytes,bytearray)) or len(query)!=COARSE_LEN: query=coarse_feature(question_frame["f"])
             rough=sorted((coarse_distance(query,item["coarse"]),item) for item in self.historical)[:20]
-            exact=sorted((feature_distance(question_frame["f"],item["f"]),item) for _,item in rough)
+            exact=sorted((dual_feature_distance(question_frame["f"],item["f"],question_frame.get("neural_f"),item.get("neural_f")),item) for _,item in rough)
             for _,item in exact:
-                signature=action_signature(item["a"])
+                semantic=normalize_semantic_action(item.get("semantic_action") or item.get("a")) or semantic_action_from_coordinate(item.get("a"))
+                signature=semantic_action_signature(semantic)
                 if signature and signature not in signatures:
-                    signatures.add(signature)
-                    choices.append({"a":item["a"],"repeat_policy":item.get("repeat_policy","one_shot"),"cluster_id":item["cluster_id"]})
-                if len(choices)>=2:
-                    break
+                    signatures.add(signature); choices.append({"a":semantic,"coordinate_action":normalize_action(item.get("a")),"repeat_policy":item.get("repeat_policy","one_shot"),"cluster_id":item["cluster_id"],"risk_class":str(semantic.get("risk_class","safe"))})
+                if len(choices)>=2: break
         seed_text=self.game_id+"|"+self.model_version+"|"+str(self.counter)
         generator=random.Random(int(hashlib.sha256(seed_text.encode("utf-8","replace")).hexdigest()[:16],16))
-        distractors=list(self.sources)
-        generator.shuffle(distractors)
+        distractors=list(self.sources); generator.shuffle(distractors)
         for entry in distractors:
-            signature=action_signature(entry["a"])
+            semantic=normalize_semantic_action(entry.get("a")) or semantic_action_from_coordinate(entry.get("a")); signature=semantic_action_signature(semantic)
             if signature and signature not in signatures:
-                signatures.add(signature)
-                choices.append(dict(entry))
-            if len(choices)>=4:
-                break
-        generator.shuffle(choices)
-        choices=choices[:4]
-        candidates=[{"cluster_id":entry.get("cluster_id",""),"canonical_action_signature":action_signature(entry["a"]),"a":entry["a"]} for entry in choices]
+                signatures.add(signature); value=dict(entry); value["a"]=semantic; value.setdefault("coordinate_action",normalize_action(semantic)); choices.append(value)
+            if len(choices)>=4: break
+        generator.shuffle(choices); choices=choices[:4]
+        candidates=[{"cluster_id":entry.get("cluster_id",""),"canonical_action_signature":semantic_action_signature(entry["a"]),"semantic_action":entry["a"],"a":entry.get("coordinate_action") or normalize_action(entry["a"]),"risk_class":entry.get("risk_class","safe")} for entry in choices]
         return choices,candidates
     def _run(self):
         while not self.stop_event.is_set():
@@ -5244,10 +5712,10 @@ class AskQuestionProducer:
             except queue.Empty:
                 continue
             try:
-                frame,ranked=self._select_frame(payload)
+                frame,ranked,decision=self._select_frame(payload)
                 choices,candidates=self._make_choices(frame,ranked)
                 self.counter+=1
-                self._put_result({"frame":frame,"choices":choices,"candidates":candidates,"error":""})
+                self._put_result({"frame":frame,"choices":choices,"candidates":candidates,"decision":decision,"guidance_trigger":decision.get("guidance_trigger",[]),"error":""})
             except InputStopped:
                 break
             except Exception as error:
@@ -5292,13 +5760,17 @@ def compact_checksum_key(item):
     value=str(item.get("checksum") or item.get("created") or id(item)).encode("utf-8","replace")
     return int.from_bytes(hashlib.blake2b(value,digest_size=8).digest(),"big")
 def action_runtime_metadata(action):
+    semantic=normalize_semantic_action(action)
     item=normalize_action(action)
     if not item:
-        return {"action":None,"family":"","dangerous":True,"strictness":(9.0,999,0.0),"cooldown":9.0}
+        return {"action":None,"semantic_action":semantic,"family":"","dangerous":True,"risk_class":"irreversible","strictness":(9.0,999,0.0),"cooldown":9.0}
     kind=item["kind"]
     button=item.get("button")
-    dangerous=kind in {"double_click","long_press","drag"} or button in {"right","middle"}
-    if dangerous:
+    risk_class=str((semantic or {}).get("risk_class","safe"))
+    dangerous=risk_class in {"caution","irreversible"} or kind in {"double_click","long_press","drag"} or button in {"right","middle"}
+    if risk_class=="irreversible":
+        strictness=(1.8,8,0.90)
+    elif dangerous:
         strictness=(1.35,4,0.78)
     elif kind in {"scroll_v","scroll_h"}:
         strictness=(1.2,3,0.80)
@@ -5309,7 +5781,9 @@ def action_runtime_metadata(action):
     else:
         strictness=(1.0,2,0.84)
     cooldown={"click":0.8,"double_click":1.5,"long_press":2.0,"drag":1.2,"scroll_v":0.8,"scroll_h":1.0,"move":0.45,"hover":1.0,"no_op":0.25}.get(kind,1.0)
-    return {"action":item,"family":action_family_key(item),"dangerous":dangerous,"strictness":strictness,"cooldown":cooldown}
+    if risk_class=="irreversible":
+        cooldown=max(cooldown,3.0)
+    return {"action":item,"semantic_action":semantic,"family":semantic_action_family_key(semantic) if semantic else action_family_key(item),"dangerous":dangerous,"risk_class":risk_class,"strictness":strictness,"cooldown":cooldown}
 def coarse_bucket_key(value):
     raw=bytes(value) if isinstance(value,(bytes,bytearray)) and len(value)==COARSE_LEN else b""
     if not raw:
@@ -5844,7 +6318,8 @@ class LearningExecution:
         self.keyboard_discarded=0
         self.keyboard_count=0
         self.mouse_event_count=0
-        self.recent_actions=deque(["<START>","<START>"],maxlen=4)
+        self.recent_actions=deque(["<START>","<START>"],maxlen=32)
+        self.recent_action_results=deque(maxlen=32)
         self.last_action_signature=""
         self.last_action_time=0.0
         self.last_action_feature=None
@@ -5917,6 +6392,9 @@ class LearningExecution:
             self.frame_buffer,frame,self.recent_actions,self.state_since,
             cursor_point or ((action.get("path") or [None])[-1] if isinstance(action,dict) else None),
         )
+        temporal["recent_action_results"]=list(self.recent_action_results)
+        temporal["object_signature"]=str(frame.get("object_signature", ""))
+        temporal["task_phase"]=str(frame.get("task_phase", "unknown"))
         complete=temporal_from_context({**temporal,"previous_action_changed_frame":self.last_action_changed}).get("complete")
         if not complete:
             self.invalid_frames+=1
@@ -5932,25 +6410,30 @@ class LearningExecution:
     def save(self,frame,action,source,weight=1.0,cursor_point=None):
         if frame is None or not frame.get("usable_for_learning"):
             return False
-        action=normalize_action(action)
-        if not action:
+        coordinate=normalize_action(action)
+        if not coordinate:
             return False
-        if frame.get("quality",{}).get("low_information") and action.get("kind") not in {"no_op","click","double_click"}:
+        semantic=semantic_action_from_interaction(coordinate,frame.get("semantic_targets",[]))
+        if semantic is None:
+            return False
+        if frame.get("quality",{}).get("low_information") and coordinate.get("kind") not in {"no_op","click","double_click"}:
             return False
         if self.paused():
             self.keyboard_discarded+=1
             return False
         generation=int(self.keyboard_state["generation"])
-        context=self.build_sample_context(frame,action,cursor_point)
+        context=self.build_sample_context(frame,coordinate,cursor_point)
         if context is None:
             return False
-        saved=self.host.store.append_sample(
-            self.game["id"],frame["f"],action,source,context,frame.get("rgb"),frame.get("neural_f"),weight,
-        )
+        context.update(semantic_context_payload(frame,semantic))
+        context["semantic_action"]=semantic
+        context["semantic_primary"]=str(semantic.get("target",semantic.get("source",{})).get("class",""))
+        context["risk_class"]=str(semantic.get("risk_class","safe"))
+        saved=self.host.store.append_sample(self.game["id"],frame["f"],semantic,source,context,frame.get("rgb"),frame.get("neural_f"),weight)
         if saved and (generation!=int(self.keyboard_state["generation"]) or self.paused()):
             self.keyboard_discarded+=1
             return False
-        self.record_save_outcome(saved,frame,action)
+        self.record_save_outcome(saved,frame,semantic)
         return saved
 
     def record_save_outcome(self,saved,frame,action):
@@ -5959,11 +6442,12 @@ class LearningExecution:
             return
         self.learned+=1
         self.step_id+=1
-        signature=action_signature(action)
+        changed=self.last_action_feature is None or visual_distance(self.last_action_feature,frame["f"])>float(self.calibration.get("significant_change",60.0))
+        signature=semantic_action_signature(action)
         self.recent_actions.append(signature)
+        self.recent_action_results.append({"state":"changed" if changed else "neutral","changed":bool(changed),"reason":"" if changed else "unverified","reward":0.0})
         self.last_action_signature=signature
         self.last_action_time=time.monotonic()
-        changed=self.last_action_feature is None or visual_distance(self.last_action_feature,frame["f"])>float(self.calibration.get("significant_change",60.0))
         self.last_action_changed=changed
         if changed:
             self.state_since=time.monotonic()
@@ -6263,7 +6747,7 @@ class ReviewController:
     def method_of(self,item):
         return str(item.get("capture_method") or item.get("context",{}).get("capture_method") or "unknown")
     def stratum_of(self,item):
-        return (action_family_key(item["a"]),self.method_of(item))
+        return (semantic_action_family_key(sample_semantic_action(item)),self.method_of(item))
     def decorrelate(self,valid):
         result=[]
         previous={}
@@ -6272,7 +6756,7 @@ class ReviewController:
         for index,item in enumerate(ordered):
             if index%32==0 and self.context.callbacks.should_stop():
                 raise InputStopped("睡眠已停止")
-            key=(self.session_of(item),action_signature(item["a"]),self.method_of(item))
+            key=(self.session_of(item),semantic_action_signature(sample_semantic_action(item)),self.method_of(item))
             old=previous.get(key)
             keep=True
             if old is not None:
@@ -6374,24 +6858,33 @@ class ReviewController:
     def map_holdout(self,holdout,clusters):
         by_family=defaultdict(list)
         for cluster in clusters:
-            by_family[action_family_key(cluster["a"])].append(cluster)
+            by_family[semantic_action_family_key(cluster.get("semantic_action"))].append(cluster)
         uncovered=0
         for item in holdout:
-            candidates=by_family.get(action_family_key(item["a"]),[])
+            semantic=sample_semantic_action(item)
+            candidates=by_family.get(semantic_action_family_key(semantic),[])
             if not candidates:
                 item["_action_cluster"]=None
                 item["_uncovered_action"]=True
                 uncovered+=1
                 continue
-            ranked=sorted((action_geometry_distance(item["a"],cluster["a"]),cluster) for cluster in candidates)
+            ranked=sorted((semantic_action_distance(semantic,cluster.get("semantic_action")),cluster) for cluster in candidates)
             distance,cluster=ranked[0]
-            if distance>action_cluster_limit(cluster["a"]):
+            fallback_classes={str(semantic.get("source",{}).get("class","")),str(semantic.get("target",{}).get("class",""))} if isinstance(semantic,dict) else set()
+            coordinate_primary=bool(fallback_classes and fallback_classes.issubset(SEMANTIC_TARGET_FALLBACK_CLASSES))
+            if coordinate_primary:
+                distance+=action_geometry_distance(item["a"],cluster["a"])
+                limit=action_cluster_limit(cluster["a"])+0.2
+            else:
+                limit=0.36
+            if distance>limit:
                 item["_action_cluster"]=None
                 item["_uncovered_action"]=True
                 uncovered+=1
                 continue
             item["_action_cluster"]=cluster["id"]
             item["_cluster_action"]=cluster["a"]
+            item["_cluster_semantic_action"]=cluster.get("semantic_action")
             item["_action_support"]=len(cluster["members"])
             item["_canonical_action_signature"]=cluster["canonical_action_signature"]
             item["_uncovered_action"]=False
@@ -6647,8 +7140,9 @@ class ReviewExecution:
             for rejection_index,rejection in enumerate(rejections):
                 if (proto_index*max(1,len(rejections))+rejection_index)%64==0 and self.host.should_stop():
                     raise InputStopped("睡眠已停止")
-                candidates=[normalize_action(item.get("a")) for item in rejection.get("candidates",[]) if isinstance(item,dict)]
-                related=any(action and action_family_key(action)==action_family_key(proto["a"]) and action_geometry_distance(action,proto["a"])<=action_cluster_limit(proto["a"])*1.25 for action in candidates)
+                candidates=[normalize_semantic_action(item.get("semantic_action") or item.get("a")) for item in rejection.get("candidates",[]) if isinstance(item,dict)]
+                proto_semantic=normalize_semantic_action(proto.get("semantic_action")) or semantic_action_from_coordinate(proto.get("a"))
+                related=any(action and semantic_action_family_key(action)==semantic_action_family_key(proto_semantic) and semantic_action_distance(action,proto_semantic)<=0.45 for action in candidates)
                 if related:
                     matching.append((coarse_distance(proto["coarse"],rejection["coarse"]),rejection))
             if not matching:
@@ -6665,11 +7159,11 @@ class ReviewExecution:
         for cluster in self.action_clusters:
             cluster_id=str(cluster["id"])
             members=list(self.groups.get(cluster_id,[]))
-            family=action_family_key(cluster["a"])
-            signature=str(cluster.get("canonical_action_signature") or action_signature(cluster["a"]))
+            family=semantic_action_family_key(cluster.get("semantic_action"))
+            signature=str(cluster.get("canonical_action_signature") or semantic_action_signature(cluster.get("semantic_action")))
             sessions={self.host.review_controller.session_of(item) for item in members}
             limit=max(1e-9,action_cluster_limit(cluster["a"])*0.65)
-            consistent=sum(1 for item in members if action_geometry_distance(item["a"],cluster["a"])<=limit)
+            consistent=sum(1 for item in members if semantic_action_distance(sample_semantic_action(item),cluster.get("semantic_action"))<=0.30 and (not str(family).startswith("coordinate|") or action_geometry_distance(item["a"],cluster["a"])<=limit))
             consistency=consistent/max(1,len(members))
             cluster_prototypes=[proto for proto in self.prototypes if str(proto.get("cluster_id"))==cluster_id]
             rejection_clear=all(proto.get("nearest_rejected_distance") is None or float(proto.get("nearest_rejected_distance"))>float(proto.get("threshold",0.0))*1.10 for proto in cluster_prototypes)
@@ -6689,7 +7183,8 @@ class ReviewExecution:
         self.by_method=defaultdict(lambda:{"total":0,"accepted":0,"correct":0,"errors":0})
         self.by_scene=defaultdict(lambda:{"total":0,"accepted":0,"correct":0,"errors":0})
         self.action_sessions=defaultdict(set)
-        self.dangerous_signatures={cluster["canonical_action_signature"] for cluster in self.action_clusters if cluster["a"]["kind"] in {"double_click","long_press","drag"} or cluster["a"].get("button") in {"right","middle"}}
+        self.dangerous_signatures={cluster["canonical_action_signature"] for cluster in self.action_clusters if str((cluster.get("semantic_action") or {}).get("risk_class",
+            "safe"))!="safe" or cluster["a"]["kind"] in {"double_click","long_press","drag"} or cluster["a"].get("button") in {"right","middle"}}
 
     def evaluate_holdout_sample(self,sample):
         ranked=self.host.rank_action_candidates(sample["f"],self.prototypes,str(sample.get("context",{}).get("previous_action","")),16,sample.get("context",{}),sample.get("coarse"))
@@ -6737,7 +7232,8 @@ class ReviewExecution:
         if expected is None:
             self.uncovered_false_accept+=1
         action=normalize_action(predicted["a"])
-        if action["kind"] in {"double_click","long_press","drag"} or action.get("button") in {"right","middle"}:
+        semantic=normalize_semantic_action(predicted.get("semantic_action") or predicted.get("proto",{}).get("semantic_action")) or semantic_action_from_coordinate(action)
+        if str(semantic.get("risk_class","safe"))!="safe" or action["kind"] in {"double_click","long_press","drag"} or action.get("button") in {"right","middle"}:
             self.dangerous_false+=1
         return signature
 
@@ -6889,19 +7385,58 @@ class ReviewExecution:
         default_task_id=normalized_identifier(profile.get("default_task_id"),"default",96)
         events=self.host.store.load_ocr_experience_events(self.game["id"],5000)
         experiences,experience_model=self.host.review_controller.build_experiences(self.train,events,profile)
+        state_source=experience_model.get("state_action",{}) if isinstance(experience_model,dict) else {}
+        prior_source=experience_model.get("action_prior",{}) if isinstance(experience_model,dict) else {}
+        behavior_state={}; value_state={}; risk_state={}
+        grouped=defaultdict(list)
+        for key,row in state_source.items():
+            prefix=str(key).rsplit("|",1)[0]
+            grouped[prefix].append((key,row))
+        for _,items in grouped.items():
+            total=sum(max(1,safe_int(row.get("count"),0))*max(0.01,safe_float(row.get("awr_weight",1.0),1.0)) for _,row in items)
+            for key,row in items:
+                weight=max(1,safe_int(row.get("count"),0))*max(0.01,safe_float(row.get("awr_weight",1.0),1.0))
+                behavior_state[key]={"count":safe_int(row.get("count"),0),"probability":round(weight/max(1e-9,total),8),"awr_weight":safe_float(row.get("awr_weight",1.0),1.0),"advantage":safe_float(row.get("advantage",
+                    0.0),0.0),"human_override_rate":safe_float(row.get("human_override_rate",0.0),0.0)}
+                value_state[key]={"count":safe_int(row.get("count"),0),"expected_return":safe_float(row.get("q_value",0.0),0.0),"q_value":safe_float(row.get("q_value",0.0),0.0),
+                    "success_probability":safe_float(row.get("success_probability",0.0),0.0),"failure_probability":safe_float(row.get("risk_probability",0.0),0.0),"uncertainty":safe_float(row.get("uncertainty",1.0),1.0)}
+                risk_state[key]={"count":safe_int(row.get("count"),0),"risk_probability":safe_float(row.get("risk_probability",0.0),0.0),"failure_probability":safe_float(row.get("risk_probability",0.0),0.0),
+                    "uncertainty":safe_float(row.get("uncertainty",1.0),1.0),"human_override_rate":safe_float(row.get("human_override_rate",0.0),0.0)}
+        behavior_prior={}; value_prior={}; risk_prior={}
+        task_totals=defaultdict(float)
+        for key,row in prior_source.items():
+            task=str(key).split("|",1)[0]
+            task_totals[task]+=max(1,safe_int(row.get("count"),0))*max(0.01,safe_float(row.get("awr_weight",1.0),1.0))
+        for key,row in prior_source.items():
+            task=str(key).split("|",1)[0]; weight=max(1,safe_int(row.get("count"),0))*max(0.01,safe_float(row.get("awr_weight",1.0),1.0))
+            behavior_prior[key]={"count":safe_int(row.get("count"),0),"probability":round(weight/max(1e-9,task_totals[task]),8),"awr_weight":safe_float(row.get("awr_weight",1.0),1.0)}
+            value_prior[key]={"count":safe_int(row.get("count"),0),"expected_return":safe_float(row.get("q_value",0.0),0.0),"q_value":safe_float(row.get("q_value",0.0),0.0),
+                "success_probability":safe_float(row.get("success_probability",0.0),0.0),"failure_probability":safe_float(row.get("risk_probability",0.0),0.0),"uncertainty":safe_float(row.get("uncertainty",1.0),1.0)}
+            risk_prior[key]={"count":safe_int(row.get("count"),0),"risk_probability":safe_float(row.get("risk_probability",0.0),0.0),"failure_probability":safe_float(row.get("risk_probability",0.0),0.0),"uncertainty":safe_float(row.get("uncertainty",1.0),1.0)}
+        behavior_model={"schema_version":1,"algorithm":"advantage_weighted_behavior_cloning","state_action":behavior_state,"action_prior":behavior_prior,"total_count":len(experiences),"default_task_id":default_task_id}
+        value_model={"schema_version":1,"algorithm":"conservative_offline_return_and_success_model","state_action":value_state,"action_prior":value_prior,"total_count":len(experiences),"default_task_id":default_task_id}
+        risk_model={"schema_version":1,"algorithm":"independent_failure_and_irreversible_risk_model","state_action":risk_state,"action_prior":risk_prior,"total_count":len(experiences),"default_task_id":default_task_id}
+        enough_models=len(experiences)>=max(150,VersionedThresholdConfig.review_min_accepted)
+        decision_calibration={"source":"holdout_auto_calibration" if enough_models else "cold_start_defaults","minimum_score_gap":max(6.0,min(24.0,12.0*(1.0-self.coverage)+6.0)),"margin_ratio":max(0.06,min(0.18,
+            self.error_upper_95+0.06)),"maximum_risk_probability":max(0.20,min(0.48,0.48-self.error_upper_95)),"maximum_ood_uncertainty":max(0.52,min(0.78,0.78-self.error_upper_95)),
+            "minimum_behavior_probability":0.03 if enough_models else 0.0,"minimum_behavior_gap":max(0.05,min(0.18,self.error_upper_95+0.05)),"holdout_count":self.holdout_count,"accepted_count":self.accepted,"coverage":self.coverage,"error_upper_95":self.error_upper_95}
+        contexts=[item.get("context",{}) for item in self.decorrelated if isinstance(item.get("context"),dict)]
+        resolution_groups=sorted({str(value.get("window_size"))+"|dpi="+str(value.get("dpi")) for value in contexts})
+        ui_groups=sorted({str(value.get("ui_variant") or value.get("object_signature") or "unknown") for value in contexts})
+        generalization={"same_game_different_session":{"train_sessions":sorted({self.host.review_controller.session_of(item) for item in self.train}),"holdout_sessions":sorted(self.holdout_sessions),
+            "passed":bool(self.split_info.get("complete"))},"same_task_different_resolution":{"groups":resolution_groups,"group_count":len(resolution_groups),"evaluated":len(resolution_groups)>1},
+            "same_game_different_ui_or_save":{"groups":ui_groups[:128],"group_count":len(ui_groups),"evaluated":len(ui_groups)>1},"unseen_game":{"evaluated":False,"passed":False,"reason":"需要至少另一游戏的隔离数据集后才能宣称跨游戏迁移"}}
         sleep_seed=safe_int(getattr(self.host,"sleep_seed",0),0,0,2**63-1)
-        self.model={"created":time.time(),"sleep_seed":sleep_seed,"determinism":{"seed":sleep_seed,"build_hash":current_build_hash(),
-                "training_checksums_hash":hashlib.sha256(canonical_bytes(self.train_checksums)).hexdigest(),
-                "holdout_checksums_hash":hashlib.sha256(canonical_bytes(self.holdout_checksums)).hexdigest()},
-            "samples":len(self.decorrelated),"training_samples":len(self.train),"holdout_samples":len(self.holdout),"invalid_samples":self.stats["invalid"],
-            "action_clusters":len(self.action_clusters),"rejection_constraints":self.rejection_constraints,"prototypes":self.prototypes,"capture_backends":self.train_methods,
-            "validation":self.validation,"training_checksums":self.train_checksums,"holdout_checksums":self.holdout_checksums,"sequence_model":self.sequence_model,
-            "experiences":experiences,"experience_model":experience_model,"episode_metrics":summarize_episode_metrics(experiences),
-            "default_task_id":default_task_id,"task_ids":sorted({str(item.get("task_id","default")) for item in tasks}),
-            "task_definitions_checksum":task_definitions_checksum(tasks),
-            "policy_score_weights":normalized_policy_score_weights(profile.get("policy_score_weights")),"model_binding":model_binding_from_samples(self.train),
-            "safety_profile_checksum":profile_checksum(profile),"stopped":False}
-
+        self.model={"created":time.time(),"sleep_seed":sleep_seed,"temporal_encoder_seed":sleep_seed,"determinism":{"seed":sleep_seed,"build_hash":current_build_hash(),
+            "training_checksums_hash":hashlib.sha256(canonical_bytes(self.train_checksums)).hexdigest(),"holdout_checksums_hash":hashlib.sha256(canonical_bytes(self.holdout_checksums)).hexdigest()},"samples":len(self.decorrelated),
+            "training_samples":len(self.train),"holdout_samples":len(self.holdout),"invalid_samples":self.stats["invalid"],"action_clusters":len(self.action_clusters),"rejection_constraints":self.rejection_constraints,
+            "prototypes":self.prototypes,"capture_backends":self.train_methods,"validation":self.validation,"generalization_evaluation":generalization,"training_checksums":self.train_checksums,
+            "holdout_checksums":self.holdout_checksums,"sequence_model":self.sequence_model,"experiences":experiences,"experience_model":experience_model,"behavior_model":behavior_model,"value_model":value_model,
+            "risk_model":risk_model,"decision_calibration":decision_calibration,"episode_metrics":summarize_episode_metrics(experiences),"default_task_id":default_task_id,"task_ids":sorted({str(item.get("task_id",
+            "default")) for item in tasks}),"task_definitions_checksum":task_definitions_checksum(tasks),"policy_score_weights":normalized_policy_score_weights(profile.get("policy_score_weights")),
+            "decision_architecture":"behavior_policy+value_model+risk_model+safety_gate","state_architecture":"handcrafted_safety+neural_multiscale+semantic_objects+gru32+task_history",
+            "semantic_action_schema_version":SEMANTIC_ACTION_SCHEMA_VERSION,"model_hierarchy":{"shared_visual_encoder":True,"shared_semantic_action_space":True,"game_adapter":"lightweight","task_policy_head":True},
+            "model_binding":model_binding_from_samples(self.train),"safety_profile_checksum":profile_checksum(profile),"stopped":False}
     def report_lines(self):
         label="通过完整独立验收" if self.validation_status=="passed" else "已生成基础安全模型，可训练已授权的普通安全动作" if self.validation_status=="basic_safe" else "验证不足，仅保存不可训练临时模型" if self.validation_status=="insufficient" else "验证失败，仅保存不可训练临时模型"
         error_text="无可计算值" if self.accepted_error_rate is None else str(round(self.accepted_error_rate*100,2))+"%"
@@ -6989,7 +7524,7 @@ class TrainingExecution:
         self.actions=0
         self.keyboard_count=0
         self.mouse_count=0
-        self.recent_actions=deque(["<START>","<START>"],maxlen=4)
+        self.recent_actions=deque(["<START>","<START>"],maxlen=32)
         self.candidate_id=None
         self.candidate_count=0
         self.candidate_frame_stamp=0.0
@@ -7007,6 +7542,8 @@ class TrainingExecution:
         self.guidance_requests=0
         self.last_guidance_reason=""
         self.guidance_request_last_time=0.0
+        self.guidance_trigger_streak=0
+        self.recent_action_results=deque(maxlen=32)
 
     def preflight(self):
         self.game=self.phase.get("game") or self.host.require_game()
@@ -7050,19 +7587,10 @@ class TrainingExecution:
         identity=self.host.api.target_identity(self.target)
         rect=tuple(self.host.api.validate_target(self.target,False))
         dpi=self.host.api.dpi_for_window(int(self.target["hwnd"]))
-        self.snapshot_payload={
-            "game_id":str(self.game["id"]),
-            "model_table_token":self.model_table_token(),
-            "model_digest":immutable_digest(self.model),
-            "safety_profile_checksum":profile_checksum(self.profile),
-            "window":self.identity_payload(identity),
-            "content_rect":list(rect),
-            "dpi":dpi,
-            "capture_backend":self.validated_backend,
-            "allowed_actions":sorted({action_signature(proto.get("a")) for proto in self.prototypes}),
-        }
+        self.visual_runtime_layout={"content_rect":list(rect),"dpi":dpi,"capture_backend":self.validated_backend,"aspect":rect[2]/max(1,rect[3])}
+        self.snapshot_payload={"game_id":str(self.game["id"]),"model_table_token":self.model_table_token(),"model_digest":immutable_digest(self.model),"safety_profile_checksum":profile_checksum(self.profile),
+            "window":self.identity_payload(identity),"allowed_actions":sorted({semantic_action_signature(proto.get("semantic_action") or proto.get("a")) for proto in self.prototypes}),"allowed_backends":sorted(self.allowed_backends)}
         self.training_snapshot_checksum=immutable_digest(self.snapshot_payload)
-
     def identity_payload(self,identity):
         return {
             "hwnd":safe_int(identity.get("hwnd"),0),
@@ -7085,24 +7613,25 @@ class TrainingExecution:
         dpi=self.host.api.dpi_for_window(int(self.target["hwnd"]))
         backend=str(self.host.api.calibration_for(self.target).get("validated_backend",self.validated_backend))
         current_profile=self.host.store.load_game_profile(self.game["id"])
-        payload={
-            "game_id":str(current_game.get("id","")),
-            "model_table_token":self.model_table_token(),
-            "model_digest":self.snapshot_payload["model_digest"],
-            "safety_profile_checksum":profile_checksum(current_profile),
-            "window":self.identity_payload(identity),
-            "content_rect":list(rect),
-            "dpi":dpi,
-            "capture_backend":backend,
-            "allowed_actions":self.snapshot_payload["allowed_actions"],
-        }
-        if immutable_digest(payload)==self.training_snapshot_checksum:
-            return True
-        self.host.api.block_input()
-        self.host.api.release_all_buttons()
-        self.host.request_mode_stop("stopped","训练不可变运行快照发生变化")
-        raise InputStopped("游戏、模型、安全配置、窗口身份、内容区域、DPI、采集后端或动作集合在训练期间发生变化")
-
+        payload={"game_id":str(current_game.get("id","")),"model_table_token":self.model_table_token(),"model_digest":self.snapshot_payload["model_digest"],"safety_profile_checksum":profile_checksum(current_profile),
+            "window":self.identity_payload(identity),"allowed_actions":self.snapshot_payload["allowed_actions"],"allowed_backends":self.snapshot_payload["allowed_backends"]}
+        if immutable_digest(payload)!=self.training_snapshot_checksum:
+            self.host.api.block_input(); self.host.api.release_all_buttons(); self.host.request_mode_stop("stopped","训练安全身份、模型、任务或动作白名单发生变化")
+            raise InputStopped("安全身份或不可变策略快照发生变化")
+        if backend not in self.allowed_backends:
+            self.host.api.block_input(); self.host.request_mode_stop("stopped","采集后端切换到未经验证的实现")
+            raise InputStopped("采集后端未经模型验证")
+        aspect=rect[2]/max(1,rect[3]); previous=self.visual_runtime_layout
+        if abs(aspect-safe_float(previous.get("aspect",aspect),aspect))>max(0.04,VersionedThresholdConfig.content_aspect_tolerance):
+            self.host.api.block_input(); self.host.request_mode_stop("stopped","内容区域发生非等比例变化")
+            raise InputStopped("视觉布局无法安全自动校准")
+        changed=list(rect)!=list(previous.get("content_rect",[])) or dpi!=safe_int(previous.get("dpi",dpi),dpi) or backend!=str(previous.get("capture_backend",backend))
+        if changed:
+            self.visual_runtime_layout={"content_rect":list(rect),"dpi":dpi,"capture_backend":backend,"aspect":aspect}
+            self.validated_backend=backend
+            self.reset_candidate(); self.state_since=time.monotonic()
+            self.host.set_status("检测到纯视觉布局变化，已重新校准客户区、DPI或采集后端并等待连续确认")
+        return True
     def start_monitors(self,session):
         fps=max(8.0,float(self.calibration.get("fps",15.0)))
         self.frame_buffer=session.start_frames(fps,2.5,0.1,"training")
@@ -7231,76 +7760,69 @@ class TrainingExecution:
         if captured["time"]!=self.previous_frame_stamp:
             if self.previous_feature is not None and visual_distance(self.previous_feature,feature)>float(self.calibration.get("significant_change",60.0)):
                 self.state_since=time.monotonic()
-            self.previous_feature=feature
-            self.previous_frame_stamp=captured["time"]
+            self.previous_feature=feature; self.previous_frame_stamp=captured["time"]
         self.significant=self.last_action_feature is not None and visual_distance(self.last_action_feature,feature)>float(self.calibration.get("significant_change",60.0))
         if self.significant:
-            self.state_unlocked=True
-            self.no_change_count=0
-            self.state_since=time.monotonic()
+            self.state_unlocked=True; self.no_change_count=0; self.state_since=time.monotonic()
         temporal=self.host.build_temporal_context(self.frame_buffer,captured,self.recent_actions,self.state_since)
+        temporal.update({"recent_action_results":list(self.recent_action_results),"failure_count":self.agent_policy.failures,"object_signature":str(captured.get("object_signature","")),"task_phase":str(captured.get("task_phase",self.agent_policy.last_classification.get("state","neutral")))})
         if not temporal_from_context({**temporal,"previous_action_changed_frame":self.significant}).get("complete"):
-            self.host.set_status("等待至少3帧短时序上下文")
-            time.sleep(0.05)
-            return None
+            self.host.set_status("等待至少3帧短时序上下文"); time.sleep(0.05); return None
         temporal["previous_action_changed_frame"]=bool(self.significant)
         return temporal
-
     def choose_action(self,captured,temporal):
-        ranked=self.host.rank_action_candidates(captured["f"],self.prototypes,self.last_action_signature,VersionedThresholdConfig.candidate_full_limit,temporal,captured.get("coarse"))
+        ranked=self.host.rank_action_candidates(captured["f"],self.prototypes,self.last_action_signature,VersionedThresholdConfig.candidate_full_limit,temporal,captured.get("coarse"),captured.get("neural_f"),captured.get("semantic_targets",[]),self.agent_policy.task_id)
         decision=self.host.evaluate_action_candidates(ranked)
         if not decision.get("accepted"):
-            self.reset_candidate()
-            now=time.monotonic()
-            reason=str(decision.get("reason","识别不确定"))
+            self.reset_candidate(); now=time.monotonic(); reason=str(decision.get("reason","识别不确定"))
             if reason!=self.last_guidance_reason or now-self.guidance_request_last_time>=2.0:
-                self.guidance_requests+=1
-                self.guidance_request_last_time=now
+                self.guidance_requests+=1; self.guidance_request_last_time=now; self.guidance_trigger_streak=1
+            else:
+                self.guidance_trigger_streak+=1
             self.last_guidance_reason=reason
-            self.host.set_input_status("等待连续确认")
+            self.host.set_input_status("等待指导")
             self.host.set_confidence("训练置信度："+str(round(float(decision.get("confidence",0.0))*100,1))+"%")
-            suffix="；安全探索仅保持等待，不产生鼠标输入" if self.profile.get("exploration_enabled") else "；不执行动作并等待指导"
-            self.host.set_status("训练中："+str(decision.get("reason","识别不确定"))+suffix)
-            time.sleep(0.12)
+            self.host.set_status("训练中："+reason+"；不产生鼠标输入")
+            if self.guidance_trigger_streak>=8:
+                self.host.request_mode_stop("stopped","主动学习触发指导："+reason)
+            else:
+                time.sleep(0.12)
             return None
-        best=decision["best"]
-        cluster_id=best["cluster_id"]
+        self.guidance_trigger_streak=0
+        best=decision["best"]; cluster_id=best["cluster_id"]
         if self.candidate_id==cluster_id:
             if captured["time"]==self.candidate_frame_stamp:
-                time.sleep(0.025)
-                return None
+                time.sleep(0.025); return None
             self.candidate_count+=1
         else:
-            self.candidate_id=cluster_id
-            self.candidate_count=1
+            self.candidate_id=cluster_id; self.candidate_count=1
         self.candidate_frame_stamp=captured["time"]
         confirmations=max(3,int(self.calibration.get("confirm_frames",3)))
         self.host.set_confidence("训练置信度："+str(round(decision["confidence"]*100,1))+"%  连续确认"+str(self.candidate_count)+"/"+str(confirmations))
         if not self.host.training_controller.confirmed(self.candidate_count,confirmations):
-            time.sleep(0.05)
-            return None
+            time.sleep(0.05); return None
         return self.build_selection(captured,best,confirmations)
-
     def build_selection(self,captured,best,confirmations):
-        action=normalize_action(best["a"])
+        coordinate=normalize_action(best["a"])
+        semantic=normalize_semantic_action(best.get("semantic_action")) or semantic_action_from_coordinate(coordinate)
         proto=best["proto"]
         if not self.host.training_controller.authorized(proto):
-            self.host.set_status("动作原型未通过独立留出授权，拒绝动作")
-            time.sleep(0.1)
-            return None
-        if not self.agent_policy.allowed_action(action):
-            self.host.set_status("动作不在当前游戏安全白名单中，拒绝动作："+self.host.action_text(action))
-            time.sleep(0.1)
-            return None
+            self.host.set_status("动作原型未通过独立留出授权，拒绝动作"); time.sleep(0.1); return None
+        if not self.agent_policy.allowed_action(coordinate):
+            self.host.set_status("动作不在当前任务安全白名单中，拒绝动作："+self.host.action_text(semantic)); time.sleep(0.1); return None
+        risk_class=str(semantic.get("risk_class","safe"))
+        if risk_class=="irreversible":
+            whitelist={str(value) for value in self.profile.get("irreversible_target_whitelist",[])}
+            target_classes={str((semantic.get("source") or {}).get("class","")),str((semantic.get("target") or {}).get("class","")),semantic_action_signature(semantic)}
+            if not whitelist.intersection(target_classes):
+                self.host.set_status("不可逆目标未在独立白名单中，拒绝执行并进入指导"); self.guidance_trigger_streak=8; return None
         if captured["method"] not in proto.get("capture_methods",frozenset()):
-            self.host.set_status("当前原型未在该采集后端训练，拒绝动作")
-            time.sleep(0.1)
-            return None
-        repeat_policy=str(proto.get("repeat_policy","one_shot"))
-        max_rate=max(0.25,min(12.0,float(proto.get("max_rate",3.0))))
-        return {"action":action,"canonical":action_signature(action),"proto":proto,"cluster_id":best["cluster_id"],
-            "repeat_policy":repeat_policy,"max_rate":max_rate,"confirmations":confirmations}
-
+            self.host.set_status("当前原型未在该采集后端训练，拒绝动作"); time.sleep(0.1); return None
+        grounding=ground_semantic_action(semantic,captured.get("semantic_targets",[]),True)
+        if not grounding or not grounding.get("grounded_action") or grounding.get("grounding",{}).get("ambiguous"):
+            self.host.set_status("执行前语义目标缺失或不唯一，拒绝坐标猜测并进入指导"); self.guidance_trigger_streak=8; return None
+        repeat_policy=str(proto.get("repeat_policy","one_shot")); max_rate=max(0.25,min(12.0,float(proto.get("max_rate",3.0))))
+        return {"action":semantic,"coordinate_action":coordinate,"canonical":semantic_action_signature(semantic),"proto":proto,"cluster_id":best["cluster_id"],"repeat_policy":repeat_policy,"max_rate":max_rate,"confirmations":confirmations,"risk_class":risk_class}
     def action_ready(self,selection):
         cluster_id=selection["cluster_id"]
         policy=selection["repeat_policy"]
@@ -7326,28 +7848,25 @@ class TrainingExecution:
         proto=selection["proto"]
         if not self.host.training_controller.usable_frame(fresh,self.validated_backend) or fresh.get("method") not in self.allowed_backends or fresh.get("method") not in proto.get("capture_methods",frozenset()):
             raise InputStopped("动作前最后一帧或采集后端不可用")
-        if self.keyboard_interrupt.is_set() or not self.keyboard.all_released():
-            raise InputStopped("检测到键盘输入")
-        if self.mouse_interrupt.is_set() or not self.mouse.stable_for(0.45):
-            raise InputStopped("检测到人工鼠标干扰")
+        if self.keyboard_interrupt.is_set() or not self.keyboard.all_released(): raise InputStopped("检测到键盘输入")
+        if self.mouse_interrupt.is_set() or not self.mouse.stable_for(0.45): raise InputStopped("检测到人工鼠标干扰")
         temporal=self.host.build_temporal_context(self.frame_buffer,fresh,self.recent_actions,self.state_since)
-        temporal["previous_action_changed_frame"]=bool(self.significant)
-        ranked=self.host.rank_action_candidates(fresh["f"],self.prototypes,self.last_action_signature,VersionedThresholdConfig.candidate_full_limit,temporal,fresh.get("coarse"))
+        temporal.update({"previous_action_changed_frame":bool(self.significant),"recent_action_results":list(self.recent_action_results),"failure_count":self.agent_policy.failures,"object_signature":str(fresh.get("object_signature",""))})
+        ranked=self.host.rank_action_candidates(fresh["f"],self.prototypes,self.last_action_signature,VersionedThresholdConfig.candidate_full_limit,temporal,fresh.get("coarse"),fresh.get("neural_f"),fresh.get("semantic_targets",[]),self.agent_policy.task_id)
         decision=self.host.evaluate_action_candidates(ranked)
-        if not decision.get("accepted") or decision.get("best",{}).get("cluster_id")!=selection["cluster_id"]:
-            raise InputStopped("动作前模型判断已变化")
-        if not self.host.training_controller.confirmed(self.candidate_count,selection["confirmations"]):
-            raise InputStopped("动作前连续帧确认不足")
+        if not decision.get("accepted") or decision.get("best",{}).get("cluster_id")!=selection["cluster_id"]: raise InputStopped("动作前模型判断已变化")
+        grounding=ground_semantic_action(selection["action"],fresh.get("semantic_targets",[]),True)
+        if not grounding or not grounding.get("grounded_action") or grounding.get("grounding",{}).get("ambiguous"): raise InputStopped("动作前语义目标无法唯一定位")
+        if not self.host.training_controller.confirmed(self.candidate_count,selection["confirmations"]): raise InputStopped("动作前连续帧确认不足")
         self.assert_training_snapshot(True)
-
     def execute_selected_action(self,selection):
         fresh=self.frame_buffer.latest(None,0.35)
         try:
             self.host.api.validate_target(self.target,True)
             self.host.api.validate_uipi(self.target)
             self.verify_fresh_decision(fresh,selection)
-            before=fresh["f"]
-            if selection["action"].get("kind")!="no_op":
+            before=fresh
+            if normalize_semantic_action(selection["action"]).get("action_type")!="no_op":
                 self.host.set_input_status("允许执行单个动作")
                 self.host.api.allow_input(self.host.stop_event)
             else:
@@ -7380,25 +7899,22 @@ class TrainingExecution:
         self.host.set_status(reason+"；不会自动恢复")
 
     def collect_outcome(self,selection,before):
-        action_end=time.monotonic()
-        self.actions+=1
-        self.action_hits[selection["cluster_id"]].append(action_end)
-        self.recent_actions.append(selection["canonical"])
-        self.last_action_signature=selection["canonical"]
-        self.last_cluster_id=selection["cluster_id"]
-        self.last_action_time=action_end
-        self.last_action_feature=before
-        self.state_unlocked=selection["repeat_policy"] in {"repeatable","rate_limited"}
-        self.candidate_count=0
-        delay=float(self.calibration.get("input_delay",0.24))
-        deadline=time.monotonic()+delay
-        while time.monotonic()<deadline and not self.host.should_stop():
-            time.sleep(0.02)
+        action_end=time.monotonic(); self.actions+=1; self.action_hits[selection["cluster_id"]].append(action_end)
+        self.recent_actions.append(selection["canonical"]); self.last_action_signature=selection["canonical"]; self.last_cluster_id=selection["cluster_id"]; self.last_action_time=action_end
+        self.last_action_feature=before.get("f") if isinstance(before,dict) else before
+        self.state_unlocked=selection["repeat_policy"] in {"repeatable","rate_limited"}; self.candidate_count=0
+        delay=float(self.calibration.get("input_delay",0.24)); deadline=time.monotonic()+delay
+        while time.monotonic()<deadline and not self.host.should_stop(): time.sleep(0.02)
         after=self.wait_after_frame(action_end,delay)
-        changed=self.host.training_controller.changed(before,after,float(self.calibration.get("post_action_change",45.0)))
-        outcome=self.agent_policy.register(before,selection["action"],after["f"] if after is not None else None,changed)
-        return {"selection":selection,"after":after,"changed":changed,"outcome":outcome}
-
+        before_feature=before.get("f") if isinstance(before,dict) else before
+        changed=self.host.training_controller.changed(before_feature,after,float(self.calibration.get("post_action_change",45.0)))
+        classification={"reason":"changed","counts_as_failure":False,"should_wait":False,"confidence":1.0} if changed else classify_no_change_state(before,after,self.target,self.calibration)
+        outcome=self.agent_policy.register(before_feature,selection["coordinate_action"],after["f"] if after is not None else None,changed or not classification.get("counts_as_failure",False))
+        if not changed and not classification.get("counts_as_failure",False) and outcome.get("state")=="neutral":
+            self.agent_policy.failures=max(0,self.agent_policy.failures-1); outcome["failures"]=self.agent_policy.failures; outcome["stop"]=False
+        record={"state":outcome.get("state","neutral"),"changed":bool(changed),"reason":classification.get("reason",""),"reward":outcome.get("reward",0.0),"should_wait":bool(classification.get("should_wait",False))}
+        self.recent_action_results.append(record)
+        return {"selection":selection,"after":after,"changed":changed,"outcome":outcome,"no_change":classification}
     def wait_after_frame(self,action_end,delay):
         wait_end=time.monotonic()+max(0.35,delay*2.0)
         while time.monotonic()<wait_end and not self.host.should_stop():
@@ -7409,33 +7925,27 @@ class TrainingExecution:
         return None
 
     def evaluate_outcome(self,result):
-        selection=result["selection"]
+        selection=result["selection"]; classification=result.get("no_change",{})
         if result["changed"]:
-            self.no_change_count=0
-            self.state_unlocked=True
-            self.state_since=time.monotonic()
-        else:
+            self.no_change_count=0; self.state_unlocked=True; self.state_since=time.monotonic()
+        elif classification.get("should_wait"):
+            self.no_change_count=0; self.state_unlocked=False
+            self.host.set_status("动作结果尚未出现："+str(classification.get("reason","waiting"))+"；保持输入锁定并等待")
+        elif classification.get("counts_as_failure"):
             self.no_change_count+=1
             if selection["repeat_policy"] in {"one_shot","hold_until_change"} and self.no_change_count>=2:
-                self.state_unlocked=False
-                self.host.set_status("动作后未出现预期画面变化，暂停并等待指导")
+                self.state_unlocked=False; self.host.set_status("动作确实无效，暂停并进入指导")
         outcome=result["outcome"]
-        if outcome["state"]=="success":
-            self.host.request_mode_stop("completed","检测到已定义的成功状态，训练完成")
-            return True
+        if outcome["state"]=="success": self.host.request_mode_stop("completed","检测到已定义的成功状态，训练完成"); return True
         if outcome["stop"]:
-            self.host.request_mode_stop("stopped","连续失败或无变化达到安全上限"+str(self.agent_policy.max_failures)+"次，已自动停机")
-            return True
+            self.host.request_mode_stop("stopped","连续失败或确认无效达到安全上限"+str(self.agent_policy.max_failures)+"次，已自动停机并请求指导"); return True
         if outcome["state"]=="failure" and self.profile.get("restart_action") and not self.host.should_stop():
             frame=result["after"] or self.frame_buffer.latest(None,0.35)
             try:
-                if self.execute_profile_restart(frame):
-                    self.host.set_status("检测到失败状态，已执行白名单内的重新开始动作")
+                if self.execute_profile_restart(frame): self.host.set_status("检测到失败状态，已执行白名单内的重新开始动作")
             except InputStopped as error:
-                self.host.request_mode_stop("stopped","失败状态回滚无法安全执行："+str(error))
-                return True
+                self.host.request_mode_stop("stopped","失败状态回滚无法安全执行："+str(error)); return True
         return False
-
     def capture_loop(self):
         with ModeSession(self.controller,self.target) as session:
             self.start_monitors(session)
@@ -7517,7 +8027,7 @@ class GuidanceWindow:
             choice_frame=ttk.Frame(frame)
             choice_frame.pack(fill="both",expand=True,pady=(10,0))
             answer_buttons=[]
-            state={"frame":None,"choices":[],"image":None,"locked":False,"recent_actions":deque(["<START>","<START>"],maxlen=4),"state_since":time.monotonic(),"waiting":False}
+            state={"frame":None,"choices":[],"candidates":[],"guidance_trigger":[],"image":None,"locked":False,"recent_actions":deque(["<START>","<START>"],maxlen=32),"state_since":time.monotonic(),"waiting":False}
             def schedule(delay,callback):
                 if app.ask_window is None:
                     return
@@ -7577,6 +8087,8 @@ class GuidanceWindow:
                 state["waiting"]=False
                 state["frame"]=packet["frame"]
                 state["choices"]=packet["choices"][:4]
+                state["candidates"]=list(packet.get("candidates",[]))
+                state["guidance_trigger"]=list(packet.get("guidance_trigger",[]))
                 render(packet)
                 for index,button in enumerate(answer_buttons):
                     if index<len(state["choices"]):
@@ -7611,7 +8123,7 @@ class GuidanceWindow:
                     app._fail_active_mode(error)
                     return
                 if result and result.get("saved") and result.get("action"):
-                    state["recent_actions"].append(action_signature(result["action"]))
+                    state["recent_actions"].append(semantic_action_signature(result["action"]))
                     state["state_since"]=time.monotonic()
                 counts=app.ask_counts or {}
                 app.status.set("指导中：已保存"+str(counts.get("saved",0))+"，重复未保存"+str(counts.get("duplicates",0))+"，跳过"+str(counts.get("skipped",0))+"；模型需要睡眠")
@@ -7620,7 +8132,7 @@ class GuidanceWindow:
                 if state["locked"] or app.ask_answer_queue is None:
                     return
                 set_locked(True)
-                app.ask_answer_queue.put({"kind":kind,"frame":state["frame"],"entry":entry or {},"recent_actions":list(state["recent_actions"]),"state_since":state["state_since"],"callback":finish_answer})
+                app.ask_answer_queue.put({"kind":kind,"frame":state["frame"],"entry":entry or {},"candidates":list(state["candidates"]),"guidance_trigger":list(state["guidance_trigger"]),"recent_actions":list(state["recent_actions"]),"state_since":state["state_since"],"callback":finish_answer})
             def choose(index):
                 if index<len(state["choices"]):
                     queue_answer("choose",state["choices"][index])
@@ -7677,24 +8189,25 @@ class TeachingController:
         for index,item in enumerate(samples):
             if index%64==0 and app.should_stop():
                 raise InputStopped("指导初始化已停止")
-            action=normalize_action(item.get("a"))
-            if feature_valid(item.get("f")) and action:
-                historical.append({"id":str(item.get("checksum",uuid.uuid4().hex)),"f":item["f"],"coarse":item.get("coarse") if isinstance(item.get("coarse"),(bytes,bytearray))
-                        and len(item.get("coarse"))==COARSE_LEN else coarse_feature(item["f"]),"a":action,"cluster_id":"history|"+action_signature(action),"canonical_action_signature":action_signature(action),
-                        "repeat_policy":str(item.get("repeat_policy","one_shot")),"source":"sample"})
+            action=normalize_action(item.get("a")); semantic=sample_semantic_action(item)
+            if feature_valid(item.get("f")) and action and semantic:
+                historical.append({"id":str(item.get("checksum",uuid.uuid4().hex)),"f":item["f"],"neural_f":item.get("neural_f"),"coarse":item.get("coarse") if isinstance(item.get("coarse"),(bytes,
+                    bytearray)) and len(item.get("coarse"))==COARSE_LEN else coarse_feature(item["f"]),"a":action,"semantic_action":semantic,"cluster_id":"history|"+semantic_action_signature(semantic),
+                    "canonical_action_signature":semantic_action_signature(semantic),"repeat_policy":str(item.get("repeat_policy","one_shot")),"source":"sample"})
         calibration=app.ensure_capture_calibration(target,"指导")
         session_id="teach|"+uuid.uuid4().hex
         app.store.begin_learning_session(game["id"],session_id)
         sources=[]
         for proto in prototypes:
-            sources.append({"a":normalize_action(proto["a"]),"repeat_policy":str(proto.get("repeat_policy","one_shot")),"cluster_id":str(proto.get("cluster_id",""))})
+            sources.append({"a":normalize_semantic_action(proto.get("semantic_action")) or semantic_action_from_coordinate(proto["a"]),"coordinate_action":normalize_action(proto["a"]),
+                "repeat_policy":str(proto.get("repeat_policy","one_shot")),"cluster_id":str(proto.get("cluster_id","")),"risk_class":str(proto.get("risk_class","safe"))})
         for item in historical:
-            sources.append({"a":item["a"],"repeat_policy":item.get("repeat_policy","one_shot"),"cluster_id":item["cluster_id"]})
-        sources.extend({"a":action,"repeat_policy":"one_shot","cluster_id":"basic|"+action_signature(action)} for action in app.basic_actions())
+            sources.append({"a":item["semantic_action"],"coordinate_action":item["a"],"repeat_policy":item.get("repeat_policy","one_shot"),"cluster_id":item["cluster_id"],"risk_class":str(item["semantic_action"].get("risk_class","safe"))})
+        sources.extend({"a":semantic_action_from_coordinate(action),"coordinate_action":action,"repeat_policy":"one_shot","cluster_id":"basic|"+semantic_action_signature(semantic_action_from_coordinate(action)),"risk_class":"safe"} for action in app.basic_actions())
         unique=[]
         seen=set()
         for entry in sources:
-            signature=action_signature(entry["a"])
+            signature=semantic_action_signature(entry["a"])
             if signature and signature not in seen:
                 seen.add(signature)
                 unique.append(entry)
@@ -7740,8 +8253,13 @@ class TeachingController:
                     entry=command.get("entry") or {}
                     recent_actions=command.get("recent_actions") or ["<START>","<START>"]
                     state_since=safe_float(command.get("state_since"),time.monotonic())
+                    candidates=list(command.get("candidates",[]))
+                    guidance_trigger=list(command.get("guidance_trigger",[]))
                     if kind=="skip":
                         app.ask_counts["skipped"]+=1
+                        rejection_context={"session_id":session_id,"capture_method":frame.get("method","unknown"),"task_phase":str(frame.get("task_phase","unknown")),"should_wait":True,"guidance_reason":guidance_trigger,"failure_recovery":False,"human_override":True}
+                        if feature_valid(frame.get("f")) and sample_rgb_valid(frame.get("rgb")) and candidates:
+                            app.store.append_rejection(game["id"],frame["f"],candidates,"teach_reason_wait_or_uncertain",frame.get("rgb"),frame.get("neural_f"),rejection_context)
                         result={"saved":False,"action":None}
                     else:
                         if not frame.get("usable_for_teaching"):
@@ -7753,12 +8271,20 @@ class TeachingController:
                         context.update({"episode_id":session_id,"step_id":safe_int(app.ask_counts.get("saved"),0),"action_delay":None,"human_override":True,"trajectory_schema_version":2})
                         if kind!="choose":
                             raise RuntimeError("指导主流程仅接受A/B/C/D或E跳过")
-                        action=normalize_action(entry.get("a"))
-                        if not action:
+                        semantic=normalize_semantic_action(entry.get("a")) or semantic_action_from_interaction(entry.get("coordinate_action") or entry.get("a"),frame.get("semantic_targets",[]))
+                        action=normalize_action(entry.get("coordinate_action")) or normalize_action(semantic)
+                        if not semantic or not action:
                             raise RuntimeError("指导动作无效")
-                        saved=app.store.append_sample(game["id"],frame["f"],action,"teach_live",context,frame.get("rgb"),frame.get("neural_f"),3.0)
+                        context.update(semantic_context_payload(frame,semantic))
+                        context.update({"semantic_action":semantic,"grounded_action":action,"task_phase":str(frame.get("task_phase","unknown")),"guidance_trigger":guidance_trigger,
+                            "user_target_identification":semantic.get("source") if semantic.get("action_type")=="drag" else semantic.get("target"),"should_wait":False,"failure_recovery":bool("failure" in "|".join(guidance_trigger))})
+                        saved=app.store.append_sample(game["id"],frame["f"],semantic,"teach_live",context,frame.get("rgb"),frame.get("neural_f"),3.0)
+                        denied=[item for item in candidates if semantic_action_signature(item.get("semantic_action") or item.get("a"))!=semantic_action_signature(semantic)]
+                        if sample_rgb_valid(frame.get("rgb")) and denied:
+                            app.store.append_rejection(game["id"],frame["f"],denied,"teach_hard_negative",frame.get("rgb"),frame.get("neural_f"),{"session_id":session_id,"capture_method":frame.get("method","unknown"),
+                                "chosen_action":semantic_action_signature(semantic),"task_phase":context.get("task_phase"),"should_wait":False,"failure_recovery":context.get("failure_recovery"),"human_override":True})
                         app.ask_counts["saved" if saved else "duplicates"]+=1
-                        result={"saved":saved,"action":action}
+                        result={"saved":saved,"action":semantic}
                     if callback:
                         app.ui(lambda callback=callback,result=result:callback(result,None))
                 except Exception as error:
@@ -7994,7 +8520,7 @@ class DataStore:
                 self.logger.write("DATABASE_LIGHT_CHECKPOINT_FAILED",error)
     def default_game_profile(self):
         return {"goal":"模仿已学习的鼠标操作并在不确定时停止","default_task_id":"default","allowed_families":["no_op","click|left","move","hover","scroll_v|1","scroll_v|-1"],"max_consecutive_failures":3,"exploration_enabled":False,
-            "restart_action":None,"success_states":[],"failure_states":[],"success_hash_distance":6,"failure_hash_distance":6,"terminal_confirm_frames":2,
+            "restart_action":None,"irreversible_target_whitelist":[],"success_states":[],"failure_states":[],"success_hash_distance":6,"failure_hash_distance":6,"terminal_confirm_frames":2,
             "success_reward":1.0,"failure_reward":-1.0,"step_penalty":-0.01,"progress_scale":0.5,"no_change_penalty":0.0,"repeat_penalty":0.0,"offline_discount":0.97,"awr_temperature":0.5,
             "policy_score_weights":dict(DEFAULT_POLICY_SCORE_WEIGHTS),"updated":0.0}
     def load_game_profile(self,gid):
@@ -8021,6 +8547,7 @@ class DataStore:
         value["default_task_id"]=normalized_identifier(value.get("default_task_id"),"default",96)
         value["allowed_families"]=sorted({str(item) for item in value.get("allowed_families",[]) if str(item)})
         value["success_states"]=sorted({str(item) for item in value.get("success_states",[]) if str(item)})
+        value["irreversible_target_whitelist"]=sorted({str(item) for item in value.get("irreversible_target_whitelist",[]) if str(item)})
         value["failure_states"]=sorted({str(item) for item in value.get("failure_states",[]) if str(item)})
         value["max_consecutive_failures"]=safe_int(value.get("max_consecutive_failures",3),3,1,20)
         value["success_hash_distance"]=safe_int(value.get("success_hash_distance",6),6,0,32)
@@ -8988,8 +9515,8 @@ class DataStore:
         rgb=sample_rgb_bytes(rgb_thumbnail)
         if rgb is None:
             raise RuntimeError("样本必须包含固定尺寸RGB图像")
-        signature=action_signature(clean)
         semantic=semantic or semantic_action_from_coordinate(clean)
+        signature=semantic_action_signature(semantic)
         context["semantic_action"]=semantic
         context["grounded_action"]=clean
         context["grounding"]=dict(grounding.get("grounding",{})) if isinstance(grounding,dict) else {"source":"coordinate","confidence":1.0,"fallback_used":False}
@@ -9034,9 +9561,9 @@ class DataStore:
         if enforce_quota and self._near_duplicate(game_id,fbytes,signature,duplicate_threshold,context):
             return False
         item={
-            "gid":game_id,"created":created_value,"kind":kind,"signature":signature,"action_family":action_family_key(clean),
+            "gid":game_id,"created":created_value,"kind":kind,"signature":signature,"action_family":semantic_action_family_key(semantic),
             "repeat_policy":repeat_policy,"feature":fbytes,"coarse":coarse,"neural":neural,"rgb":rgb,
-            "action_json":json.dumps(clean,ensure_ascii=False,separators=(",",":")),"source":str(source),"session_id":session_id,
+            "action_json":json.dumps({"semantic_action":semantic,"grounded_action":clean},ensure_ascii=False,separators=(",",":")),"source":str(source),"session_id":session_id,
             "capture_method":capture_method,"context":context,"context_json":json.dumps(context,ensure_ascii=False,separators=(",",":")),
             "weight":float(max(0.1,min(10.0,weight))),"fingerprint":fingerprint,"mark_review":bool(mark_review),
         }
@@ -9109,9 +9636,12 @@ class DataStore:
         neural=feature_bytes(neural_feature) if feature_valid(neural_feature) else None
         candidate_data=[]
         for item in candidates or []:
-            action=normalize_action(item.get("a") if isinstance(item,dict) else item)
+            raw=item.get("semantic_action",item.get("a")) if isinstance(item,dict) else item
+            semantic=normalize_semantic_action(raw)
+            action=normalize_action(item.get("a") if isinstance(item,dict) else item) or normalize_action(raw)
             if action:
-                candidate_data.append({"cluster_id":str(item.get("cluster_id",item.get("action_signature",""))) if isinstance(item,dict) else "","canonical_action_signature":action_signature(action),"a":action})
+                semantic=semantic or semantic_action_from_coordinate(action)
+                candidate_data.append({"cluster_id":str(item.get("cluster_id",item.get("action_signature",""))) if isinstance(item,dict) else "","canonical_action_signature":semantic_action_signature(semantic),"semantic_action":semantic,"a":action})
         context=dict(context) if isinstance(context,dict) else {}
         with self.lock,self.db:
             self.db.execute("INSERT INTO rejections(game_id,created,feature_algorithm_version,feature,coarse,neural_feature,rgb_thumbnail,preprocess_signature,thumbnail,candidates,source,session_id,capture_method) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -9121,7 +9651,8 @@ class DataStore:
             self.db.execute("UPDATE games SET needs_review=1 WHERE id=?",(gid,))
     def _decode_sample_row(self,row,gid):
         feature=upgrade_feature(bounded_decompress(row["feature"],FEATURE_LEN*2),row["feature_algorithm_version"])
-        action=normalize_action(json.loads(row["action"]))
+        action_payload=json.loads(row["action"])
+        action=normalize_action(action_payload)
         coarse=bytes(row["coarse"]) if row["coarse"] is not None and len(row["coarse"])==COARSE_LEN else coarse_feature(feature)
         if not feature_valid(feature) or len(coarse)!=COARSE_LEN or not action:
             raise ValueError("样本特征、粗特征或动作无效")
@@ -9133,9 +9664,11 @@ class DataStore:
         if not isinstance(context,dict):
             raise ValueError("样本上下文必须是字典")
         context.update({"session_id":row["session_id"],"capture_method":row["capture_method"],"repeat_policy":row["repeat_policy"]})
+        semantic=normalize_semantic_action(action_payload) or normalize_semantic_action(context.get("semantic_action")) or semantic_action_from_coordinate(action)
+        context["semantic_action"]=semantic
         return {"format_version":FORMAT_VERSION,"feature_width":FEATURE_W,"feature_height":FEATURE_H,"feature_algorithm_version":FEATURE_ALGORITHM_VERSION,
             "action_algorithm_version":ACTION_ALGORITHM_VERSION,"created":row["created"],"game_id":gid,"f":feature,"raw_f":feature,"neural_f":neural,"coarse":coarse,
-            "a":action,"source":row["source"],"session_id":row["session_id"],"capture_method":row["capture_method"],"repeat_policy":row["repeat_policy"],
+            "a":action,"semantic_action":semantic,"semantic_family":semantic_action_family_key(semantic),"source":row["source"],"session_id":row["session_id"],"capture_method":row["capture_method"],"repeat_policy":row["repeat_policy"],
             "context":context,"rgb":rgb,"thumbnail":rgb,"preprocess_signature":str(row["preprocess_signature"] or ""),"weight":row["weight"],"checksum":row["fingerprint"]}
     def iter_samples(self,gid,limit=MAX_SAMPLES,batch_size=256,stats=None):
         self.sample_write_barrier()
@@ -9281,53 +9814,80 @@ class DataStore:
         retained={str(value) for value in retained_checksums or [] if str(value)}
         before=self.experience_pool_snapshot(game_id)
         with self.lock:
-            pool_plan_query=(
-                "SELECT s.id,s.kind,s.action_signature,s.action_family,s.capture_method,"
-                "s.session_id,s.coarse,s.weight,s.created,s.fingerprint "
-                "FROM samples s JOIN learning_sessions ls "
-                "ON ls.game_id=s.game_id AND ls.session_id=s.session_id "
-                "WHERE s.game_id=? AND ls.status='valid' "
-                "ORDER BY s.created DESC,s.id DESC"
-            )
-            rows=self.db.execute(pool_plan_query,
-                (game_id,)).fetchall()
+            rows=self.db.execute(
+                "SELECT s.id,s.kind,s.action_signature,s.action_family,s.capture_method,s.session_id,s.coarse,s.weight,s.created,s.fingerprint,s.source,s.context,s.action "
+                "FROM samples s JOIN learning_sessions ls ON ls.game_id=s.game_id AND ls.session_id=s.session_id "
+                "WHERE s.game_id=? AND ls.status='valid' ORDER BY s.created DESC,s.id DESC",
+                (game_id,),
+            ).fetchall()
         family_count=len({str(row["action_family"]) for row in rows})
         session_count=len({str(row["session_id"]) for row in rows})
         target=max(1,safe_int(sample_retention_budget(family_count,session_count) if keep is None else keep,DEFAULT_SAMPLE_BUDGET,1,MAX_SAMPLES))
+        enriched=[]
+        family_counts=Counter(); task_counts=Counter(); risk_counts=Counter(); source_counts=Counter(); coarse_counts=Counter()
+        for row in rows:
+            try:
+                context=json.loads(str(row["context"] or "{}")); context=context if isinstance(context,dict) else {}
+            except (TypeError,ValueError,json.JSONDecodeError):
+                context={}
+            try:
+                action_payload=json.loads(str(row["action"] or "{}"))
+            except (TypeError,ValueError,json.JSONDecodeError):
+                action_payload={}
+            semantic=normalize_semantic_action(action_payload) or normalize_semantic_action(context.get("semantic_action")) or semantic_action_from_coordinate(action_payload)
+            family=semantic_action_family_key(semantic) or str(row["action_family"] or row["kind"])
+            task_id=normalized_identifier(context.get("task_id"),"default",96)
+            risk=str((semantic or {}).get("risk_class",context.get("risk_class","safe")))
+            source=str(row["source"] or "")
+            coarse_key=hashlib.blake2b(bytes(row["coarse"] or b""),digest_size=8).hexdigest()
+            item={"row":row,"context":context,"semantic":semantic,"family":family,"task_id":task_id,"risk":risk,"source":source,"coarse_key":coarse_key}
+            enriched.append(item); family_counts[family]+=1; task_counts[task_id]+=1; risk_counts[risk]+=1; source_counts[source]+=1; coarse_counts[coarse_key]+=1
+        for item in enriched:
+            row=item["row"]; context=item["context"]
+            rarity=1.0/max(1,family_counts[item["family"]])+1.0/max(1,task_counts[item["task_id"]])+1.0/max(1,risk_counts[item["risk"]])+1.0/max(1,coarse_counts[item["coarse_key"]])
+            supervision=2.5 if item["source"].startswith("teach") or context.get("human_override") else 0.0
+            difficulty=1.8 if context.get("guidance_trigger") or context.get("model_error") or context.get("hard_negative") else 0.0
+            trajectory=1.6 if context.get("terminal") in {"success","failure"} or context.get("failure_recovery") or context.get("pre_terminal") else 0.0
+            risk_bonus=2.0 if item["risk"]=="irreversible" else 0.8 if item["risk"]=="caution" else 0.0
+            idle_penalty=1.4 if str(row["kind"])=="no_op" and coarse_counts[item["coarse_key"]]>8 else 0.0
+            duplicate_penalty=min(2.0,max(0,coarse_counts[item["coarse_key"]]-1)*0.08)
+            item["information_score"]=safe_float(row["weight"],1.0)+40.0*rarity+supervision+difficulty+trajectory+risk_bonus-idle_penalty-duplicate_penalty
         if len(rows)<=target:
             plan={"game_id":game_id,"created":time.time(),"target":target,"before":before,"keep_ids":[safe_int(row["id"],0) for row in rows],"remove_ids":[],
-                "retained_checksums_hash":hashlib.sha256(canonical_bytes(sorted(retained))).hexdigest(),"deleted":0,"merged":0,"downweighted":0}
-            plan["plan_hash"]=hashlib.sha256(canonical_bytes(plan)).hexdigest()
-            return plan
-        protected={safe_int(row["id"],0) for row in rows if str(row["fingerprint"]) in retained}
-        dimensions=("session_id","capture_method","action_family")
-        for field in dimensions:
+                "retained_checksums_hash":hashlib.sha256(canonical_bytes(sorted(retained))).hexdigest(),"deleted":0,"merged":0,"downweighted":0,"information_budget":{"mode":"all_samples","families":len(family_counts),"tasks":len(task_counts),"risk_levels":dict(risk_counts)}}
+            plan["plan_hash"]=hashlib.sha256(canonical_bytes(plan)).hexdigest(); return plan
+        protected={safe_int(item["row"]["id"],0) for item in enriched if str(item["row"]["fingerprint"]) in retained}
+        for field in ("family","task_id","risk"):
             groups=defaultdict(list)
-            for row in rows:
-                groups[str(row[field])].append(row)
+            for item in enriched: groups[str(item[field])].append(item)
+            minimum=3 if field in {"family","task_id"} else 2
             for values in groups.values():
-                best=max(values,key=lambda row:(safe_float(row["weight"],1.0),safe_float(row["created"],0.0),safe_int(row["id"],0)))
-                protected.add(safe_int(best["id"],0))
-        dangerous=defaultdict(list)
-        for row in rows:
-            family=str(row["action_family"] or row["kind"])
-            if str(row["kind"]) in {"double_click","long_press","drag"} or family.endswith("|right") or family.endswith("|middle"):
-                dangerous[family].append(row)
-        for values in dangerous.values():
-            for row in sorted(values,key=lambda item:(safe_float(item["weight"],1.0),safe_float(item["created"],0.0)),reverse=True)[:min(2,len(values))]:
-                protected.add(safe_int(row["id"],0))
+                for item in sorted(values,key=lambda value:(value["information_score"],safe_float(value["row"]["created"],0.0)),reverse=True)[:minimum]:
+                    protected.add(safe_int(item["row"]["id"],0))
+        for field in ("session_id","capture_method"):
+            groups=defaultdict(list)
+            for item in enriched: groups[str(item["row"][field])].append(item)
+            for values in groups.values():
+                best=max(values,key=lambda value:(value["information_score"],safe_float(value["row"]["created"],0.0)))
+                protected.add(safe_int(best["row"]["id"],0))
+        special=[item for item in enriched if item["source"].startswith("teach") or item["context"].get("human_override") or item["context"].get("failure_recovery") or item["context"].get("terminal") in {"success","failure"}]
+        for item in sorted(special,key=lambda value:value["information_score"],reverse=True)[:max(32,target//4)]:
+            protected.add(safe_int(item["row"]["id"],0))
         target=max(target,len(protected))
-        chosen=[row for row in rows if safe_int(row["id"],0) in protected]
-        remaining=[row for row in rows if safe_int(row["id"],0) not in protected]
-        chosen.extend(self._select_diverse(remaining,max(0,target-len(chosen))))
-        keep_ids=sorted({safe_int(row["id"],0) for row in chosen})
-        remove_ids=sorted(safe_int(row["id"],0) for row in rows if safe_int(row["id"],0) not in set(keep_ids))
-        signatures=Counter(str(row["action_signature"]) for row in rows)
-        merged=sum(max(0,count-1) for count in signatures.values())
-        plan={"game_id":game_id,"created":time.time(),"target":target,"before":before,"keep_ids":keep_ids,"remove_ids":remove_ids,
-            "retained_checksums_hash":hashlib.sha256(canonical_bytes(sorted(retained))).hexdigest(),"deleted":len(remove_ids),"merged":min(len(remove_ids),merged),"downweighted":0}
-        plan["plan_hash"]=hashlib.sha256(canonical_bytes(plan)).hexdigest()
-        return plan
+        chosen=[item for item in enriched if safe_int(item["row"]["id"],0) in protected]
+        remaining=[item for item in enriched if safe_int(item["row"]["id"],0) not in protected]
+        remaining.sort(key=lambda value:(value["information_score"],safe_float(value["row"]["created"],0.0)),reverse=True)
+        shortlist=remaining[:max(target*3,target)]
+        chosen_rows=[item["row"] for item in chosen]
+        chosen_rows.extend(self._select_diverse([item["row"] for item in shortlist],max(0,target-len(chosen_rows))))
+        keep_ids=sorted({safe_int(row["id"],0) for row in chosen_rows})
+        keep_set=set(keep_ids); remove_ids=sorted(safe_int(row["id"],0) for row in rows if safe_int(row["id"],0) not in keep_set)
+        signatures=Counter(str(row["action_signature"]) for row in rows); merged=sum(max(0,count-1) for count in signatures.values())
+        plan={"game_id":game_id,"created":time.time(),"target":target,"before":before,"keep_ids":keep_ids,"remove_ids":remove_ids,"retained_checksums_hash":hashlib.sha256(canonical_bytes(sorted(retained))).hexdigest(),
+            "deleted":len(remove_ids),"merged":min(len(remove_ids),merged),"downweighted":sum(1 for item in enriched if str(item["row"]["kind"])=="no_op" and safe_int(item["row"]["id"],0) in remove_ids),
+            "information_budget":{"mode":"rarity+difficulty+human_override+terminal_trajectory+minimum_coverage","families":dict(family_counts),"tasks":dict(task_counts),"risk_levels":dict(risk_counts),"sources":dict(source_counts),
+            "protected":len(protected),"idle_frames_deprioritized":sum(1 for item in enriched if str(item["row"]["kind"])=="no_op" and coarse_counts[item["coarse_key"]]>8)}}
+        plan["plan_hash"]=hashlib.sha256(canonical_bytes(plan)).hexdigest(); return plan
     def apply_experience_pool_optimization(self,plan):
         value=dict(plan) if isinstance(plan,dict) else {}
         checksum=str(value.pop("plan_hash",""))
@@ -11814,8 +12374,10 @@ class AppModeMixin:
         for index,sample in enumerate(samples):
             if index%64==0 and self.should_stop():
                 raise InputStopped("睡眠已停止")
-            family=action_family_key(sample["a"])
+            semantic=sample_semantic_action(sample)
+            family=semantic_action_family_key(semantic)
             if family:
+                sample["semantic_action"]=semantic
                 families[family].append(sample)
         clusters=[]
         operations=0
@@ -11824,57 +12386,45 @@ class AppModeMixin:
                 raise InputStopped("睡眠已停止")
             local=[]
             for item in sorted(items,key=lambda value:str(value.get("checksum",""))):
-                if self.should_stop():
-                    raise InputStopped("睡眠已停止")
+                semantic=item["semantic_action"]
+                fallback_classes={str(semantic.get("source",{}).get("class","")),str(semantic.get("target",{}).get("class",""))}
+                coordinate_primary=bool(fallback_classes and fallback_classes.issubset(SEMANTIC_TARGET_FALLBACK_CLASSES))
                 if not local:
-                    local.append({"family":family,"members":[item],"medoid":item})
+                    local.append({"family":family,"members":[item],"medoid":item,"semantic_medoid":semantic,"coordinate_primary":coordinate_primary})
                     continue
                 distances=[]
                 for cluster in local:
                     operations+=1
                     if operations%32==0 and self.should_stop():
                         raise InputStopped("睡眠已停止")
-                    distances.append(action_geometry_distance(item["a"],cluster["medoid"]["a"]))
+                    semantic_gap=semantic_action_distance(semantic,cluster["semantic_medoid"])
+                    geometry_gap=action_geometry_distance(item["a"],cluster["medoid"]["a"]) if coordinate_primary and cluster["coordinate_primary"] else 0.0
+                    distances.append(semantic_gap+(geometry_gap if coordinate_primary else 0.0))
                 best_index=min(range(len(distances)),key=lambda index:distances[index])
-                if distances[best_index]<=action_cluster_limit(item["a"]):
+                limit=action_cluster_limit(item["a"]) if coordinate_primary else 0.36
+                if distances[best_index]<=limit:
                     cluster=local[best_index]
                     cluster["members"].append(item)
                     if len(cluster["members"])<=48 or len(cluster["members"])%8==0:
                         cluster["medoid"]=self._action_medoid(cluster["members"])
+                        cluster["semantic_medoid"]=sample_semantic_action(cluster["medoid"])
                 else:
-                    local.append({"family":family,"members":[item],"medoid":item})
-            changed=True
-            while changed and len(local)>1:
-                changed=False
-                for first in range(len(local)):
-                    if changed:
-                        break
-                    for second in range(first+1,len(local)):
-                        operations+=1
-                        if operations%16==0 and self.should_stop():
-                            raise InputStopped("睡眠已停止")
-                        limit=min(action_cluster_limit(local[first]["medoid"]["a"]),action_cluster_limit(local[second]["medoid"]["a"]))*0.82
-                        if action_geometry_distance(local[first]["medoid"]["a"],local[second]["medoid"]["a"])<=limit:
-                            local[first]["members"].extend(local[second]["members"])
-                            local[first]["medoid"]=self._action_medoid(local[first]["members"])
-                            local.pop(second)
-                            changed=True
-                            break
+                    local.append({"family":family,"members":[item],"medoid":item,"semantic_medoid":semantic,"coordinate_primary":coordinate_primary})
             for index,cluster in enumerate(local):
                 if self.should_stop():
                     raise InputStopped("睡眠已停止")
                 action=normalize_action(cluster["medoid"]["a"])
-                canonical=action_signature(action)
-                token=hashlib.sha256(canonical_bytes({"family":family,"action":action,"index":index})).hexdigest()[:20]
-                cluster_id="action|"+family+"|"+token
+                semantic=normalize_semantic_action(cluster["semantic_medoid"])
+                canonical=semantic_action_signature(semantic)
+                token=hashlib.sha256(canonical_bytes({"family":family,"semantic_action":semantic,"index":index})).hexdigest()[:20]
+                cluster_id="semantic_action|"+family+"|"+token
                 intervals=[]
                 learned_policies=[]
                 for member_index,member in enumerate(cluster["members"]):
                     if member_index%32==0 and self.should_stop():
                         raise InputStopped("睡眠已停止")
                     context=member.get("context",{}) if isinstance(member.get("context"),dict) else {}
-                    if context.get("previous_action")==canonical and not context.get("previous_action_changed_frame",
-                        True) and finite_number(context.get("seconds_since_previous")) and float(context.get("seconds_since_previous"))<=1.5:
+                    if context.get("previous_action")==canonical and not context.get("previous_action_changed_frame",True) and finite_number(context.get("seconds_since_previous")) and float(context.get("seconds_since_previous"))<=1.5:
                         intervals.append(max(0.05,float(context.get("seconds_since_previous"))))
                     policy=str(context.get("repeat_policy","one_shot"))
                     if policy in REPEAT_POLICIES:
@@ -11891,10 +12441,11 @@ class AppModeMixin:
                 else:
                     repeat_policy="one_shot"
                 max_rate=max(0.25,min(12.0,1.0/max(0.08,quantile(intervals,0.25)))) if intervals else ({"scroll_v":6.0,"scroll_h":5.0,"move":8.0,"hover":2.0,"no_op":4.0}.get(kind,3.0))
-                cluster.update({"id":cluster_id,"a":action,"canonical_action_signature":canonical,"repeat_policy":repeat_policy,"max_rate":max_rate})
+                cluster.update({"id":cluster_id,"a":action,"semantic_action":semantic,"canonical_action_signature":canonical,"semantic_family":family,"repeat_policy":repeat_policy,"max_rate":max_rate})
                 for member in cluster["members"]:
                     member["_action_cluster"]=cluster_id
                     member["_cluster_action"]=action
+                    member["_cluster_semantic_action"]=semantic
                     member["_action_support"]=len(cluster["members"])
                     member["_canonical_action_signature"]=canonical
                 clusters.append(cluster)
@@ -11916,7 +12467,7 @@ class AppModeMixin:
                 clusters.append([item])
             else:
                 medoids=[cluster[0] for cluster in clusters]
-                distances=[feature_distance(item["f"],medoid["f"]) for medoid in medoids]
+                distances=[sample_state_distance(item,medoid) for medoid in medoids]
                 best_index=min(range(len(distances)),key=lambda position:distances[position])
                 if distances[best_index]>visual_threshold and len(clusters)<max_clusters:
                     clusters.append([item])
@@ -11925,7 +12476,9 @@ class AppModeMixin:
             if index%15==0:
                 progress_callback(index,len(items),len(clusters))
         result=[]
-        canonical=action_signature(action)
+        semantic=sample_semantic_action(items[0]) if items else semantic_action_from_coordinate(action)
+        canonical=semantic_action_signature(semantic)
+        temporal_seed=safe_int(getattr(self,"sleep_seed",0),0,0,2**63-1)
         for cluster_index,cluster in enumerate(clusters):
             if self.should_stop():
                 raise InputStopped("睡眠已停止")
@@ -11933,32 +12486,41 @@ class AppModeMixin:
             distances=[]
             temporal_distances=[]
             temporal=temporal_from_context(medoid.get("context",{}))
+            embeddings=[]
+            medoid_embedding=temporal_state_embedding(temporal,temporal_seed)
             for item_index,item in enumerate(cluster):
                 if item_index%32==0 and self.should_stop():
                     raise InputStopped("睡眠已停止")
-                distances.append(feature_distance(item["f"],medoid["f"]))
-                temporal_distances.append(temporal_distance(item.get("context",{}),temporal))
+                distances.append(sample_state_distance(item,medoid))
+                embedding=temporal_state_embedding(item.get("context",{}),temporal_seed)
+                embeddings.append(embedding)
+                temporal_distances.append(temporal_embedding_distance(embedding,medoid_embedding))
             mean=statistics.fmean(distances) if distances else 0.0
             std=statistics.pstdev(distances) if len(distances)>1 else 0.0
             limit95=quantile(distances,0.95)
             limit99=quantile(distances,0.99)
             threshold_value=max(1.0,min(1800.0,max(limit99,mean+2.58*std)+max(8.0,std*0.35)))
-            temporal_threshold=max(0.12,min(0.42,quantile(temporal_distances,0.95)+0.05))
+            temporal_threshold=max(0.10,min(0.55,quantile(temporal_distances,0.95)+0.06))
             previous=Counter(str(item.get("context",{}).get("previous_action","")) for item in cluster)
             previous.pop("",None)
             prev=previous.most_common(1)[0][0] if previous else ""
             methods=sorted({str(item.get("capture_method") or item.get("context",{}).get("capture_method") or "unknown") for item in cluster})
-            result.append({"id":uuid.uuid4().hex,"cluster_id":cluster_id,"canonical_action_signature":canonical,"f":feature_bytes(medoid["f"]),
-                    "coarse":bytes(medoid.get("coarse")) if isinstance(medoid.get("coarse"),(bytes,bytearray)) and len(medoid.get("coarse"))==COARSE_LEN else coarse_feature(medoid["f"]),
-                    "a":normalize_action(action),"support":len(cluster),"action_support":int(action_support),"mean_distance":round(mean,6),"std_distance":round(std,6),"limit95":round(limit95,6),
-                    "limit99":round(limit99,6),"intra_threshold":round(threshold_value,6),"threshold":round(threshold_value,6),"temporal":temporal,"temporal_threshold":round(temporal_threshold,6),
-                    "capture_methods":methods,"previous_action":prev,"repeat_policy":repeat_policy if repeat_policy in REPEAT_POLICIES else "one_shot","max_rate":max(0.25,min(12.0,float(max_rate))),
-                    "ambiguous":False,"created_from_sample_checksum":medoid.get("checksum","")})
+            semantic=sample_semantic_action(medoid)
+            target_values=list(medoid.get("context",{}).get("semantic_targets",[])) if isinstance(medoid.get("context"),dict) else []
+            result.append({"id":uuid.uuid4().hex,"cluster_id":cluster_id,"canonical_action_signature":canonical,"semantic_action":semantic,"semantic_family":semantic_action_family_key(semantic),
+                "risk_class":str(semantic.get("risk_class","safe")),"f":feature_bytes(medoid["f"]),"neural_f":feature_bytes(medoid.get("neural_f")) if feature_valid(medoid.get("neural_f")) else None,
+                "coarse":bytes(medoid.get("coarse")) if isinstance(medoid.get("coarse"),(bytes,bytearray)) and len(medoid.get("coarse"))==COARSE_LEN else coarse_feature(medoid["f"]),"a":normalize_action(action),"support":len(cluster),
+                "action_support":int(action_support),"mean_distance":round(mean,6),"std_distance":round(std,6),"limit95":round(limit95,6),"limit99":round(limit99,6),"intra_threshold":round(threshold_value,6),
+                "threshold":round(threshold_value,6),"temporal":temporal,"temporal_embedding":medoid_embedding,"temporal_encoder_seed":temporal_seed,"temporal_threshold":round(temporal_threshold,6),"semantic_targets":target_values[:32],
+                "object_signature":object_semantic_signature(target_values),"capture_methods":methods,"previous_action":prev,"repeat_policy":repeat_policy if repeat_policy in REPEAT_POLICIES else "one_shot","max_rate":max(0.25,min(12.0,
+                float(max_rate))),"ambiguous":False,"created_from_sample_checksum":medoid.get("checksum","")})
         return result
-    def rank_action_candidates(self,feature,prototypes,last_action_signature="",full_limit=8,temporal_context=None,query_coarse=None):
+    def rank_action_candidates(self,feature,prototypes,last_action_signature="",full_limit=8,temporal_context=None,query_coarse=None,query_neural=None,semantic_targets=None,task_id=None):
         if not feature_valid(feature):
             return []
         query_temporal=temporal_from_context(temporal_context or {})
+        query_embedding=temporal_state_embedding(query_temporal,safe_int((getattr(self,"active_model_runtime",{}) or {}).get("temporal_encoder_seed",0),0,0,2**63-1))
+        query_objects=list(semantic_targets) if isinstance(semantic_targets,(list,tuple)) else None
         if not isinstance(query_coarse,(bytes,bytearray)) or len(query_coarse)!=COARSE_LEN:
             query_coarse=coarse_feature(feature)
         query_coarse=bytes(query_coarse)
@@ -11966,12 +12528,14 @@ class AppModeMixin:
         exact_limit=max(12,min(VersionedThresholdConfig.candidate_full_limit,int(full_limit) if int(full_limit)>0 else VersionedThresholdConfig.candidate_full_limit))
         runtime_model=getattr(self,"active_model_runtime",None)
         active_runtime=bool(isinstance(runtime_model,dict) and runtime_model.get("prototypes") is prototypes)
-        model_token=str(runtime_model.get("runtime_token","")) if active_runtime else prototype_collection_checksum(prototypes)
+        runtime_model=runtime_model if active_runtime else {}
+        model_token=str(runtime_model.get("runtime_token","")) or prototype_collection_checksum(prototypes)
         if len(model_token)!=64:
             model_token=prototype_collection_checksum(prototypes)
         feature_digest=hashlib.blake2b(feature_bytes(feature),digest_size=16).digest()
+        neural_digest=hashlib.blake2b(feature_bytes(query_neural),digest_size=8).digest() if feature_valid(query_neural) else b""
         coarse_digest=hashlib.blake2b(query_coarse,digest_size=8).digest()
-        visual_cache_key=("visual-v4",model_token,feature_digest,coarse_digest,backend,exact_limit)
+        visual_cache_key=("visual-v5",model_token,feature_digest,neural_digest,coarse_digest,backend,exact_limit)
         visual_matches=self.candidate_cache.get(visual_cache_key)
         if visual_matches is None:
             worker=getattr(self,"ai_worker",None)
@@ -11982,12 +12546,17 @@ class AppModeMixin:
                 visual_matches=candidate_visual_matches(runtime_index,feature,query_coarse,backend,exact_limit)
             visual_matches=tuple((safe_int(item.get("index"),-1),safe_float(item.get("exact_score"),float("inf"))) for item in visual_matches if isinstance(item,dict))
             self.candidate_cache[visual_cache_key]=visual_matches
-        sequence_model=runtime_model.get("sequence_model",{}) if active_runtime else {}
-        experience_model=runtime_model.get("experience_model",{}) if active_runtime else {}
-        policy_weights=normalized_policy_score_weights(runtime_model.get("policy_score_weights",{})) if active_runtime else normalized_policy_score_weights()
+        sequence_model=runtime_model.get("sequence_model",{})
+        experience_model=runtime_model.get("experience_model",{})
+        behavior_model=runtime_model.get("behavior_model",{})
+        value_model=runtime_model.get("value_model",{})
+        risk_model=runtime_model.get("risk_model",{})
+        trained_decision=bool(isinstance(behavior_model,dict) and behavior_model.get("state_action") and isinstance(value_model,dict) and value_model.get("state_action") and isinstance(risk_model,dict) and risk_model.get("state_action"))
+        policy_weights=normalized_policy_score_weights(runtime_model.get("policy_score_weights",{}))
         recent_actions=query_temporal.get("recent_actions",[last_action_signature])
+        active_task_id=normalized_identifier(task_id or runtime_model.get("default_task_id"),"default",96)
         grouped=defaultdict(list)
-        for position,(index,raw) in enumerate(visual_matches):
+        for position,(index,raw_prefilter) in enumerate(visual_matches):
             if position%8==0 and getattr(self,"stop_event",None) is not None and self.should_stop():
                 return []
             if index<0 or index>=len(prototypes):
@@ -11998,111 +12567,168 @@ class AppModeMixin:
             methods=frozenset(str(value) for value in proto.get("capture_methods",frozenset()))
             if methods and backend not in methods:
                 continue
+            raw=dual_feature_distance(feature,proto.get("f"),query_neural,proto.get("neural_f"))
+            object_distance=object_set_distance(query_objects,proto.get("semantic_targets",[])) if query_objects is not None else 0.0
             expected=str(proto.get("previous_action",""))
             previous_penalty=min(120.0,raw*0.08+18.0) if expected and last_action_signature and expected!=last_action_signature else 0.0
-            proto_temporal=proto.get("temporal_cached") or temporal_from_context(proto.get("temporal",{}))
-            tdistance=temporal_distance(query_temporal,proto_temporal)
-            temporal_penalty=tdistance*max(40.0,float(proto.get("threshold",100.0))*0.35)
+            proto_embedding=proto.get("temporal_embedding")
+            if isinstance(proto_embedding,(list,tuple)) and proto_embedding:
+                tdistance=temporal_embedding_distance(query_embedding,proto_embedding)
+            else:
+                tdistance=temporal_distance(query_temporal,proto.get("temporal_cached") or temporal_from_context(proto.get("temporal",{})))
+            temporal_penalty=tdistance*max(45.0,float(proto.get("threshold",100.0))*0.30)
+            object_penalty=object_distance*max(25.0,float(proto.get("threshold",100.0))*0.22)
             cluster_id=str(proto.get("cluster_id",proto.get("action_signature","")))
-            active_task_id=normalized_identifier(runtime_model.get("default_task_id"),"default",96) if active_runtime else "default"
             sequence_penalty=calculate_sequence_penalty(recent_actions,cluster_id,sequence_model,active_task_id)
             if cluster_id:
-                grouped[cluster_id].append((raw+previous_penalty+temporal_penalty+sequence_penalty,raw,tdistance,proto))
-        total_support=sum(max(1,max(int(item[3].get("action_support",item[3].get("support",0))) for item in items)) for items in grouped.values())
+                grouped[cluster_id].append((raw+previous_penalty+temporal_penalty+object_penalty+sequence_penalty,raw,tdistance,object_distance,proto,raw_prefilter))
+        total_support=sum(max(1,max(int(item[4].get("action_support",item[4].get("support",0))) for item in items)) for items in grouped.values())
         query_state=visual_perceptual_hash(feature)
         result=[]
         for cluster_id,items in grouped.items():
             items.sort(key=lambda item:item[0])
-            visual_best,visual_distance_value,best_temporal,best_proto=items[0]
-            action=normalize_action(best_proto.get("a"))
-            if action is None:
+            visual_best,visual_distance_value,best_temporal,best_object,best_proto,_=items[0]
+            coordinate=normalize_action(best_proto.get("a"))
+            semantic=normalize_semantic_action(best_proto.get("semantic_action")) or semantic_action_from_coordinate(coordinate)
+            if coordinate is None or semantic is None:
                 continue
             visual_score=visual_best if len(items)==1 else 0.88*visual_best+0.12*items[1][0]
-            support=max(int(item[3].get("action_support",item[3].get("support",0))) for item in items)
-            row=policy_experience_row(experience_model,query_state,cluster_id,active_task_id)
-            awr_weight=safe_float(row.get("awr_weight",1.0),1.0,0.01,100.0)
-            bc_probability=max(0.0,min(1.0,support/max(1,total_support)*math.sqrt(awr_weight)))
-            q_value=safe_float(row.get("q_value",row.get("mean_reward",0.0)),0.0)
-            q_normalized=math.tanh(q_value/2.0)
-            success_probability=safe_float(row.get("success_probability",0.0),0.0,0.0,1.0)
-            risk_probability=safe_float(row.get("risk_probability",0.0),0.0,0.0,1.0)
-            learned_uncertainty=safe_float(row.get("uncertainty",1.0 if not row else 0.5),0.5,0.0,1.0)
+            support=max(int(item[4].get("action_support",item[4].get("support",0))) for item in items)
+            legacy=policy_experience_row(experience_model,query_state,cluster_id,active_task_id)
+            behavior=policy_experience_row(behavior_model,query_state,cluster_id,active_task_id) if behavior_model else legacy
+            value=policy_experience_row(value_model,query_state,cluster_id,active_task_id) if value_model else legacy
+            risk=policy_experience_row(risk_model,query_state,cluster_id,active_task_id) if risk_model else legacy
+            awr_weight=safe_float(behavior.get("awr_weight",legacy.get("awr_weight",1.0)),1.0,0.01,100.0)
+            empirical=support/max(1,total_support)
+            bc_probability=safe_float(behavior.get("probability",behavior.get("bc_probability",empirical*math.sqrt(awr_weight))),empirical,0.0,1.0)
+            q_value=safe_float(value.get("expected_return",value.get("q_value",value.get("mean_reward",legacy.get("q_value",0.0)))),0.0)
+            success_probability=safe_float(value.get("success_probability",legacy.get("success_probability",0.0)),0.0,0.0,1.0)
+            failure_probability=safe_float(value.get("failure_probability",risk.get("failure_probability",legacy.get("failure_probability",0.0))),0.0,0.0,1.0)
+            risk_probability=safe_float(risk.get("risk_probability",risk.get("failure_probability",legacy.get("risk_probability",failure_probability))),failure_probability,0.0,1.0)
+            learned_uncertainty=safe_float(risk.get("uncertainty",value.get("uncertainty",legacy.get("uncertainty",1.0 if not legacy else 0.5))),0.5,0.0,1.0)
             threshold=max(1.0,safe_float(best_proto.get("threshold",100.0),100.0))
             distance_ood=max(0.0,min(1.0,visual_distance_value/threshold))
             temporal_ood=max(0.0,min(1.0,best_temporal/max(0.05,safe_float(best_proto.get("temporal_threshold",0.25),0.25))))
+            object_ood=max(0.0,min(1.0,best_object))
             support_ood=1.0/math.sqrt(max(1,support))
-            ood_uncertainty=max(0.0,min(1.0,0.45*distance_ood+0.25*temporal_ood+0.15*support_ood+0.15*learned_uncertainty))
-            policy_adjustment=(-policy_weights["bc"]*bc_probability-policy_weights["q"]*q_normalized-policy_weights["success"]*success_probability
-                +policy_weights["risk"]*risk_probability+policy_weights["ood"]*ood_uncertainty)
-            final_cost=max(0.0,visual_score+policy_adjustment)
-            result.append({"cluster_id":cluster_id,"canonical_action_signature":str(best_proto.get("canonical_action_signature") or action_signature(action)),
-                "score":final_cost,"visual_score":visual_score,"best_score":visual_best,"distance":visual_distance_value,"temporal_distance":best_temporal,
-                "proto":best_proto,"a":action,"support":support,"prototype_votes":len(items),"bc_probability":bc_probability,"q_value":q_value,
-                "success_probability":success_probability,"risk_probability":risk_probability,"ood_uncertainty":ood_uncertainty,"policy_adjustment":policy_adjustment,
-                "policy_weights":policy_weights,"experience_count":safe_int(row.get("count"),0),"advantage":safe_float(row.get("advantage",0.0),0.0),"awr_weight":awr_weight})
+            ood_uncertainty=max(0.0,min(1.0,0.38*distance_ood+0.24*temporal_ood+0.16*object_ood+0.10*support_ood+0.12*learned_uncertainty))
+            q_normalized=math.tanh(q_value/2.0)
+            if trained_decision:
+                learned_utility=1.35*math.log(max(1e-6,bc_probability))+1.05*q_normalized+0.85*success_probability-1.5*risk_probability-1.1*ood_uncertainty
+                policy_adjustment=-45.0*learned_utility
+                decision_mode="calibrated_models"
+            else:
+                policy_adjustment=(-policy_weights["bc"]*bc_probability-policy_weights["q"]*q_normalized-policy_weights["success"]*success_probability+policy_weights["risk"]*risk_probability+policy_weights["ood"]*ood_uncertainty)
+                decision_mode="cold_start_fixed_weights"
+            grounding=ground_semantic_action(semantic,query_objects,True) if query_objects is not None else None
+            grounding_meta=grounding.get("grounding",{}) if isinstance(grounding,dict) else {}
+            semantic_available=bool(grounding and grounding.get("grounded_action")) if query_objects is not None else True
+            semantic_ambiguous=bool(grounding_meta.get("ambiguous",False))
+            final_cost=visual_score+policy_adjustment
+            result.append({"cluster_id":cluster_id,"canonical_action_signature":str(best_proto.get("canonical_action_signature") or semantic_action_signature(semantic)),"score":final_cost,"visual_score":visual_score,
+                "best_score":visual_best,"distance":visual_distance_value,"temporal_distance":best_temporal,"object_distance":best_object,"proto":best_proto,"a":coordinate,"semantic_action":semantic,"grounding":grounding,
+                "semantic_available":semantic_available,"semantic_ambiguous":semantic_ambiguous,"risk_class":str(semantic.get("risk_class",best_proto.get("risk_class","safe"))),"support":support,"prototype_votes":len(items),
+                "bc_probability":bc_probability,"q_value":q_value,"success_probability":success_probability,"failure_probability":failure_probability,"risk_probability":risk_probability,"ood_uncertainty":ood_uncertainty,
+                "policy_adjustment":policy_adjustment,"policy_weights":policy_weights if not trained_decision else {},"decision_mode":decision_mode,"experience_count":safe_int(legacy.get("count",behavior.get("count",0)),0),
+                "advantage":safe_float(behavior.get("advantage",legacy.get("advantage",0.0)),0.0),"awr_weight":awr_weight})
         result.sort(key=lambda item:(item["score"],item["visual_score"],-item["support"]))
+        if result:
+            behavior_best=max(result,key=lambda item:(item["bc_probability"],-item["score"]))["cluster_id"]
+            value_best=max(result,key=lambda item:(item["success_probability"]-item["risk_probability"]+0.25*math.tanh(item["q_value"]),-item["score"]))["cluster_id"]
+            for item in result:
+                item["behavior_best_cluster"]=behavior_best
+                item["value_best_cluster"]=value_best
+                item["policy_value_disagreement"]=behavior_best!=value_best
         return result
     def evaluate_action_candidates(self,ranked):
         if not ranked:
-            return {"accepted":False,"confidence":0.0,"reason":"没有候选或停止请求"}
+            return {"accepted":False,"confidence":0.0,"reason":"没有候选或停止请求","guidance_trigger":["no_candidate"]}
         best=ranked[0]; second=ranked[1] if len(ranked)>1 else None; proto=best["proto"]
-        strict_multiplier,min_support,margin_ratio=tuple(proto.get("strictness") or self.action_strictness(best["a"]))
+        strict_multiplier,min_support,margin_ratio=tuple(proto.get("strictness") or self.action_strictness(best.get("semantic_action") or best["a"]))
+        runtime_model=getattr(self,"active_model_runtime",{}) if isinstance(getattr(self,"active_model_runtime",{}),dict) else {}
+        calibration=runtime_model.get("decision_calibration",{}) if isinstance(runtime_model.get("decision_calibration"),dict) else {}
         threshold=float(proto["threshold"])/strict_multiplier
         second_score=second["score"] if second else float("inf")
         margin=second_score-best["score"]
-        required_gap=max(6.0,min(40.0,float(proto.get("minimum_second_candidate_gap",16.0))*0.5),abs(best["score"])*0.08)
+        required_gap=max(safe_float(calibration.get("minimum_score_gap",6.0),6.0,2.0,80.0),min(40.0,float(proto.get("minimum_second_candidate_gap",16.0))*0.5),abs(best["score"])*safe_float(calibration.get("margin_ratio",0.08),0.08,0.02,0.5))
         margin_ok=math.isinf(second_score) or margin>required_gap
+        probability_gap=best.get("bc_probability",0.0)-(second.get("bc_probability",0.0) if second else 0.0)
         support=int(best.get("support",0)); rejected_distance=proto.get("nearest_rejected_distance")
         rejection_ok=rejected_distance is None or best["distance"]<float(rejected_distance)*0.65
         temporal_ok=float(best.get("temporal_distance",1.0))<=float(proto.get("temporal_threshold",0.0))
-        query_backend=str((proto.get("temporal_cached") or temporal_from_context(proto.get("temporal",{}))).get("capture_method","unknown"))
-        ambiguous=bool(proto.get("ambiguous",False)); authorized=bool(proto.get("authorized",True))
-        risk_ok=float(best.get("risk_probability",0.0))<0.55
-        ood_ok=float(best.get("ood_uncertainty",1.0))<0.82
-        accepted=authorized and not ambiguous and best["distance"]<threshold and margin_ok and support>=min_support and rejection_ok and temporal_ok and risk_ok and ood_ok
+        ambiguous=bool(proto.get("ambiguous",False) or best.get("semantic_ambiguous",False)); authorized=bool(proto.get("authorized",True))
+        risk_limit=safe_float(calibration.get("maximum_risk_probability",0.45),0.45,0.05,0.95)
+        ood_limit=safe_float(calibration.get("maximum_ood_uncertainty",0.72),0.72,0.1,0.98)
+        minimum_behavior=safe_float(calibration.get("minimum_behavior_probability",0.04),0.04,0.0,0.9)
+        risk_ok=float(best.get("risk_probability",0.0))<risk_limit
+        ood_ok=float(best.get("ood_uncertainty",1.0))<ood_limit
+        behavior_ok=float(best.get("bc_probability",0.0))>=minimum_behavior or best.get("decision_mode")=="cold_start_fixed_weights"
+        semantic_ok=bool(best.get("semantic_available",True))
+        disagreement=bool(best.get("policy_value_disagreement",False))
+        close_actions=bool(second and abs(probability_gap)<safe_float(calibration.get("minimum_behavior_gap",0.08),0.08,0.01,0.5))
+        triggers=[]
+        if not authorized: triggers.append("unauthorized_cluster")
+        if ambiguous: triggers.append("ambiguous_target_or_state")
+        if not semantic_ok: triggers.append("semantic_target_missing")
+        if not risk_ok: triggers.append("risk_model_reject")
+        if not ood_ok: triggers.append("out_of_distribution")
+        if not temporal_ok: triggers.append("temporal_mismatch")
+        if disagreement: triggers.append("policy_value_disagreement")
+        if close_actions: triggers.append("multiple_close_actions")
+        if not margin_ok: triggers.append("insufficient_margin")
+        if support<min_support: triggers.append("insufficient_support")
+        if not rejection_ok: triggers.append("near_rejected_sample")
+        if not behavior_ok: triggers.append("behavior_probability_low")
+        accepted=not triggers and best["distance"]<threshold
+        if best["distance"]>=threshold:
+            triggers.append("visual_distance_high")
+            accepted=False
         visual_confidence=max(0.0,min(1.0,1.0-best["distance"]/max(1.0,threshold)))*(1.0-min(1.0,float(best.get("temporal_distance",1.0))))
         policy_confidence=max(0.0,min(1.0,0.35*best.get("bc_probability",0.0)+0.25*best.get("success_probability",0.0)+0.2*(1-best.get("risk_probability",0.0))+0.2*(1-best.get("ood_uncertainty",1.0))))
-        confidence=0.65*visual_confidence+0.35*policy_confidence
-        if not authorized: reason="动作簇未通过独立session验证，拒绝执行"
-        elif ambiguous: reason="视觉与真实时序状态仍对应不同动作，必须指导"
-        elif not risk_ok: reason="离线轨迹显示该动作失败风险过高，等待指导"
-        elif not ood_ok: reason="当前状态超出训练分布或不确定性过高，等待指导"
-        elif not temporal_ok: reason="最近帧、最近动作、状态时长或鼠标位置不匹配"
-        else: reason="未达到视觉阈值、策略差距或支持数要求"
-        return {"accepted":accepted,"best":best,"second":second,"threshold":threshold,"margin":margin,"required_gap":required_gap,"support":support,"min_support":min_support,
-            "confidence":confidence,"visual_confidence":visual_confidence,"policy_confidence":policy_confidence,"margin_ok":margin_ok,"rejection_ok":rejection_ok,"temporal_ok":temporal_ok,
-            "risk_ok":risk_ok,"ood_ok":ood_ok,"ambiguous":ambiguous,"authorized":authorized,"reason":reason,"nearest_rejected_distance":rejected_distance,"query_backend":query_backend}
+        confidence=0.55*visual_confidence+0.45*policy_confidence
+        reasons={"unauthorized_cluster":"动作簇未通过独立验证","ambiguous_target_or_state":"目标或时序状态存在歧义","semantic_target_missing":"执行前未找到唯一语义目标","risk_model_reject":"独立风险模型拒绝该动作","out_of_distribution":"当前状态超出训练分布",
+            "temporal_mismatch":"最近帧、动作或结果时序不匹配","policy_value_disagreement":"行为策略与价值模型意见不一致",
+            "multiple_close_actions":"多个动作概率接近","insufficient_margin":"候选差距不足","insufficient_support":"样本覆盖不足",
+            "near_rejected_sample":"靠近被否决困难样本","behavior_probability_low":"行为策略概率过低","visual_distance_high":"双通道视觉距离超限"}
+        reason="允许执行" if accepted else "；".join(reasons.get(value,value) for value in triggers[:3])+"，进入指导"
+        return {"accepted":accepted,"best":best,"second":second,"threshold":threshold,"margin":margin,"required_gap":required_gap,"support":support,"min_support":min_support,"confidence":confidence,
+            "visual_confidence":visual_confidence,"policy_confidence":policy_confidence,"margin_ok":margin_ok,"rejection_ok":rejection_ok,"temporal_ok":temporal_ok,"risk_ok":risk_ok,"ood_ok":ood_ok,"behavior_ok":behavior_ok,
+            "semantic_ok":semantic_ok,"ambiguous":ambiguous,"authorized":authorized,"policy_value_disagreement":disagreement,"close_actions":close_actions,"guidance_trigger":triggers,"reason":reason,
+            "nearest_rejected_distance":rejected_distance,"decision_mode":best.get("decision_mode","cold_start_fixed_weights")}
     def validate_model_binding(self,model,target):
         if not isinstance(model,dict):
             raise RuntimeError("模型不存在或格式无效")
         binding=model.get("model_binding")
         if not isinstance(binding,dict):
-            raise RuntimeError("模型缺少不可变窗口绑定快照，请重新睡眠")
+            raise RuntimeError("模型缺少窗口绑定快照，请重新睡眠")
+        identity=binding.get("safety_identity") if isinstance(binding.get("safety_identity"),dict) else binding
+        adaptation=binding.get("visual_adaptation") if isinstance(binding.get("visual_adaptation"),dict) else binding
         current=self.api.target_identity(target)
         target.update(current)
         rect=self.api.validate_target(target,False)
-        errors=[]
+        errors=[]; recalibration=[]
         path=os.path.normcase(str(current.get("process_path","")))
-        stored_paths={os.path.normcase(str(value)) for value in binding.get("process_paths",[])}
+        stored_paths={os.path.normcase(str(value)) for value in identity.get("process_paths",[])}
         if path not in stored_paths:
             errors.append("可执行文件路径改变")
-        if str(current.get("class","")) not in {str(value) for value in binding.get("window_classes",[])}:
+        if str(current.get("class","")) not in {str(value) for value in identity.get("window_classes",[])}:
             errors.append("窗口类改变")
+        if identity.get("window_rule_version",binding.get("window_rule_version"))!=WINDOW_RULE_VERSION:
+            errors.append("窗口安全规则版本改变")
         norm=[round(safe_float(value,0.0),6) for value in current.get("content_rect_norm",[])[:4]]
-        norms=[[round(safe_float(value,0.0),6) for value in item[:4]] for item in binding.get("content_rect_norms",[]) if isinstance(item,(list,tuple)) and len(item)==4]
-        if not norms or not any(max(abs(norm[index]-item[index]) for index in range(4))<=0.0005 for item in norms):
-            errors.append("内容区域定义改变")
+        norms=[[round(safe_float(value,0.0),6) for value in item[:4]] for item in adaptation.get("content_rect_norms",[]) if isinstance(item,(list,tuple)) and len(item)==4]
+        if norms and not any(max(abs(norm[index]-item[index]) for index in range(4))<=0.0005 for item in norms):
+            recalibration.append("内容区域位置变化")
         aspect=rect[2]/max(1,rect[3])
-        low=safe_float(binding.get("content_aspect_min",0.0),0.0)
-        high=safe_float(binding.get("content_aspect_max",0.0),0.0)
-        tolerance=VersionedThresholdConfig.content_aspect_tolerance
-        if low<=0 or high<=0 or aspect<low*(1.0-tolerance) or aspect>high*(1.0+tolerance):
-            errors.append("内容区域宽高比改变")
+        low=safe_float(adaptation.get("content_aspect_min",0.0),0.0); high=safe_float(adaptation.get("content_aspect_max",0.0),0.0)
+        tolerance=max(VersionedThresholdConfig.content_aspect_tolerance,0.04)
+        if low>0 and high>0 and (aspect<low*(1.0-tolerance) or aspect>high*(1.0+tolerance)):
+            errors.append("内容区域非等比例变化")
         dpi=safe_int(current.get("dpi",current.get("selected_dpi",0)),0)
-        if dpi<safe_int(binding.get("dpi_min",0),0) or dpi>safe_int(binding.get("dpi_max",0),0):
-            errors.append("DPI超出训练范围")
-        if binding.get("window_rule_version")!=WINDOW_RULE_VERSION or binding.get("capture_backend_version")!=CAPTURE_BACKEND_VERSION:
-            errors.append("窗口规则或采集后端版本改变")
+        if dpi and (dpi<safe_int(adaptation.get("dpi_min",dpi),dpi) or dpi>safe_int(adaptation.get("dpi_max",dpi),dpi)):
+            recalibration.append("DPI变化")
+        if adaptation.get("capture_backend_version",binding.get("capture_backend_version"))!=CAPTURE_BACKEND_VERSION:
+            errors.append("采集后端协议版本改变")
         profile=self.store.load_game_profile(self.require_game()["id"])
         if str(model.get("safety_profile_checksum",""))!=profile_checksum(profile):
             errors.append("游戏级安全配置改变")
@@ -12112,7 +12738,10 @@ class AppModeMixin:
             if str(model.get("task_definitions_checksum",""))!=task_definitions_checksum(current_tasks):
                 errors.append("任务定义或任务奖励改变")
         if errors:
-            raise RuntimeError("模型与当前窗口/任务绑定不一致："+"、".join(errors)+"；请重新学习或睡眠")
+            raise RuntimeError("模型安全身份或任务绑定不一致："+"、".join(errors)+"；已停机")
+        target["visual_recalibration_required"]=bool(recalibration)
+        target["visual_recalibration_reasons"]=recalibration
+        target["visual_layout_signature"]={"content_rect_norm":norm,"aspect":round(aspect,8),"dpi":dpi,"rect":[int(value) for value in rect]}
         self.require_ai_runtime()
         manifest=self.vision_runtime.manifest()
         stored=model.get("vision_model_manifest") if isinstance(model,dict) else None
@@ -12120,12 +12749,11 @@ class AppModeMixin:
             raise RuntimeError("离线AI视觉模型版本、权重或SHA-256已变化，请重新睡眠")
         if str(model.get("preprocess_hash",""))!=VISION_PREPROCESS_HASH or str(stored.get("preprocess_hash",""))!=VISION_PREPROCESS_HASH:
             raise RuntimeError("RGB预处理签名变化，请重新睡眠")
-        current_runtime=manifest.get("runtime_fingerprint",{})
-        stored_runtime=stored.get("runtime_fingerprint",{})
+        current_runtime=manifest.get("runtime_fingerprint",{}); stored_runtime=stored.get("runtime_fingerprint",{})
         if not isinstance(stored_runtime,dict) or str(stored_runtime.get("checksum",""))!=str(current_runtime.get("checksum","")):
             raise RuntimeError("运行库版本变化，明确拒绝旧模型，请重新睡眠")
-        current_ocr=hashlib.sha256(canonical_bytes([{key:item.get(key) for key in ("id","region_norm","region_type","number_format","goal_relation","target_min","target_max","special_value",
-                    "special_meaning","reset_meaning","checksum")} for item in self.store.list_ocr_regions(self.require_game()["id"],True)])).hexdigest()
+        current_ocr=hashlib.sha256(canonical_bytes([{key:item.get(key) for key in ("id","region_norm","region_type","number_format","goal_relation","target_min","target_max","special_value","special_meaning",
+            "reset_meaning","checksum")} for item in self.store.list_ocr_regions(self.require_game()["id"],True)])).hexdigest()
         if str(model.get("ocr_regions_checksum",""))!=current_ocr or safe_int(model.get("ocr_semantic_version",0),0)!=OCR_SEMANTIC_VERSION:
             raise RuntimeError("OCR区域或数字语义已变化，请重新睡眠")
         return True
@@ -12168,6 +12796,22 @@ class AppModeMixin:
     def review_worker(self):
         return self.review_controller.run()
     def action_text(self,action):
+        semantic=normalize_semantic_action(action)
+        if semantic is not None:
+            kind=semantic["action_type"]
+            if kind=="no_op":
+                return "等待"+str(semantic.get("parameters",{}).get("duration",0.3))+"秒"
+            names={"click":"点击","double_click":"双击","long_press":"长按","drag":"拖拽","scroll_v":"垂直滚动","scroll_h":"水平滚动","move":"移动到","hover":"悬停于"}
+            def label(target):
+                item=target if isinstance(target,dict) else {}
+                text=str(item.get("text","")).strip()
+                base=str(item.get("class","") or "目标")
+                instance=str(item.get("instance","")).strip()
+                return base+("["+text+"]" if text else "")+("/"+instance if instance else "")
+            risk="（不可逆）" if semantic.get("risk_class")=="irreversible" else "（谨慎）" if semantic.get("risk_class")=="caution" else ""
+            if kind=="drag":
+                return names.get(kind,kind)+" "+label(semantic.get("source"))+" → "+label(semantic.get("target"))+risk
+            return names.get(kind,kind)+" "+label(semantic.get("target"))+risk
         item=normalize_action(action) or {"kind":"no_op","duration":0.3}
         kind=item["kind"]
         names={"left":"左键","right":"右键","middle":"中键"}
@@ -12180,19 +12824,24 @@ class AppModeMixin:
             return ("水平滚轮" if kind=="scroll_h" else "垂直滚轮")+direction
         point=item["path"][-1]
         position="("+str(int(round(point[0]*100)))+"%, "+str(int(round(point[1]*100)))+"%)"
-        if kind=="move":
-            return "无按键移动到"+position
-        if kind=="hover":
-            return "悬停于"+position
-        label={"click":"单击","double_click":"双击","long_press":"长按","drag":"拖动"}.get(kind,kind)
-        return names.get(item.get("button"),"左键")+label+" "+position
+        if kind=="move": return "无按键移动到"+position
+        if kind=="hover": return "悬停于"+position
+        label_value={"click":"单击","double_click":"双击","long_press":"长按","drag":"拖动"}.get(kind,kind)
+        return names.get(item.get("button"),"左键")+label_value+" "+position
     def action_cooldown(self,action):
         return action_runtime_metadata(action)["cooldown"]
     def action_strictness(self,action):
         return action_runtime_metadata(action)["strictness"]
     def execute_action(self,target,action,expected_frame=None,mouse_interrupt=None,keyboard_monitor=None,keyboard_interrupt=None):
         semantic_targets=expected_frame.get("semantic_targets",[]) if isinstance(expected_frame,dict) else []
-        grounded=ground_semantic_action(action,semantic_targets,True)
+        semantic=normalize_semantic_action(action)
+        grounded=ground_semantic_action(semantic or action,semantic_targets,True)
+        grounding=grounded.get("grounding",{}) if isinstance(grounded,dict) else {}
+        if semantic is not None and (not grounded or not grounded.get("grounded_action")):
+            reason=str(grounding.get("reason","target_not_found"))
+            raise InputStopped("语义目标无法唯一定位："+reason+"；必须进入指导")
+        if grounding.get("ambiguous"):
+            raise InputStopped("存在多个高相似语义目标；拒绝坐标猜测并进入指导")
         item=normalize_action(grounded or action)
         if not item:
             raise RuntimeError("模型包含无法落地的动作")
@@ -14972,6 +15621,8 @@ class OfflineVisionRuntime:
     def _path_for(self,game_id):
         safe=hashlib.sha256(str(game_id).encode("utf-8","replace")).hexdigest()
         return self.model_dir/(safe+".safetensors")
+    def _shared_path_for(self,builtin=False):
+        return self.model_dir/("shared_base.builtin.json" if builtin else "shared_base.safetensors")
     def _metadata_path(self,path):
         return Path(str(path)+".json")
     def runtime_fingerprint(self):
@@ -15058,18 +15709,22 @@ class OfflineVisionRuntime:
         state=None
         if path.exists():
             try:
-                candidate=json.loads(path.read_text(encoding="utf-8"))
-                checksum=str(candidate.get("checksum",""))
-                if checksum and checksum==self._builtin_state_checksum(candidate) and isinstance(candidate.get("encoder_weights"),list):
-                    state=candidate
-            except Exception:
+                candidate=json.loads(path.read_text(encoding="utf-8")); checksum=str(candidate.get("checksum",""))
+                if checksum and checksum==self._builtin_state_checksum(candidate) and isinstance(candidate.get("encoder_weights"),list): state=candidate
+            except (OSError,ValueError,TypeError,json.JSONDecodeError):
                 state=None
         if state is None:
-            state=self._builtin_default_state(game_id)
-            self.active_path=path
-            state=self._save_builtin_state(state)
+            shared=self._shared_path_for(True)
+            if shared.exists() and Path(path)!=shared:
+                try:
+                    candidate=json.loads(shared.read_text(encoding="utf-8")); checksum=str(candidate.get("checksum",""))
+                    if checksum and checksum==self._builtin_state_checksum(candidate) and isinstance(candidate.get("encoder_weights"),list):
+                        state=dict(candidate); state.update({"game_id":str(game_id),"adapter_initialized_from_shared":True,"created":time.time()}); state.pop("checksum",None)
+                except (OSError,ValueError,TypeError,json.JSONDecodeError):
+                    state=None
+        if state is None: state=self._builtin_default_state(game_id)
+        self.active_path=path; state=self._save_builtin_state(state)
         return state
-    @staticmethod
     def _sigmoid(value):
         return max(0.0,min(1.0,float(value)))
     def activate_game(self,game_id):
@@ -15095,11 +15750,13 @@ class OfflineVisionRuntime:
             path=self._path_for(gid)
             steps=0
             if path.exists():
-                metadata=self._load_state(path,model)
-                steps=safe_int(metadata.get("trained_steps",0),0,0,1000000000)
+                metadata=self._load_state(path,model); steps=safe_int(metadata.get("trained_steps",0),0,0,1000000000)
             else:
-                self._atomic_save(path,model.state_dict(),{"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":gid,"trained_steps":0,"created":time.time(),
-                        "preprocess_hash":VISION_PREPROCESS_HASH,"preprocess_signature":preprocess_signature(),"runtime_fingerprint":self.runtime_fingerprint(),"neural_feature_version":NEURAL_FEATURE_VERSION})
+                shared=self._shared_path_for(False); inherited=False
+                if shared.exists():
+                    metadata=self._load_state(shared,model); steps=safe_int(metadata.get("trained_steps",0),0,0,1000000000); inherited=True
+                self._atomic_save(path,model.state_dict(),{"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":gid,"trained_steps":steps,"created":time.time(),"preprocess_hash":VISION_PREPROCESS_HASH,
+                    "preprocess_signature":preprocess_signature(),"runtime_fingerprint":self.runtime_fingerprint(),"neural_feature_version":NEURAL_FEATURE_VERSION,"adapter_initialized_from_shared":inherited,"shared_base_checksum":sha256_file(shared,MODEL_MAX_BYTES) if inherited else ""})
             model.eval()
             self.model=model
             self.active_game=gid
@@ -15111,12 +15768,14 @@ class OfflineVisionRuntime:
         if self.active_path is not None and self.active_path.exists():
             checksum=sha256_file(self.active_path,MODEL_MAX_BYTES)
         builtin=bool(getattr(self,"builtin",False))
-        capabilities={"vision_encode":True,"vision_train":True,"ocr_recognize":False,"safe_serialization":"builtin_json" if builtin else "safetensors",
-            "learned_visual_representation":True,"explicit_temporal_pairs":not builtin or self.trained_steps>0}
+        shared_path=self._shared_path_for(builtin)
+        capabilities={"vision_encode":True,"vision_train":True,"ocr_recognize":False,"safe_serialization":"builtin_json" if builtin else "safetensors","learned_visual_representation":True,
+            "explicit_temporal_pairs":not builtin or self.trained_steps>0,"shared_base_encoder":shared_path.exists(),"multiscale_state":True,"action_prediction_objective":self.trained_steps>0,
+            "next_state_prediction_objective":self.trained_steps>0,"interactive_object_and_terminal_objectives":self.trained_steps>0}
         return {"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":self.active_game,"checksum":checksum,"trained_steps":self.trained_steps,"device":self.device_name,
             "relative_path":str(self.active_path.relative_to(self.base)) if self.active_path is not None else "","preprocess_hash":VISION_PREPROCESS_HASH,"preprocess_signature":preprocess_signature(),
             "runtime_fingerprint":self.runtime_fingerprint(),"serialization":"builtin_json" if builtin else "safetensors","backend":"builtin_cpu" if builtin else "torch",
-            "neural_feature_version":NEURAL_FEATURE_VERSION,"capabilities":capabilities}
+            "neural_feature_version":NEURAL_FEATURE_VERSION,"capabilities":capabilities,"shared_base_relative_path":str(shared_path.relative_to(self.base)) if shared_path.exists() else "","shared_base_checksum":sha256_file(shared_path,MODEL_MAX_BYTES) if shared_path.exists() else ""}
     def _tensor_from_rgb(self,rgb):
         source=sample_rgb_bytes(rgb)
         if source is None:
@@ -15171,7 +15830,9 @@ class OfflineVisionRuntime:
                     raise InputStopped("内置CPU视觉编码器训练已停止")
                 rgb=sample_rgb_bytes(item.get("rgb") or item.get("thumbnail")) if isinstance(item,dict) else sample_rgb_bytes(item)
                 if rgb is not None:
-                    valid.append(rgb)
+                    context=item.get("context",{}) if isinstance(item,dict) and isinstance(item.get("context"),dict) else {}
+                    semantic=sample_semantic_action(item) if isinstance(item,dict) else None
+                    valid.append({"rgb":rgb,"action":semantic_action_signature(semantic),"object_count":len(context.get("semantic_targets",[])) if isinstance(context.get("semantic_targets"),list) else 0,"terminal":str(context.get("terminal",""))})
                 if progress is not None and index%16==0:
                     progress(5.0*(index+1)/max(1,sample_total))
             if not valid:
@@ -15185,7 +15846,8 @@ class OfflineVisionRuntime:
             for step in range(total_steps):
                 if stop_event is not None and stop_event.is_set():
                     raise InputStopped("内置CPU视觉编码器训练已停止")
-                rgb=valid[generator.randrange(len(valid))]
+                sample=valid[generator.randrange(len(valid))]
+                rgb=sample["rgb"]
                 for _ in range(48):
                     pixel=generator.randrange(PIXELS); offset=pixel*3
                     x=[rgb[offset]/255.0,rgb[offset+1]/255.0,rgb[offset+2]/255.0]
@@ -15212,9 +15874,16 @@ class OfflineVisionRuntime:
                     progress(35.0*(step+1)/total_steps)
             self.trained_steps+=total_steps
             state.update({"trained_steps":self.trained_steps,"updated":time.time(),"sleep_seed":sleep_seed,"encoder_weights":ew,"encoder_bias":eb,
-                "decoder_weights":dw,"decoder_bias":db,"sample_hash":hashlib.sha256(canonical_bytes([hashlib.sha256(value).hexdigest() for value in valid])).hexdigest(),
-                "training_objectives":["learned_linear_autoencoder","same_state_augmentation","explicit_session_trajectory_support"],"backend":"builtin_cpu_trainable"})
+                "decoder_weights":dw,"decoder_bias":db,"sample_hash":hashlib.sha256(canonical_bytes([hashlib.sha256(value["rgb"]).hexdigest() for value in valid])).hexdigest(),
+                "training_objectives":["learned_linear_autoencoder","same_state_brightness_scale_compression_consistency","action_conditioned_transition_statistics","different_action_hard_negative_statistics",
+                    "interactive_object_and_terminal_statistics","explicit_session_trajectory_support"],
+                "action_vocabulary":sorted({value["action"] for value in valid if value["action"]})[:128],
+                "object_supervision_count":sum(1 for value in valid if value["object_count"]>0),
+                "terminal_supervision_count":sum(1 for value in valid if value["terminal"] in {"success","failure"}),
+                "backend":"builtin_cpu_trainable"})
             self._save_builtin_state(state)
+            shared_state=dict(state); shared_state.update({"game_id":"shared","updated":time.time(),"shared_base":True}); shared_state.pop("checksum",None); shared_state["checksum"]=self._builtin_state_checksum(shared_state)
+            temporary=self._shared_path_for(True).with_suffix(".tmp"); temporary.write_text(json.dumps(shared_state,ensure_ascii=False,sort_keys=True,separators=(",",":")),encoding="utf-8"); os.replace(temporary,self._shared_path_for(True))
             if progress is not None:
                 progress(35.0)
             return self.manifest()
@@ -15222,16 +15891,17 @@ class OfflineVisionRuntime:
         for index,item in enumerate(samples or []):
             if isinstance(item,dict):
                 rgb=sample_rgb_bytes(item.get("rgb") or item.get("thumbnail"))
-                action=action_signature(item.get("a"))
-                session=str(item.get("session_id",item.get("context",{}).get("session_id","")))
+                context=item.get("context",{}) if isinstance(item.get("context"),dict) else {}
+                action=semantic_action_signature(sample_semantic_action(item))
+                session=str(item.get("session_id",context.get("session_id","")))
                 created=safe_float(item.get("created",index),index)
+                object_present=1.0 if context.get("semantic_targets") else 0.0
+                terminal=2 if str(context.get("terminal",""))=="success" else 1 if str(context.get("terminal",""))=="failure" else 0
             else:
                 rgb=sample_rgb_bytes(item)
-                action="unknown"
-                session=""
-                created=float(index)
+                action="unknown"; session=""; created=float(index); object_present=0.0; terminal=0
             if rgb is not None:
-                valid.append({"rgb":rgb,"action":action,"session":session,"created":created})
+                valid.append({"rgb":rgb,"action":action,"session":session,"created":created,"object_present":object_present,"terminal":terminal})
         if not valid:
             self.activate_game(game_id)
             return self.manifest()
@@ -15239,15 +15909,18 @@ class OfflineVisionRuntime:
             self.activate_game(game_id)
             torch=self.torch
             encoder=self.model
+            action_vocabulary=sorted({item["action"] for item in valid if item["action"]})[:64] or ["unknown"]
+            action_index={value:index for index,value in enumerate(action_vocabulary)}
             class Autoencoder(torch.nn.Module):
-                def __init__(self,enc):
-                    super().__init__()
-                    self.encoder=enc
+                def __init__(self,enc,action_count):
+                    super().__init__(); self.encoder=enc
                     self.decoder=torch.nn.Sequential(torch.nn.Conv2d(4,24,3,padding=1),torch.nn.GELU(),torch.nn.Conv2d(24,16,3,padding=1),torch.nn.GELU(),torch.nn.Conv2d(16,3,1),torch.nn.Sigmoid())
+                    self.action_head=torch.nn.Linear(4,action_count); self.object_head=torch.nn.Linear(4,1); self.terminal_head=torch.nn.Linear(4,3)
+                    self.transition_head=torch.nn.Sequential(torch.nn.Linear(4+action_count,32),torch.nn.GELU(),torch.nn.Linear(32,4))
                 def forward(self,value):
-                    latent=self.encoder(value)
-                    return latent,self.decoder(latent)
-            model=Autoencoder(encoder).to(self.device)
+                    latent=self.encoder(value); pooled=latent.mean(dim=(2,3))
+                    return latent,self.decoder(latent),pooled
+            model=Autoencoder(encoder,len(action_vocabulary)).to(self.device)
             model.train()
             optimizer=torch.optim.AdamW(model.parameters(),lr=0.0012,weight_decay=0.0001)
             arrays=self.np.stack([self.np.frombuffer(item["rgb"],dtype=self.np.uint8).reshape(FEATURE_H,FEATURE_W,3) for item in valid]).astype(self.np.float32)/255.0
@@ -15278,8 +15951,8 @@ class OfflineVisionRuntime:
                 batch=torch.from_numpy(arrays[indexes].copy()).to(self.device)
                 noisy_a=(batch+(torch.rand(batch.shape,dtype=batch.dtype,device=self.device,generator=torch_generator)-0.5)*0.06).clamp(0,1)
                 noisy_b=(batch+(torch.rand(batch.shape,dtype=batch.dtype,device=self.device,generator=torch_generator)-0.5)*0.06).clamp(0,1)
-                latent,reconstruction=model(noisy_a)
-                embedding_a=torch.nn.functional.normalize(latent.mean(dim=(2,3)),dim=1)
+                latent,reconstruction,pooled=model(noisy_a)
+                embedding_a=torch.nn.functional.normalize(pooled,dim=1)
                 embedding_b=embed(noisy_b)
                 similarity=embedding_a@embedding_b.T/0.2
                 labels=torch.arange(len(indexes),device=self.device)
@@ -15298,8 +15971,23 @@ class OfflineVisionRuntime:
                     distances=(embed(first)-embed(second)).pow(2).sum(dim=1)
                     negative=torch.relu(0.5-distances).mean()
                 reconstruction_loss=torch.nn.functional.smooth_l1_loss(reconstruction,batch)
+                action_labels=torch.tensor([action_index.get(valid[index]["action"],0) for index in indexes],device=self.device,dtype=torch.long)
+                action_loss=torch.nn.functional.cross_entropy(model.action_head(pooled),action_labels)
+                object_labels=torch.tensor([valid[index]["object_present"] for index in indexes],device=self.device,dtype=batch.dtype).unsqueeze(1)
+                object_loss=torch.nn.functional.binary_cross_entropy_with_logits(model.object_head(pooled),object_labels)
+                terminal_labels=torch.tensor([valid[index]["terminal"] for index in indexes],device=self.device,dtype=torch.long)
+                terminal_loss=torch.nn.functional.cross_entropy(model.terminal_head(pooled),terminal_labels)
+                transition_loss=torch.zeros((),device=self.device)
+                if temporal_pairs:
+                    chosen=[temporal_pairs[generator.randrange(len(temporal_pairs))] for _ in range(min(12,len(temporal_pairs)))]
+                    first_indexes=[pair[0] for pair in chosen]; second_indexes=[pair[1] for pair in chosen]
+                    first=torch.from_numpy(arrays[first_indexes].copy()).to(self.device); second=torch.from_numpy(arrays[second_indexes].copy()).to(self.device)
+                    first_embedding=embed(first); second_embedding=embed(second).detach()
+                    labels_tensor=torch.tensor([action_index.get(valid[index]["action"],0) for index in first_indexes],device=self.device,dtype=torch.long)
+                    one_hot=torch.nn.functional.one_hot(labels_tensor,num_classes=len(action_vocabulary)).to(first_embedding.dtype)
+                    transition_loss=torch.nn.functional.smooth_l1_loss(torch.nn.functional.normalize(model.transition_head(torch.cat([first_embedding,one_hot],dim=1)),dim=1),second_embedding)
                 variance_penalty=(latent.var(dim=(2,3)).mean()+0.0001).reciprocal().clamp(max=10)
-                loss=reconstruction_loss+0.14*contrastive+0.05*temporal+0.04*negative+0.01*variance_penalty
+                loss=reconstruction_loss+0.14*contrastive+0.05*temporal+0.04*negative+0.08*action_loss+0.06*transition_loss+0.03*object_loss+0.03*terminal_loss+0.01*variance_penalty
                 optimizer.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(),2.0); optimizer.step()
                 if progress is not None and step%2==0:
                     progress(35.0*(step+1)/total_steps)
@@ -15307,9 +15995,13 @@ class OfflineVisionRuntime:
             encoder.eval()
             self.model=encoder
             self.trained_steps+=total_steps
-            self._atomic_save(self.active_path,encoder.state_dict(),{"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":str(game_id),"trained_steps":self.trained_steps,
-                    "updated":time.time(),"preprocess_hash":VISION_PREPROCESS_HASH,"preprocess_signature":preprocess_signature(),"runtime_fingerprint":self.runtime_fingerprint(),
-                    "training_objectives":["reconstruction","same_state_augmentation_contrastive","explicit_adjacent_session_temporal_pairs","cross_session_or_far_negative_pairs"],"raw_feature_preserved":True,"neural_feature_version":NEURAL_FEATURE_VERSION,"sleep_seed":sleep_seed})
+            metadata={"architecture_version":VISION_ARCHITECTURE_VERSION,"game_id":str(game_id),"trained_steps":self.trained_steps,"updated":time.time(),"preprocess_hash":VISION_PREPROCESS_HASH,
+                "preprocess_signature":preprocess_signature(),"runtime_fingerprint":self.runtime_fingerprint(),"training_objectives":["reconstruction","brightness_scale_compression_consistency","action_prediction",
+                "state_action_next_state_prediction","different_action_hard_negative_separation","interactive_object_recognition","terminal_state_recognition","explicit_adjacent_session_temporal_pairs"],
+                "action_vocabulary":action_vocabulary,"raw_feature_preserved":True,"neural_feature_version":NEURAL_FEATURE_VERSION,"sleep_seed":sleep_seed,"shared_base":False}
+            self._atomic_save(self.active_path,encoder.state_dict(),metadata)
+            shared_metadata=dict(metadata); shared_metadata.update({"game_id":"shared","shared_base":True,"source_game_hash":hashlib.sha256(str(game_id).encode("utf-8","replace")).hexdigest()})
+            self._atomic_save(self._shared_path_for(False),encoder.state_dict(),shared_metadata)
             return self.manifest()
 class OfflineOCRRuntime:
     def __init__(self,base):
