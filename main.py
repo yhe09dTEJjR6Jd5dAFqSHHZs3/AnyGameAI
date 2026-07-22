@@ -185,7 +185,7 @@ MODE_RUNNING = "RUNNING"
 MODE_STOPPING = "STOPPING"
 MODE_STATES = {MODE_IDLE, MODE_STARTING, MODE_RUNNING, MODE_STOPPING}
 DEVELOPER_MODE = "--developer-mode" in sys.argv
-AI_WORKER_PROTOCOL_VERSION = 5
+AI_WORKER_PROTOCOL_VERSION = 6
 RUNTIME_INSTALL_PROTOCOL_VERSION = 2
 REVIEW_PROCESS_PROTOCOL_VERSION = 2
 TEST_WORKER_PROTOCOL_VERSION = 2
@@ -13533,6 +13533,9 @@ class FrameBuffer:
                         and self.resume_confirmations > 0
                     ):
                         self.resume_confirmations -= 1
+                        runtime_state = getattr(self, "window_runtime", None)
+                        if runtime_state is not None:
+                            runtime_state.confirm_valid_frame(self.window_generation)
                     frame = {
                         "time": stamp,
                         "wall_time": wall_time,
@@ -37940,6 +37943,7 @@ class GameSpecificVisionTrainer:
     def _torch_metadata(self, action_vocabulary, data):
         return {
             "architecture_version": VISION_ARCHITECTURE_VERSION,
+            "model_tier": normalize_model_tier(self.runtime.model_tier),
             "game_id": str(self.game_id),
             "trained_steps": self.runtime.trained_steps,
             "updated": time.time(),
@@ -37988,6 +37992,7 @@ class OfflineVisionRuntime:
         self.model = None
         self.active_game = ""
         self.active_path = None
+        self.model_tier = normalize_model_tier(os.environ.get("UGAI_REQUESTED_MODEL_TIER", "Tiny"))
         self.trained_steps = 0
         self.ready = False
         self.error = "尚未检查AI运行库"
@@ -38086,8 +38091,7 @@ class OfflineVisionRuntime:
             (self.runtime_manifest or {}).get("effective_runtime_family")
             or (self.runtime_manifest or {}).get("runtime_family", "windows-x64-cpu")
         )
-        plan = RESOURCE_GOVERNOR.current_plan()
-        model_spec = model_tier_spec(plan)
+        model_spec = model_tier_spec(self.model_tier)
         gpu_profile = backend.startswith("windows-x64-nvidia") or backend == "windows-x64-directml"
 
         class InvertedResidual(torch.nn.Module):
@@ -38171,10 +38175,13 @@ class OfflineVisionRuntime:
 
     def _path_for(self, game_id):
         safe = hashlib.sha256(str(game_id).encode("utf-8", "replace")).hexdigest()
-        return self.model_dir / (safe + ".safetensors")
+        tier = normalize_model_tier(self.model_tier).casefold()
+        suffix = ".builtin.json" if self.builtin else ".safetensors"
+        return self.model_dir / (safe + "." + tier + suffix)
 
     def _shared_path_for(self, builtin=False):
-        return self.model_dir / ("shared_base.builtin.json" if builtin else "shared_base.safetensors")
+        tier = normalize_model_tier(self.model_tier).casefold()
+        return self.model_dir / ("shared_" + tier + (".builtin.json" if builtin else ".safetensors"))
 
     def _metadata_path(self, path):
         return Path(str(path) + ".json")
@@ -38239,6 +38246,8 @@ class OfflineVisionRuntime:
                 raise RuntimeError("模型清单校验失败")
             if safe_int(metadata.get("architecture_version"), 0) != VISION_ARCHITECTURE_VERSION:
                 raise RuntimeError("模型结构版本变化")
+            if normalize_model_tier(metadata.get("model_tier", "Tiny")) != normalize_model_tier(self.model_tier):
+                raise RuntimeError("模型等级与完整模型实例不匹配")
             if str(metadata.get("preprocess_hash", "")) != VISION_PREPROCESS_HASH:
                 raise RuntimeError("预处理版本变化")
             runtime = metadata.get("runtime_fingerprint", {})
@@ -39241,7 +39250,16 @@ def ai_worker_main(base, address, auth_text, family, protocol_version=None):
 
     if safe_int(protocol_version, 0) != AI_WORKER_PROTOCOL_VERSION:
         raise RuntimeError("AI工作进程协议版本不一致")
-    manifest = validate_runtime_manifest(base, True, True)
+    requested_backend = str(os.environ.get("UGAI_REQUESTED_BACKEND", "") or "windows-x64-cpu")
+    requested_model_tier = normalize_model_tier(os.environ.get("UGAI_REQUESTED_MODEL_TIER", "Tiny"))
+    requested_plan_version = safe_int(os.environ.get("UGAI_PLAN_VERSION", "0"), 0, 0)
+    requested_plan_reason = str(os.environ.get("UGAI_PLAN_REASON", "startup"))
+    manifest_family = requested_backend
+    if manifest_family in {"windows-x64-cpu-safe", "cpu", "builtin_cpu"}:
+        manifest_family = "windows-x64-cpu"
+    if manifest_family not in RUNTIME_BACKEND_FAMILIES:
+        manifest_family = None
+    manifest = validate_runtime_manifest(base, True, True, manifest_family)
     if (
         manifest is None
         or manifest.get("lock_complete") is not True
@@ -39249,6 +39267,20 @@ def ai_worker_main(base, address, auth_text, family, protocol_version=None):
     ):
         raise RuntimeError("AI工作进程启动前所选后端wheel锁不完整")
     install_write_boundary_guard(base)
+    RESOURCE_GOVERNOR.apply_benchmark_profile(
+        {
+            "backend": requested_backend,
+            "model_tier": requested_model_tier,
+            "vision_backend": requested_backend,
+            "policy_backend": requested_backend,
+            "world_model_backend": (
+                "windows-x64-cpu"
+                if "nvidia" in requested_backend.casefold()
+                or "directml" in requested_backend.casefold()
+                else requested_backend
+            ),
+        }
+    )
     RESOURCE_GOVERNOR.ensure_started()
     auth = base64.urlsafe_b64decode(str(auth_text).encode("ascii"))
     connection = Client(address, family=family, authkey=auth)
@@ -39301,6 +39333,28 @@ def ai_worker_main(base, address, auth_text, family, protocol_version=None):
                 "runtime_manifest": dict(vision.runtime_manifest or {}),
                 "resource_state": RESOURCE_GOVERNOR.status()["state"],
                 "resource_plan": RESOURCE_GOVERNOR.current_plan(),
+                "plan_version": requested_plan_version,
+                "plan_reason": requested_plan_reason,
+                "requested_backend": requested_backend,
+                "requested_model_tier": requested_model_tier,
+                "worker_ack_version": requested_plan_version,
+                "applied_backend": str(
+                    (vision.runtime_manifest or {}).get("effective_runtime_family")
+                    or requested_backend
+                ),
+                "applied_model_tier": normalize_model_tier(vision.model_tier),
+                "model_instance_identity": hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "backend": str(
+                                (vision.runtime_manifest or {}).get("effective_runtime_family")
+                                or requested_backend
+                            ),
+                            "tier": normalize_model_tier(vision.model_tier),
+                            "pid": os.getpid(),
+                        }
+                    )
+                ).hexdigest(),
             }
 
         connection.send(
@@ -39326,6 +39380,91 @@ def ai_worker_main(base, address, auth_text, family, protocol_version=None):
                     break
                 if operation == "status":
                     value = status_value()
+                elif operation == "apply_plan":
+                    plan_backend = str(payload.get("requested_backend", requested_backend))
+                    plan_tier = normalize_model_tier(payload.get("requested_model_tier", requested_model_tier))
+                    plan_version = safe_int(payload.get("plan_version"), requested_plan_version, 0)
+                    applied_family = str(
+                        (vision.runtime_manifest or {}).get("effective_runtime_family", "")
+                    )
+                    same_backend = plan_backend in {requested_backend, applied_family}
+                    same_tier = plan_tier == normalize_model_tier(vision.model_tier)
+                    value = {
+                        "plan_version": plan_version,
+                        "worker_ack_version": plan_version if same_backend and same_tier else requested_plan_version,
+                        "requested_backend": plan_backend,
+                        "requested_model_tier": plan_tier,
+                        "applied_backend": str(
+                    (vision.runtime_manifest or {}).get("effective_runtime_family")
+                    or requested_backend
+                ),
+                        "applied_model_tier": normalize_model_tier(vision.model_tier),
+                        "requires_restart": not (same_backend and same_tier),
+                        "quiescent": True,
+                    }
+                elif operation == "validate_model_tier":
+                    tier = normalize_model_tier(payload.get("model_tier", requested_model_tier))
+                    if tier != normalize_model_tier(vision.model_tier):
+                        value = {"valid": False, "requires_restart": True, "model_tier": tier}
+                    elif vision.torch is None:
+                        value = {
+                            "valid": tier == "Tiny",
+                            "requires_restart": False,
+                            "model_tier": tier,
+                            "backend": "builtin_cpu",
+                        }
+                    else:
+                        candidate = vision._build_model()
+                        parameter_count = sum(int(parameter.numel()) for parameter in candidate.parameters())
+                        contract = dict(getattr(candidate, "backbone_contract", {}))
+                        del candidate
+                        collect_garbage("validate_model_tier", 0.0, True)
+                        value = {
+                            "valid": True,
+                            "requires_restart": False,
+                            "model_tier": tier,
+                            "parameter_count": parameter_count,
+                            "contract": contract,
+                            "shape_hash": hashlib.sha256(canonical_bytes(contract)).hexdigest(),
+                        }
+                elif operation == "probe_vram":
+                    requested_bytes = safe_int(
+                        payload.get("bytes"),
+                        256 * 1024 * 1024,
+                        16 * 1024 * 1024,
+                        512 * 1024 * 1024,
+                    )
+                    result = {"requested_bytes": requested_bytes, "passed": False, "backend": requested_backend}
+                    if vision.torch is None or str(vision.device).casefold() == "cpu":
+                        result.update({"passed": True, "skipped": True, "reason": "cpu_backend"})
+                    else:
+                        tensor = None
+                        try:
+                            elements = max(1, requested_bytes // 4)
+                            tensor = vision.torch.empty(elements, dtype=vision.torch.float32, device=vision.device)
+                            tensor.zero_()
+                            if (
+                                hasattr(vision.torch, "cuda")
+                                and vision.torch.cuda.is_available()
+                                and "nvidia" in requested_backend.casefold()
+                            ):
+                                vision.torch.cuda.synchronize()
+                            result.update(
+                                {
+                                    "passed": True,
+                                    "allocated_bytes": int(
+                                        tensor.numel() * tensor.element_size()
+                                    ),
+                                }
+                            )
+                        finally:
+                            del tensor
+                            if hasattr(vision.torch, "cuda") and vision.torch.cuda.is_available():
+                                vision.torch.cuda.empty_cache()
+                            collect_garbage("vram_probe", 0.0, True)
+                    value = result
+                elif operation == "quiesce":
+                    value = {"quiescent": True, "worker_ack_version": requested_plan_version}
                 elif operation == "activate_game":
                     value = vision.activate_game(str(payload.get("game_id", "")))
                 elif operation == "reload_game":
@@ -39433,11 +39572,36 @@ class AIWorkerClient:
         worker_filename="ai_worker.py",
         allow_dedicated_training=True,
         force_cpu_safe=False,
+        requested_backend=None,
+        requested_model_tier=None,
+        plan_version=0,
+        plan_reason="startup",
     ):
         from multiprocessing.connection import Listener
 
         self.base = Path(base).resolve()
-        requested_runtime_family = "windows-x64-cpu" if force_cpu_safe else None
+        default_backend = (
+            "windows-x64-cpu"
+            if force_cpu_safe
+            else RESOURCE_GOVERNOR.current_plan().backend
+        )
+        self.requested_backend = str(requested_backend or default_backend)
+        if self.requested_backend in {"windows-x64-cpu-safe", "cpu", "builtin_cpu"}:
+            requested_runtime_family = "windows-x64-cpu"
+        elif self.requested_backend in RUNTIME_BACKEND_FAMILIES:
+            requested_runtime_family = self.requested_backend
+        else:
+            requested_runtime_family = "windows-x64-cpu" if force_cpu_safe else None
+        default_tier = (
+            "Tiny"
+            if force_cpu_safe
+            else RESOURCE_GOVERNOR.current_plan().model_tier
+        )
+        self.requested_model_tier = normalize_model_tier(
+            requested_model_tier or default_tier
+        )
+        self.plan_version = safe_int(plan_version, 0, 0)
+        self.plan_reason = str(plan_reason or "startup")
         manifest = validate_runtime_manifest(self.base, True, True, requested_runtime_family)
         if (
             manifest is None
@@ -39503,6 +39667,10 @@ class AIWorkerClient:
                 "TMP": str(self.base / "temp"),
                 "TEMP": str(self.base / "temp"),
                 "UGAI_FORCE_CPU_SAFE": "1" if self.force_cpu_safe else "0",
+                "UGAI_REQUESTED_BACKEND": self.requested_backend,
+                "UGAI_REQUESTED_MODEL_TIER": self.requested_model_tier,
+                "UGAI_PLAN_VERSION": str(self.plan_version),
+                "UGAI_PLAN_REASON": self.plan_reason,
             }
         )
         address_text = (
@@ -39611,6 +39779,10 @@ class AIWorkerClient:
             worker_filename="training_worker.py",
             allow_dedicated_training=False,
             force_cpu_safe=self.force_cpu_safe,
+            requested_backend=self.requested_backend,
+            requested_model_tier=self.requested_model_tier,
+            plan_version=self.plan_version,
+            plan_reason=self.plan_reason,
         )
         with self.lock:
             if self.closed:
@@ -39692,6 +39864,39 @@ class AIWorkerClient:
                         pass
                     self.active_stop_path = None
                 RUNTIME_METRICS.observe("ai_worker_request_ms", (time.monotonic() - request_started) * 1000.0)
+
+    def apply_plan(self, envelope):
+        value = dict(envelope) if isinstance(envelope, dict) else {}
+        result = self.request(
+            "apply_plan",
+            {
+                "plan_version": safe_int(value.get("plan_version"), self.plan_version, 0),
+                "plan_reason": str(value.get("plan_reason", self.plan_reason)),
+                "requested_backend": str(value.get("requested_backend", self.requested_backend)),
+                "requested_model_tier": normalize_model_tier(
+                    value.get("requested_model_tier", self.requested_model_tier)
+                ),
+            },
+            15.0,
+        )
+        if isinstance(result, dict) and not result.get("requires_restart"):
+            self.plan_version = safe_int(result.get("worker_ack_version"), self.plan_version, 0)
+            self.status.update(result)
+        return result
+
+    def validate_model_tier(self, tier=None):
+        payload = {
+            "model_tier": normalize_model_tier(
+                tier or self.requested_model_tier
+            )
+        }
+        return self.request("validate_model_tier", payload, 180.0)
+
+    def probe_vram(self, requested_bytes=256 * 1024 * 1024):
+        return self.request("probe_vram", {"bytes": safe_int(requested_bytes, 256 * 1024 * 1024)}, 90.0)
+
+    def quiesce(self):
+        return self.request("quiesce", {}, 15.0)
 
     def candidate_matches(self, model, feature, query_coarse, backend, full_limit):
         if not isinstance(model, dict):
@@ -49237,8 +49442,14 @@ class ExperienceReplayPortfolio:
             (
                 str(item.get("game_id") or context.get("game_id") or "unknown"),
                 normalized_identifier(item.get("task_id") or context.get("task_id"), "default", 96),
+                str(context.get("save_id") or context.get("save_slot") or item.get("save_id") or "unknown"),
                 str(context.get("level_id") or context.get("level") or "unknown"),
                 str(item.get("session") or context.get("session_id") or item.get("episode_id") or "unknown"),
+                str(context.get("resolution") or context.get("resolution_and_dpi") or "unknown"),
+                str(context.get("ui_skin") or "default"),
+                str(context.get("popup_type") or context.get("popup_variant") or "none"),
+                str(context.get("frame_rate_group") or context.get("frame_rate") or "unknown"),
+                str(context.get("input_latency_group") or context.get("input_latency") or "unknown"),
             )
         )
 
@@ -49431,7 +49642,7 @@ class ExperienceReplayPortfolio:
         manifest = {
             "schema_version": 3,
             "immutable": True,
-            "group_fields": ["game", "task", "level", "session"],
+            "group_fields": ["game", "task", "save", "level", "session", "resolution", "ui_skin", "popup_type", "frame_rate", "input_latency"],
             "stratification_dimensions": [
                 "game_type",
                 "game_id",
@@ -50438,7 +50649,1840 @@ def run_replay_contract_tests():
 DEFAULT_OBSERVATION_ENCODER = ObjectCentricObservationEncoder()
 DEFAULT_TASK_PLANNER = HierarchicalTaskPlanner()
 DEFAULT_SKILL_POLICY = ReusableSkillPolicy()
+
 DEFAULT_SAFETY_SHIELD = IndependentSafetyShield()
+
+
+class StructuredRuntimeEventLogger:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.sequence = 0
+
+    def emit(self, event, **payload):
+        store = APP_CONTEXT.store
+        base = getattr(store, "base", None) if store is not None else None
+        if not base:
+            return None
+        clean = {str(key): freeze_ui_payload(value) for key, value in payload.items()}
+        with self.lock:
+            self.sequence += 1
+            row = {
+                "schema_version": 2,
+                "event": str(event),
+                "sequence": self.sequence,
+                "created": time.time(),
+                "monotonic": time.monotonic(),
+                "pid": os.getpid(),
+                "thread": threading.current_thread().name,
+                **clean,
+            }
+            path = Path(base) / "audit" / "runtime_events.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            serialized = json.dumps(
+                row,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            encoded = (serialized + "\n").encode("utf-8")
+            with path.open("ab") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return row
+
+
+RUNTIME_EVENT_LOGGER = StructuredRuntimeEventLogger()
+WINDOW_RUNTIME_REGISTRY = {}
+WINDOW_RUNTIME_REGISTRY_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True, slots=True)
+class WindowRuntimeState:
+    hwnd: int
+    generation: int
+    client_rect: tuple[int, int, int, int]
+    dpi: int
+    identity_hash: str
+    calibration_hash: str
+    descriptor_json: str = "{}"
+    input_eligible: bool = False
+    resume_confirmations: int = 0
+    published_monotonic: float = 0.0
+
+
+class WindowRuntimeCoordinator:
+    def __init__(self, bridge):
+        self.bridge = bridge
+        self.lock = threading.RLock()
+        self.geometry_lock = threading.RLock()
+        self.state = None
+        self.confirmed_frames = 0
+
+    @staticmethod
+    def _clean_target(target):
+        value = dict(target) if isinstance(target, dict) else {}
+        value.pop("_window_runtime_coordinator", None)
+        return value
+
+    @staticmethod
+    def _identity_hash(target):
+        value = {
+            key: target.get(key)
+            for key in ("hwnd", "pid", "process_created", "window_thread_id", "class", "process_path")
+        }
+        return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+    @staticmethod
+    def _calibration_hash(calibration):
+        value = dict(calibration) if isinstance(calibration, dict) else {}
+        return hashlib.sha256(canonical_bytes(value)).hexdigest() if value else ""
+
+    def clear(self):
+        with self.lock:
+            old = self.state
+            self.state = None
+            self.confirmed_frames = 0
+        if old is not None:
+            with WINDOW_RUNTIME_REGISTRY_LOCK:
+                WINDOW_RUNTIME_REGISTRY.pop(int(old.hwnd), None)
+
+    def publish_selection(self, target, calibration=None, reason="window_selected"):
+        value = self._clean_target(target)
+        hwnd = safe_int(value.get("hwnd"), 0)
+        if hwnd <= 0:
+            raise RuntimeError("窗口运行状态缺少有效句柄")
+        rect = value.get("selected_rect")
+        if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+            rect = self.bridge.client_rect(hwnd)
+        rect = tuple(safe_int(item, 0) for item in rect[:4])
+        dpi = safe_int(value.get("selected_dpi", value.get("dpi", self.bridge.dpi_for_window(hwnd))), 96, 1)
+        with self.lock:
+            old = self.state
+            requested = safe_int(value.get("window_generation"), 0, 0)
+            generation = max(requested, (old.generation + 1) if old is not None else 1)
+            value["window_generation"] = generation
+            value["selected_rect"] = list(rect)
+            value["client_size"] = [rect[2], rect[3]]
+            value["selected_dpi"] = dpi
+            value["dpi"] = dpi
+            self.state = WindowRuntimeState(
+                hwnd=hwnd,
+                generation=generation,
+                client_rect=rect,
+                dpi=dpi,
+                identity_hash=self._identity_hash(value),
+                calibration_hash=self._calibration_hash(calibration),
+                descriptor_json=json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ),
+                input_eligible=False,
+                resume_confirmations=RUNTIME_THRESHOLDS.confirmation_frames,
+                published_monotonic=time.monotonic(),
+            )
+            self.confirmed_frames = 0
+            snapshot = self.state
+        with WINDOW_RUNTIME_REGISTRY_LOCK:
+            WINDOW_RUNTIME_REGISTRY[hwnd] = self
+        RUNTIME_EVENT_LOGGER.emit(
+            reason,
+            old_generation=None if old is None else old.generation,
+            new_generation=snapshot.generation,
+            old_rect=None if old is None else old.client_rect,
+            new_rect=snapshot.client_rect,
+            old_dpi=None if old is None else old.dpi,
+            new_dpi=snapshot.dpi,
+            identity_hash=snapshot.identity_hash,
+        )
+        return snapshot
+
+    def snapshot(self):
+        with self.lock:
+            return self.state
+
+    def target_snapshot(self, extra=None):
+        with self.lock:
+            state = self.state
+            if state is None:
+                return None
+            value = json.loads(state.descriptor_json)
+            value.update(
+                {
+                    "hwnd": state.hwnd,
+                    "window_generation": state.generation,
+                    "selected_rect": list(state.client_rect),
+                    "client_size": [state.client_rect[2], state.client_rect[3]],
+                    "selected_dpi": state.dpi,
+                    "dpi": state.dpi,
+                    "window_identity_hash": state.identity_hash,
+                    "calibration_hash": state.calibration_hash,
+                    "input_eligible": state.input_eligible,
+                }
+            )
+        if isinstance(extra, dict):
+            value.update(extra)
+        return value
+
+    def begin_geometry_change(self, current_rect, current_dpi):
+        with self.lock:
+            state = self.state
+            if state is None:
+                raise RuntimeError("窗口运行状态尚未发布")
+            self.state = WindowRuntimeState(
+                hwnd=state.hwnd,
+                generation=state.generation,
+                client_rect=state.client_rect,
+                dpi=state.dpi,
+                identity_hash=state.identity_hash,
+                calibration_hash=state.calibration_hash,
+                descriptor_json=state.descriptor_json,
+                input_eligible=False,
+                resume_confirmations=state.resume_confirmations,
+                published_monotonic=state.published_monotonic,
+            )
+        self.bridge.block_input()
+        self.bridge.release_all_buttons()
+        return state
+
+    def commit_geometry(self, target, rect, dpi, calibration, confirmations):
+        value = self._clean_target(target)
+        rect = tuple(safe_int(item, 0) for item in rect[:4])
+        dpi = safe_int(dpi, 96, 1)
+        with self.lock:
+            old = self.state
+            if old is None:
+                raise RuntimeError("窗口运行状态不存在")
+            generation = old.generation + 1
+            value.update(
+                {
+                    "window_generation": generation,
+                    "selected_rect": list(rect),
+                    "client_size": [rect[2], rect[3]],
+                    "selected_dpi": dpi,
+                    "dpi": dpi,
+                }
+            )
+            self.state = WindowRuntimeState(
+                hwnd=old.hwnd,
+                generation=generation,
+                client_rect=rect,
+                dpi=dpi,
+                identity_hash=self._identity_hash(value),
+                calibration_hash=self._calibration_hash(calibration),
+                descriptor_json=json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ),
+                input_eligible=False,
+                resume_confirmations=max(1, safe_int(confirmations, RUNTIME_THRESHOLDS.confirmation_frames, 1, 120)),
+                published_monotonic=time.monotonic(),
+            )
+            self.confirmed_frames = 0
+            current = self.state
+        aspect_old = old.client_rect[2] / max(1, old.client_rect[3])
+        aspect_new = rect[2] / max(1, rect[3])
+        RUNTIME_EVENT_LOGGER.emit(
+            "window_geometry_changed",
+            old_generation=old.generation,
+            new_generation=current.generation,
+            old_rect=old.client_rect,
+            new_rect=current.client_rect,
+            old_dpi=old.dpi,
+            new_dpi=current.dpi,
+            aspect_change=round(aspect_new - aspect_old, 8),
+            calibration_result="passed",
+            resume_confirmations=current.resume_confirmations,
+        )
+        return current
+
+    def confirm_valid_frame(self, generation):
+        with self.lock:
+            state = self.state
+            if state is None or safe_int(generation, -1) != state.generation:
+                return False
+            self.confirmed_frames += 1
+            if self.confirmed_frames < state.resume_confirmations or state.input_eligible:
+                return False
+            self.state = WindowRuntimeState(
+                hwnd=state.hwnd,
+                generation=state.generation,
+                client_rect=state.client_rect,
+                dpi=state.dpi,
+                identity_hash=state.identity_hash,
+                calibration_hash=state.calibration_hash,
+                descriptor_json=state.descriptor_json,
+                input_eligible=True,
+                resume_confirmations=state.resume_confirmations,
+                published_monotonic=state.published_monotonic,
+            )
+            current = self.state
+        RUNTIME_EVENT_LOGGER.emit(
+            "window_geometry_resume_confirmed",
+            generation=current.generation,
+            confirmations=self.confirmed_frames,
+            client_rect=current.client_rect,
+            dpi=current.dpi,
+        )
+        return True
+
+
+class DXGIVideoMemoryTelemetry:
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", ctypes.c_uint32),
+            ("Data2", ctypes.c_uint16),
+            ("Data3", ctypes.c_uint16),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    class DXGI_ADAPTER_DESC1(ctypes.Structure):
+        _fields_ = [
+            ("Description", ctypes.c_wchar * 128),
+            ("VendorId", ctypes.c_uint32),
+            ("DeviceId", ctypes.c_uint32),
+            ("SubSysId", ctypes.c_uint32),
+            ("Revision", ctypes.c_uint32),
+            ("DedicatedVideoMemory", ctypes.c_size_t),
+            ("DedicatedSystemMemory", ctypes.c_size_t),
+            ("SharedSystemMemory", ctypes.c_size_t),
+            ("AdapterLuidLow", ctypes.c_uint32),
+            ("AdapterLuidHigh", ctypes.c_int32),
+            ("Flags", ctypes.c_uint32),
+        ]
+
+    class VIDEO_MEMORY_INFO(ctypes.Structure):
+        _fields_ = [
+            ("Budget", ctypes.c_uint64),
+            ("CurrentUsage", ctypes.c_uint64),
+            ("AvailableForReservation", ctypes.c_uint64),
+            ("CurrentReservation", ctypes.c_uint64),
+        ]
+
+    @classmethod
+    def guid(cls, text):
+        import uuid as _uuid
+        value = _uuid.UUID(str(text))
+        raw = value.bytes_le
+        return cls.GUID.from_buffer_copy(raw)
+
+    @staticmethod
+    def method(pointer, index, restype, *argtypes):
+        address = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents[index]
+        return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(address)
+
+    def sample(self, backend):
+        if os.name != "nt":
+            return {}
+        factory = ctypes.c_void_p()
+        dxgi = ctypes.WinDLL("dxgi", use_last_error=True)
+        create = dxgi.CreateDXGIFactory1
+        create.argtypes = [ctypes.POINTER(self.GUID), ctypes.POINTER(ctypes.c_void_p)]
+        create.restype = ctypes.c_long
+        iid_factory = self.guid("770aae78-f26f-4dba-a829-253c83d1b387")
+        if create(ctypes.byref(iid_factory), ctypes.byref(factory)) < 0 or not factory.value:
+            return {}
+        rows = []
+        release = self.method(factory, 2, ctypes.c_ulong)
+        try:
+            enum_adapters = self.method(factory, 12, ctypes.c_long, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p))
+            index = 0
+            while index < 32:
+                adapter1 = ctypes.c_void_p()
+                result = enum_adapters(factory, index, ctypes.byref(adapter1))
+                if result != 0 or not adapter1.value:
+                    break
+                adapter_release = self.method(adapter1, 2, ctypes.c_ulong)
+                adapter3 = ctypes.c_void_p()
+                try:
+                    desc = self.DXGI_ADAPTER_DESC1()
+                    get_desc = self.method(adapter1, 10, ctypes.c_long, ctypes.POINTER(self.DXGI_ADAPTER_DESC1))
+                    if get_desc(adapter1, ctypes.byref(desc)) < 0:
+                        index += 1
+                        continue
+                    query_interface = self.method(
+                        adapter1,
+                        0,
+                        ctypes.c_long,
+                        ctypes.POINTER(self.GUID),
+                        ctypes.POINTER(ctypes.c_void_p),
+                    )
+                    iid_adapter3 = self.guid("645967a4-1392-4310-a798-8053ce3e93fd")
+                    query_result = query_interface(
+                        adapter1,
+                        ctypes.byref(iid_adapter3),
+                        ctypes.byref(adapter3),
+                    )
+                    if query_result < 0 or not adapter3.value:
+                        index += 1
+                        continue
+                    query_memory = self.method(
+                        adapter3,
+                        14,
+                        ctypes.c_long,
+                        ctypes.c_uint,
+                        ctypes.c_int,
+                        ctypes.POINTER(self.VIDEO_MEMORY_INFO),
+                    )
+                    local = self.VIDEO_MEMORY_INFO()
+                    nonlocal_info = self.VIDEO_MEMORY_INFO()
+                    local_ok = query_memory(adapter3, 0, 0, ctypes.byref(local)) >= 0
+                    nonlocal_ok = query_memory(adapter3, 0, 1, ctypes.byref(nonlocal_info)) >= 0
+                    rows.append(
+                        {
+                            "adapter_index": index,
+                            "adapter_name": str(desc.Description),
+                            "vendor_id": int(desc.VendorId),
+                            "total_vram": int(desc.DedicatedVideoMemory),
+                            "shared_capacity": int(desc.SharedSystemMemory),
+                            "local_budget": int(local.Budget) if local_ok else None,
+                            "local_current_usage": int(local.CurrentUsage) if local_ok else None,
+                            "local_available_for_reservation": int(local.AvailableForReservation) if local_ok else None,
+                            "local_current_reservation": int(local.CurrentReservation) if local_ok else None,
+                            "nonlocal_budget": int(nonlocal_info.Budget) if nonlocal_ok else None,
+                            "nonlocal_current_usage": int(nonlocal_info.CurrentUsage) if nonlocal_ok else None,
+                            "nonlocal_available_for_reservation": (
+                                int(nonlocal_info.AvailableForReservation)
+                                if nonlocal_ok
+                                else None
+                            ),
+                            "nonlocal_current_reservation": (
+                                int(nonlocal_info.CurrentReservation)
+                                if nonlocal_ok
+                                else None
+                            ),
+                        }
+                    )
+                finally:
+                    if adapter3.value:
+                        self.method(adapter3, 2, ctypes.c_ulong)(adapter3)
+                    adapter_release(adapter1)
+                index += 1
+        except (OSError, ValueError, TypeError, AttributeError):
+            rows = []
+        finally:
+            release(factory)
+        if not rows:
+            return {}
+        family = str(backend or "").casefold()
+        if "nvidia" in family:
+            preferred = [row for row in rows if row["vendor_id"] == 0x10DE]
+        elif "directml" in family:
+            preferred = [row for row in rows if row["vendor_id"] in {0x1002, 0x8086, 0x10DE}]
+        else:
+            preferred = rows
+        selected = max(
+            preferred or rows,
+            key=lambda row: (
+                safe_int(row.get("local_current_usage"), 0),
+                safe_int(row.get("total_vram"), 0),
+            ),
+        )
+        selected = dict(selected)
+        budget = selected.get("local_budget")
+        usage = selected.get("local_current_usage")
+        selected["free_vram"] = max(0, int(budget) - int(usage)) if budget is not None and usage is not None else None
+        selected["source"] = "dxgi_adapter3_query_video_memory_info"
+        selected["adapters"] = rows
+        return selected
+
+
+DXGI_VIDEO_MEMORY_TELEMETRY = DXGIVideoMemoryTelemetry()
+
+
+class StrictWindowsGpuTelemetry:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.cache = {}
+
+    def _performance_counters(self, pid):
+        if os.name != "nt":
+            return {}
+        command = (
+            r"$p=@('\\GPU Engine(*)\\Utilization Percentage',"
+            r"'\\GPU Adapter Memory(*)\\Dedicated Usage',"
+            r"'\\GPU Adapter Memory(*)\\Shared Usage',"
+            r"'\\GPU Process Memory(*)\\Dedicated Usage','\\GPU Process Memory(*)\\Shared Usage');"
+            "$s=(Get-Counter -Counter $p -MaxSamples 1 -ErrorAction Stop).CounterSamples;"
+            "$s|Select-Object Path,CookedValue|ConvertTo-Json -Compress"
+        )
+        try:
+            output = subprocess.check_output(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=6,
+                creationflags=0x08000000,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            rows = json.loads(output) if output else []
+            if isinstance(rows, dict):
+                rows = [rows]
+            utilization = []
+            dedicated = []
+            shared = []
+            process_dedicated = []
+            process_shared = []
+            pid_token = "pid_" + str(int(pid)) + "_"
+            for row in rows if isinstance(rows, list) else []:
+                path = str(row.get("Path", "")).casefold()
+                value = max(0.0, safe_float(row.get("CookedValue"), 0.0))
+                if "utilization percentage" in path:
+                    utilization.append(value)
+                elif "gpu process memory" in path and "dedicated usage" in path and pid_token in path:
+                    process_dedicated.append(value)
+                elif "gpu process memory" in path and "shared usage" in path and pid_token in path:
+                    process_shared.append(value)
+                elif "gpu adapter memory" in path and "dedicated usage" in path:
+                    dedicated.append(value)
+                elif "gpu adapter memory" in path and "shared usage" in path:
+                    shared.append(value)
+            return {
+                "gpu_utilization": min(100.0, sum(utilization)),
+                "dedicated_vram_used": int(max(dedicated) if dedicated else 0),
+                "shared_vram_used": int(max(shared) if shared else 0),
+                "process_dedicated_vram": int(sum(process_dedicated)),
+                "process_shared_vram": int(sum(process_shared)),
+                "performance_counter_source": True,
+            }
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError, json.JSONDecodeError):
+            return {}
+
+    def _nvml(self, pid):
+        handled = RECOVERABLE_ERRORS
+        try:
+            import pynvml
+            handled = handled + (getattr(pynvml, "NVMLError", RuntimeError),)
+            pynvml.nvmlInit()
+            best = None
+            for index in range(pynvml.nvmlDeviceGetCount()):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+                memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                process_bytes = 0
+                process_getters = (
+                    "nvmlDeviceGetComputeRunningProcesses_v3",
+                    "nvmlDeviceGetComputeRunningProcesses_v2",
+                    "nvmlDeviceGetComputeRunningProcesses",
+                    "nvmlDeviceGetGraphicsRunningProcesses_v3",
+                    "nvmlDeviceGetGraphicsRunningProcesses_v2",
+                    "nvmlDeviceGetGraphicsRunningProcesses",
+                )
+                for name in process_getters:
+                    getter = getattr(pynvml, name, None)
+                    if getter is None:
+                        continue
+                    try:
+                        for process in getter(handle):
+                            if safe_int(getattr(process, "pid", 0), 0) == int(pid):
+                                used = getattr(process, "usedGpuMemory", 0)
+                                if isinstance(used, int) and used > 0:
+                                    process_bytes += used
+                    except handled:
+                        pass
+                row = {
+                    "gpu_utilization": float(utilization.gpu),
+                    "total_vram": int(memory.total),
+                    "free_vram": int(memory.free),
+                    "dedicated_vram_used": int(memory.used),
+                    "process_dedicated_vram": int(process_bytes),
+                    "source": "nvml",
+                }
+                if best is None or row["process_dedicated_vram"] > best["process_dedicated_vram"]:
+                    best = row
+            return best or {}
+        except handled:
+            return {}
+        finally:
+            try:
+                pynvml.nvmlShutdown()
+            except handled:
+                pass
+
+    def _nvidia_smi(self, pid):
+        try:
+            output = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.total,memory.free,memory.used",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=4,
+                creationflags=0x08000000 if os.name == "nt" else 0,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            values = [item.strip() for item in output.splitlines()[0].split(",")]
+            process_bytes = 0
+            try:
+                process_output = subprocess.check_output(
+                    ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=4,
+                    creationflags=0x08000000 if os.name == "nt" else 0,
+                    stderr=subprocess.DEVNULL,
+                )
+                for line in process_output.splitlines():
+                    parts = [item.strip() for item in line.split(",")]
+                    if len(parts) >= 2 and safe_int(parts[0], -1) == int(pid):
+                        process_bytes += int(float(parts[1]) * 1024 * 1024)
+            except RECOVERABLE_ERRORS:
+                pass
+            return {
+                "gpu_utilization": max(0.0, min(100.0, float(values[0]))),
+                "total_vram": int(float(values[1]) * 1024 * 1024),
+                "free_vram": int(float(values[2]) * 1024 * 1024),
+                "dedicated_vram_used": int(float(values[3]) * 1024 * 1024),
+                "process_dedicated_vram": process_bytes,
+                "source": "nvidia_smi_fallback",
+            }
+        except RECOVERABLE_ERRORS:
+            return {}
+
+    def sample(self, backend, process_pid=None, cache_seconds=2.0):
+        if os.name != "nt":
+            return {}
+        pid = safe_int(process_pid, os.getpid(), 1)
+        key = (str(backend), pid)
+        now = time.monotonic()
+        with self.lock:
+            cached = self.cache.get(key)
+            if cached is not None and now - cached[0] <= max(0.25, float(cache_seconds)):
+                return dict(cached[1])
+        family = str(backend or "").casefold()
+        counters = self._performance_counters(pid)
+        if "nvidia" in family:
+            result = self._nvml(pid) or self._nvidia_smi(pid)
+            dxgi = DXGI_VIDEO_MEMORY_TELEMETRY.sample(backend)
+            for key_name, value in dxgi.items():
+                result.setdefault(key_name, value)
+        elif "directml" in family:
+            result = DXGI_VIDEO_MEMORY_TELEMETRY.sample(backend)
+        else:
+            result = {}
+        for key_name, value in counters.items():
+            process_keys = {
+                "process_dedicated_vram",
+                "process_shared_vram",
+            }
+            if (
+                key_name in process_keys
+                or key_name not in result
+                or result.get(key_name) in {None, 0}
+            ):
+                result[key_name] = value
+        result.setdefault("source", "windows_performance_counters")
+        with self.lock:
+            self.cache[key] = (now, dict(result))
+        return result
+
+
+WINDOWS_GPU_TELEMETRY = StrictWindowsGpuTelemetry()
+
+
+@dataclass(frozen=True, slots=True)
+class StrictHardwareSnapshot:
+    cpu_percent: float
+    process_cpu_percent: float
+    available_ram: int
+    process_rss: int
+    gpu_backend: str
+    gpu_utilization: float | None
+    free_vram: int | None
+    capture_p95_ms: float
+    queue_ratio: float
+    queue_oldest_ms: float
+    disk_write_p95_ms: float
+    end_to_end_p95_ms: float = 0.0
+    end_to_end_p99_ms: float = 0.0
+    dedicated_vram_used: int | None = None
+    shared_vram_used: int | None = None
+    gpu_queue_wait_p95_ms: float = 0.0
+    cpu_to_gpu_copy_p95_ms: float = 0.0
+    device_removed_count: int = 0
+    device_reset_count: int = 0
+    gpu_oom_count: int = 0
+    device_removed_delta: int = 0
+    device_reset_delta: int = 0
+    gpu_oom_delta: int = 0
+    last_accelerator_fault_monotonic: float | None = None
+    accelerator_fault_age_seconds: float | None = None
+    accelerator_self_test_passed: bool = False
+    backend_blacklisted: bool = False
+    available_ram_known: bool = False
+    free_vram_known: bool = False
+    total_vram: int | None = None
+    tested_peak_vram: int | None = None
+    total_ram: int = 0
+    total_commit: int = 0
+    available_commit: int = 0
+    process_private_bytes: int = 0
+    commit_pressure: float = 0.0
+    pagefile_pressure: float = 0.0
+    vram_budget: int | None = None
+    vram_current_usage: int | None = None
+    vram_available_for_reservation: int | None = None
+    vram_current_reservation: int | None = None
+    shared_vram_budget: int | None = None
+    shared_vram_current_usage: int | None = None
+    process_dedicated_vram: int | None = None
+    process_shared_vram: int | None = None
+    telemetry_source: str = ""
+    probe_bytes: int | None = None
+    probe_passed: bool = False
+    effective_ram_red_bytes: int = 0
+    effective_ram_yellow_bytes: int = 0
+    effective_vram_red_bytes: int = 0
+    effective_vram_yellow_bytes: int = 0
+
+
+HardwareSnapshot = StrictHardwareSnapshot
+
+
+def _strict_memory_values():
+    if os.name == "nt":
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", wintypes.DWORD),
+                ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+        class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+                ("PrivateUsage", ctypes.c_size_t),
+            ]
+        try:
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(status)
+            if not kernel.GlobalMemoryStatusEx(ctypes.byref(status)):
+                raise OSError(ctypes.get_last_error())
+            counters = PROCESS_MEMORY_COUNTERS_EX()
+            counters.cb = ctypes.sizeof(counters)
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            handle = kernel.GetCurrentProcess()
+            if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                raise OSError(ctypes.get_last_error())
+            total_commit = int(status.ullTotalPageFile)
+            available_commit = int(status.ullAvailPageFile)
+            return {
+                "available_ram": int(status.ullAvailPhys),
+                "total_ram": int(status.ullTotalPhys),
+                "process_rss": int(counters.WorkingSetSize),
+                "process_private_bytes": int(counters.PrivateUsage),
+                "total_commit": total_commit,
+                "available_commit": available_commit,
+                "commit_pressure": 1.0 - available_commit / max(1, total_commit),
+                "pagefile_pressure": int(counters.PrivateUsage) / max(1, total_commit),
+            }
+        except RECOVERABLE_ERRORS:
+            pass
+    available, rss = ResourceGovernor._memory_values()
+    return {
+        "available_ram": int(available), "total_ram": 0, "process_rss": int(rss),
+        "process_private_bytes": int(rss), "total_commit": 0, "available_commit": 0,
+        "commit_pressure": 0.0, "pagefile_pressure": 0.0,
+    }
+
+
+def _effective_resource_thresholds(snapshot):
+    total_ram = max(0, safe_int(getattr(snapshot, "total_ram", 0), 0))
+    tested_peak = max(0, safe_int(getattr(snapshot, "tested_peak_vram", 0), 0))
+    total_vram = max(0, safe_int(getattr(snapshot, "total_vram", 0), 0))
+    model_ram_peak = max(
+        safe_int(RESOURCE_GOVERNOR.benchmark_profile.get("tested_peak_ram"), 0, 0),
+        safe_int(getattr(snapshot, "process_private_bytes", 0), 0),
+    )
+    ram_margin = max(768 * 1024 * 1024, int(model_ram_peak * 0.25))
+    ram_red = max(RUNTIME_THRESHOLDS.ram_red_bytes, int(total_ram * 0.08) if total_ram else 0, ram_margin)
+    ram_yellow = max(
+        RUNTIME_THRESHOLDS.ram_yellow_bytes,
+        int(total_ram * 0.14) if total_ram else 0,
+        ram_red + 768 * 1024 * 1024,
+    )
+    vram_margin = max(512 * 1024 * 1024, int(tested_peak * 0.30))
+    vram_red = max(RUNTIME_THRESHOLDS.free_vram_red_bytes, int(total_vram * 0.10) if total_vram else 0, vram_margin)
+    vram_yellow = max(
+        RUNTIME_THRESHOLDS.free_vram_yellow_bytes,
+        int(total_vram * 0.18) if total_vram else 0,
+        vram_red + 384 * 1024 * 1024,
+    )
+    return {"ram_red": ram_red, "ram_yellow": ram_yellow, "vram_red": vram_red, "vram_yellow": vram_yellow}
+
+
+def _resource_worker_pid():
+    runtime = APP_CONTEXT.vision_runtime
+    worker = getattr(runtime, "worker", None) if runtime is not None else None
+    process = getattr(worker, "process", None)
+    return safe_int(getattr(process, "pid", 0), os.getpid(), 1)
+
+
+def _strict_governor_sample_once(self):
+    cpu, process_cpu = self._cpu_values()
+    memory = _strict_memory_values()
+    backend = self._manifest_backend()
+    gpu = WINDOWS_GPU_TELEMETRY.sample(backend, _resource_worker_pid())
+    queue_ratio, queue_oldest = self._queue_values()
+    perception_p95 = self._series_p95("end_to_end_perception_ms")
+    decision_p95 = self._series_p95("end_to_end_decision_ms")
+    end_to_end_p95 = max(perception_p95, decision_p95)
+    end_to_end_p99 = max(
+        RUNTIME_METRICS.percentile(
+            "end_to_end_perception_ms", 0.99, 0.75
+        ),
+        RUNTIME_METRICS.percentile(
+            "end_to_end_decision_ms", 0.99, 0.75
+        ),
+    )
+    now = time.monotonic()
+    counts = {
+        "removed": int(RUNTIME_METRICS.counters.get("gpu_device_removed", 0)),
+        "reset": int(RUNTIME_METRICS.counters.get("gpu_device_reset", 0)),
+        "oom": int(RUNTIME_METRICS.counters.get("gpu_oom", 0)),
+    }
+    with self.lock:
+        deltas = {key: max(0, counts[key] - safe_int(self._fault_counter_baseline.get(key), 0)) for key in counts}
+        self._fault_counter_baseline = dict(counts)
+        if any(deltas.values()):
+            details = {
+                "oom": deltas["oom"] > 0,
+                "device_removed": deltas["removed"] > 0,
+                "device_reset": deltas["reset"] > 0,
+                "signature": hashlib.sha256(
+                    canonical_bytes({"backend": backend, "counts": counts})
+                ).hexdigest(),
+            }
+            self._record_accelerator_fault_locked(backend, details, now)
+        last_fault = self.last_accelerator_fault_at
+        fault_age = None if last_fault is None else max(0.0, now - last_fault)
+        self_test = self.accelerator_self_tests.get(str(backend), {})
+        self_test_passed = bool(
+            self_test.get("passed")
+            and safe_float(self_test.get("monotonic"), 0.0)
+            >= safe_float(last_fault, 0.0)
+        )
+        backend_blacklisted = str(backend) in self.backend_blacklist
+        total_vram = gpu.get("total_vram", self.benchmark_profile.get("total_vram"))
+        tested_peak_vram = self.benchmark_profile.get("tested_peak_vram")
+        probe_bytes = self.benchmark_profile.get("probe_bytes")
+        probe_passed = bool(
+            self.benchmark_profile.get(
+                "probe_passed",
+                self.benchmark_profile.get("vram_test_passed", False),
+            )
+        )
+    provisional = StrictHardwareSnapshot(
+        cpu_percent=round(cpu, 3), process_cpu_percent=round(process_cpu, 3),
+        available_ram=int(memory["available_ram"]), process_rss=int(memory["process_rss"]),
+        gpu_backend=str(backend), gpu_utilization=gpu.get("gpu_utilization"), free_vram=gpu.get("free_vram"),
+        capture_p95_ms=round(self._series_p95("capture_latency_ms"), 3), queue_ratio=round(queue_ratio, 5),
+        queue_oldest_ms=round(queue_oldest, 3), disk_write_p95_ms=round(self._disk_p95(), 3),
+        end_to_end_p95_ms=round(end_to_end_p95, 3), end_to_end_p99_ms=round(end_to_end_p99, 3),
+        dedicated_vram_used=gpu.get("dedicated_vram_used", gpu.get("local_current_usage")),
+        shared_vram_used=gpu.get("shared_vram_used", gpu.get("nonlocal_current_usage")),
+        gpu_queue_wait_p95_ms=round(
+            self._series_p95("gpu_queue_wait_ms"), 3
+        ),
+        cpu_to_gpu_copy_p95_ms=round(
+            self._series_p95("cpu_to_gpu_copy_ms"), 3
+        ),
+        device_removed_count=counts["removed"], device_reset_count=counts["reset"], gpu_oom_count=counts["oom"],
+        device_removed_delta=deltas["removed"], device_reset_delta=deltas["reset"], gpu_oom_delta=deltas["oom"],
+        last_accelerator_fault_monotonic=last_fault, accelerator_fault_age_seconds=fault_age,
+        accelerator_self_test_passed=self_test_passed, backend_blacklisted=backend_blacklisted,
+        available_ram_known=int(memory["available_ram"]) > 0, free_vram_known=gpu.get("free_vram") is not None,
+        total_vram=(
+            None if total_vram is None else safe_int(total_vram, 0, 0)
+        ),
+        tested_peak_vram=(
+            None
+            if tested_peak_vram is None
+            else safe_int(tested_peak_vram, 0, 0)
+        ),
+        total_ram=int(memory["total_ram"]),
+        total_commit=int(memory["total_commit"]),
+        available_commit=int(memory["available_commit"]),
+        process_private_bytes=int(memory["process_private_bytes"]),
+        commit_pressure=round(float(memory["commit_pressure"]), 6),
+        pagefile_pressure=round(float(memory["pagefile_pressure"]), 6),
+        vram_budget=gpu.get("local_budget"),
+        vram_current_usage=gpu.get("local_current_usage"),
+        vram_available_for_reservation=gpu.get(
+            "local_available_for_reservation"
+        ),
+        vram_current_reservation=gpu.get("local_current_reservation"),
+        shared_vram_budget=gpu.get("nonlocal_budget"),
+        shared_vram_current_usage=gpu.get("nonlocal_current_usage"),
+        process_dedicated_vram=gpu.get("process_dedicated_vram"),
+        process_shared_vram=gpu.get("process_shared_vram"),
+        telemetry_source=str(gpu.get("source", "")),
+        probe_bytes=None if probe_bytes is None else safe_int(probe_bytes, 0, 0), probe_passed=probe_passed,
+    )
+    limits = _effective_resource_thresholds(provisional)
+    values = {
+        name: getattr(provisional, name)
+        for name in provisional.__dataclass_fields__
+    }
+    values.update(
+        {
+            "effective_ram_red_bytes": limits["ram_red"],
+            "effective_ram_yellow_bytes": limits["ram_yellow"],
+            "effective_vram_red_bytes": limits["vram_red"],
+            "effective_vram_yellow_bytes": limits["vram_yellow"],
+        }
+    )
+    snapshot = StrictHardwareSnapshot(**values)
+    with self.lock:
+        self.history.append(snapshot)
+        self._last_snapshot = snapshot
+        self._update_state_locked(now)
+    if any(deltas.values()) or backend_blacklisted:
+        self._persist_backend_fault_state()
+    return snapshot
+
+
+def _strict_governor_update_state(self, now):
+    recent = list(self.history)
+    if not recent:
+        return
+    current = recent[-1]
+    previous_snapshot = recent[-2] if len(recent) >= 2 else None
+    old_state = self.state
+    old_plans = self.plans
+    limits = _effective_resource_thresholds(current)
+    commit_pressure = safe_float(getattr(current, "commit_pressure", 0.0), 0.0)
+    available_commit = safe_int(getattr(current, "available_commit", 0), 0, 0)
+    pagefile_pressure = safe_float(getattr(current, "pagefile_pressure", 0.0), 0.0)
+    shared_vram_current_usage = getattr(
+        current,
+        "shared_vram_current_usage",
+        getattr(current, "shared_vram_used", None),
+    )
+    shared_vram_budget = getattr(current, "shared_vram_budget", None)
+    accelerator = "nvidia" in current.gpu_backend.casefold() or "directml" in current.gpu_backend.casefold()
+    new_fault = bool(current.device_removed_delta or current.device_reset_delta or current.gpu_oom_delta)
+    fault_red = bool(
+        accelerator
+        and (
+            current.backend_blacklisted
+            or new_fault
+            or (
+                current.accelerator_fault_age_seconds is not None
+                and current.accelerator_fault_age_seconds <= 30.0
+                and not current.accelerator_self_test_passed
+            )
+        )
+    )
+    rapid = False
+    if previous_snapshot is not None:
+        ram_drop = previous_snapshot.available_ram - current.available_ram
+        vram_drop = (
+            0
+            if previous_snapshot.free_vram is None
+            or current.free_vram is None
+            else previous_snapshot.free_vram - current.free_vram
+        )
+        rapid = ram_drop >= 512 * 1024 * 1024 or vram_drop >= 256 * 1024 * 1024
+    queue_red = len(recent) >= 2 and all(item.queue_ratio > 0.90 for item in recent[-2:])
+    severe = bool(
+        fault_red or queue_red or rapid
+        or current.available_ram_known and current.available_ram < limits["ram_red"]
+        or current.free_vram_known and current.free_vram < limits["vram_red"]
+        or commit_pressure >= 0.92 or available_commit and available_commit < limits["ram_red"]
+        or current.capture_p95_ms > RUNTIME_THRESHOLDS.capture_red_ms
+        or current.end_to_end_p95_ms > RUNTIME_THRESHOLDS.end_to_end_red_p95_ms
+        or current.disk_write_p95_ms > 180.0 or current.cpu_percent > 97.0
+        or current.gpu_utilization is not None and current.gpu_utilization > 98.0
+        or current.gpu_queue_wait_p95_ms > 40.0 or current.cpu_to_gpu_copy_p95_ms > 30.0
+    )
+    warning = bool(
+        severe or current.queue_ratio > 0.70
+        or current.available_ram_known and current.available_ram < limits["ram_yellow"]
+        or current.free_vram_known and current.free_vram < limits["vram_yellow"]
+        or commit_pressure >= 0.82 or pagefile_pressure >= 0.70
+        or current.capture_p95_ms > RUNTIME_THRESHOLDS.capture_yellow_ms
+        or current.end_to_end_p95_ms > RUNTIME_THRESHOLDS.end_to_end_yellow_p95_ms
+        or current.disk_write_p95_ms > 80.0 or current.cpu_percent > 88.0 or current.process_cpu_percent > 85.0
+        or current.gpu_utilization is not None and current.gpu_utilization > 94.0
+        or current.gpu_queue_wait_p95_ms > 18.0 or current.cpu_to_gpu_copy_p95_ms > 12.0
+        or (
+            shared_vram_current_usage is not None
+            and shared_vram_budget is not None
+            and shared_vram_current_usage > shared_vram_budget * 0.80
+        )
+    )
+    self._strict_red_streak = safe_int(getattr(self, "_strict_red_streak", 0), 0) + 1 if severe else 0
+    self._strict_yellow_streak = safe_int(getattr(self, "_strict_yellow_streak", 0), 0) + 1 if warning else 0
+    immediate_red = fault_red or rapid
+    if immediate_red or self._strict_red_streak >= 3:
+        desired = ResourceState.RED
+    elif self._strict_yellow_streak >= 5:
+        desired = ResourceState.YELLOW
+    else:
+        desired = ResourceState.NORMAL
+    rank = {ResourceState.NORMAL: 0, ResourceState.YELLOW: 1, ResourceState.RED: 2}
+    if rank[desired] > rank[self.state]:
+        self.state = desired
+        self.recovery_since = None
+    elif rank[desired] < rank[self.state]:
+        if self.recovery_since is None:
+            self.recovery_since = now
+        elif now - self.recovery_since >= 30.0:
+            self.state = desired
+            self.recovery_since = None
+    else:
+        self.recovery_since = None
+    if self.state is ResourceState.RED:
+        if getattr(self, "red_since", None) is None:
+            self.red_since = now
+    else:
+        self.red_since = None
+    reasons = []
+    if fault_red: reasons.append("accelerator_fault")
+    if rapid: reasons.append("rapid_resource_deterioration")
+    if current.available_ram_known and current.available_ram < limits["ram_red"]: reasons.append("available_ram")
+    if current.free_vram_known and current.free_vram < limits["vram_red"]: reasons.append("vram_budget_headroom")
+    if commit_pressure >= 0.92: reasons.append("commit_charge")
+    if queue_red: reasons.append("queue_pressure")
+    if not reasons: reasons.append("resource_state_" + self.state.value.casefold())
+    self.plan_reason = "+".join(reasons)
+    candidate_plans = self._plans_for_state(self.state, current.gpu_backend)
+    old_signature = (old_plans.ai.backend, old_plans.ai.model_tier)
+    new_signature = (candidate_plans.ai.backend, candidate_plans.ai.model_tier)
+    recent_switches = (
+        value
+        for value in getattr(self, "_strict_switch_times", deque())
+        if now - value <= 900.0
+    )
+    self._strict_switch_times = deque(recent_switches, maxlen=16)
+    last_switch = safe_float(getattr(self, "_strict_last_switch", 0.0), 0.0)
+    if new_signature != old_signature and self.state is not ResourceState.RED and now - last_switch < 60.0:
+        candidate_plans = old_plans
+        new_signature = old_signature
+        self.plan_reason += "+switch_rate_limited"
+    elif new_signature != old_signature:
+        self._strict_last_switch = now
+        self._strict_switch_times.append(now)
+    if len(self._strict_switch_times) >= 5:
+        self._fault_force_cpu = True
+        self.state = ResourceState.RED
+        self.plan_reason = "oscillation_cpu_safe_mode"
+        candidate_plans = self._plans_for_state(ResourceState.RED, "windows-x64-cpu")
+        new_signature = (candidate_plans.ai.backend, candidate_plans.ai.model_tier)
+    self.plans = candidate_plans
+    self.plan = self.plans.ai
+    plan_digest = hashlib.sha256(canonical_bytes(self.plans.to_dict())).hexdigest()
+    if plan_digest != getattr(self, "_strict_plan_digest", ""):
+        self.plan_version = safe_int(getattr(self, "plan_version", 0), 0) + 1
+        self._strict_plan_digest = plan_digest
+        RUNTIME_EVENT_LOGGER.emit(
+            "runtime_plan_changed",
+            plan_version=self.plan_version,
+            plan_reason=self.plan_reason,
+            old_state=old_state.value,
+            new_state=self.state.value,
+            requested_backend=self.plan.backend,
+            requested_model_tier=self.plan.model_tier,
+            thresholds=limits,
+            snapshot={name: getattr(current, name) for name in current.__dataclass_fields__},
+        )
+    if self.state is ResourceState.RED and current.available_ram_known and current.available_ram < limits["ram_red"]:
+        FEATURE_ENGINE.clear_frames()
+        POLICY_TRAINING_CACHE.clear()
+        collect_garbage("resource_red_dynamic", 30.0, old_state is not ResourceState.RED)
+
+
+def _strict_plan_envelope(self):
+    plan = self.current_plan(ModeId.AI.value)
+    with self.lock:
+        return {
+            "plan_version": safe_int(getattr(self, "plan_version", 1), 1, 1),
+            "plan_reason": str(getattr(self, "plan_reason", "startup")),
+            "requested_backend": str(plan.backend),
+            "requested_model_tier": normalize_model_tier(plan.model_tier),
+            "worker_ack_version": safe_int(getattr(self, "worker_ack_version", 0), 0, 0),
+            "applied_backend": str(getattr(self, "applied_backend", "")),
+            "applied_model_tier": normalize_model_tier(getattr(self, "applied_model_tier", "Tiny")),
+            "resource_state": self.state.value,
+            "red_duration_seconds": (
+                0.0
+                if getattr(self, "red_since", None) is None
+                else max(0.0, time.monotonic() - self.red_since)
+            ),
+            "plan": plan.to_dict(),
+        }
+
+
+def _strict_ack_worker(self, value):
+    result = dict(value) if isinstance(value, dict) else {}
+    with self.lock:
+        current_ack = safe_int(
+            getattr(self, "worker_ack_version", 0), 0
+        )
+        incoming_ack = safe_int(
+            result.get("worker_ack_version", result.get("plan_version", 0)),
+            0,
+        )
+        self.worker_ack_version = max(current_ack, incoming_ack)
+        self.applied_backend = str(result.get("applied_backend", getattr(self, "applied_backend", "")))
+        self.applied_model_tier = normalize_model_tier(
+            result.get(
+                "applied_model_tier",
+                getattr(self, "applied_model_tier", "Tiny"),
+            )
+        )
+    return self.worker_ack_version
+
+
+ResourceGovernor.sample_once = _strict_governor_sample_once
+ResourceGovernor._update_state_locked = _strict_governor_update_state
+ResourceGovernor.plan_envelope = _strict_plan_envelope
+ResourceGovernor.acknowledge_worker = _strict_ack_worker
+RESOURCE_GOVERNOR.plan_version = 1
+RESOURCE_GOVERNOR.plan_reason = "startup"
+RESOURCE_GOVERNOR.worker_ack_version = 0
+RESOURCE_GOVERNOR.applied_backend = ""
+RESOURCE_GOVERNOR.applied_model_tier = "Tiny"
+RESOURCE_GOVERNOR.red_since = None
+RESOURCE_GOVERNOR._strict_plan_digest = hashlib.sha256(canonical_bytes(RESOURCE_GOVERNOR.plans.to_dict())).hexdigest()
+RESOURCE_GOVERNOR._last_snapshot = StrictHardwareSnapshot(
+    cpu_percent=0.0, process_cpu_percent=0.0, available_ram=0, process_rss=0,
+    gpu_backend="windows-x64-cpu", gpu_utilization=None, free_vram=None,
+    capture_p95_ms=0.0, queue_ratio=0.0, queue_oldest_ms=0.0, disk_write_p95_ms=0.0,
+)
+
+
+_ORIGINAL_APP_INIT_STRICT = App.__init__
+def _strict_app_init(self, *args, **kwargs):
+    _ORIGINAL_APP_INIT_STRICT(self, *args, **kwargs)
+    self.window_runtime = WindowRuntimeCoordinator(self.api)
+    self._runtime_migration_lock = threading.RLock()
+    self._runtime_migration_active = False
+    self._runtime_last_reconcile = 0.0
+    self._worker_ack_version = 0
+App.__init__ = _strict_app_init
+
+
+_ORIGINAL_WINDOW_COMMIT_STRICT = WindowSelectionController._commit_selection
+def _strict_window_commit(self, item, source_mode, rect):
+    result = _ORIGINAL_WINDOW_COMMIT_STRICT(self, item, source_mode, rect)
+    coordinator = getattr(self.app, "window_runtime", None)
+    if coordinator is not None and isinstance(self.app.selected_window, dict):
+        state = coordinator.publish_selection(self.app.selected_window, reason="window_selected")
+        self.app.window_generation = state.generation
+        self.app.selected_window = coordinator.target_snapshot()
+    return result
+WindowSelectionController._commit_selection = _strict_window_commit
+
+
+_ORIGINAL_REQUIRE_WINDOW_STRICT = App.require_window
+def _strict_require_window(self, foreground=False):
+    if not self.selected_window:
+        raise RuntimeError("请先点击“选择窗口”按钮选择目标窗口")
+    coordinator = getattr(self, "window_runtime", None)
+    if coordinator is not None:
+        if coordinator.snapshot() is None:
+            coordinator.publish_selection(self.selected_window, reason="window_state_recovered")
+        target = coordinator.target_snapshot()
+        self.api.validate_target_identity(target, foreground)
+        self.selected_window = target
+        self.window_generation = safe_int(target.get("window_generation"), self.window_generation, 0)
+        return target
+    return _ORIGINAL_REQUIRE_WINDOW_STRICT(self, foreground)
+App.require_window = _strict_require_window
+
+
+_ORIGINAL_MODE_SESSION_INIT_STRICT = ModeSession.__init__
+def _strict_mode_session_init(self, app, target):
+    coordinator = getattr(app, "window_runtime", None)
+    if coordinator is not None and coordinator.snapshot() is not None:
+        extra = {
+            "game_id": str((getattr(app, "selected_game", None) or {}).get("id", "")),
+            "session_id": str(
+                getattr(app, "mode_session_id", "")
+                or getattr(app, "ask_session_id", "")
+                or uuid.uuid4().hex
+            ),
+        }
+        target = coordinator.target_snapshot(extra)
+    _ORIGINAL_MODE_SESSION_INIT_STRICT(self, app, target)
+    self.window_runtime = coordinator
+ModeSession.__init__ = _strict_mode_session_init
+
+
+_ORIGINAL_FRAME_BUFFER_INIT_STRICT = FrameBuffer.__init__
+def _strict_frame_buffer_init(self, bridge, target, *args, **kwargs):
+    _ORIGINAL_FRAME_BUFFER_INIT_STRICT(self, bridge, target, *args, **kwargs)
+    with WINDOW_RUNTIME_REGISTRY_LOCK:
+        self.window_runtime = WINDOW_RUNTIME_REGISTRY.get(safe_int(self.target.get("hwnd"), 0))
+    if self.window_runtime is not None:
+        fresh = self.window_runtime.target_snapshot({"game_id": self.game_id, "session_id": self.session_id})
+        if fresh:
+            self.target = fresh
+            self.window_generation = safe_int(fresh.get("window_generation"), self.window_generation, 0)
+            self.isolation_key = runtime_isolation_key(
+                self.game_id,
+                self.session_id,
+                self.target,
+                self.window_generation,
+            )
+            self.target["window_key"] = self.isolation_key
+FrameBuffer.__init__ = _strict_frame_buffer_init
+
+
+def _strict_frame_geometry_ready(self):
+    coordinator = getattr(self, "window_runtime", None)
+    if coordinator is None:
+        return True if not hasattr(self, "_legacy_geometry_ready") else self._legacy_geometry_ready()
+    with coordinator.geometry_lock:
+        fresh_target = coordinator.target_snapshot({"game_id": self.game_id, "session_id": self.session_id})
+        if fresh_target:
+            self.target = fresh_target
+            self.window_generation = safe_int(fresh_target.get("window_generation"), self.window_generation, 0)
+        rect, dpi = self.bridge.validate_target_identity(self.target, False)
+        state = coordinator.snapshot()
+        changed = state is None or tuple(rect) != tuple(state.client_rect) or int(dpi) != int(state.dpi)
+        if not changed:
+            self.pending_geometry = None
+            self.geometry_since = 0.0
+            return True
+        coordinator.begin_geometry_change(rect, dpi)
+        geometry = tuple(int(value) for value in (*rect, int(dpi)))
+        now = time.monotonic()
+        if geometry != self.pending_geometry:
+            self.pending_geometry = geometry
+            self.geometry_since = now
+            with self.condition:
+                self.frames.clear()
+                self.sequence += 1
+                self.last_error = "窗口尺寸或DPI变化，等待几何稳定后执行原子重新校准"
+                self.condition.notify_all()
+            return False
+        if now - self.geometry_since < 0.75:
+            return False
+        identity = self.bridge.target_identity(self.target)
+        if coordinator._identity_hash(identity) != state.identity_hash:
+            raise TargetUnavailable("窗口身份在几何变化期间发生变化，拒绝恢复输入")
+        old_key = self.isolation_key
+        clear_runtime_isolation(key=old_key)
+        updated = dict(self.target)
+        updated.update(identity)
+        updated["selected_rect"] = list(rect)
+        updated["client_size"] = [int(rect[2]), int(rect[3])]
+        updated["selected_dpi"] = int(dpi)
+        updated["dpi"] = int(dpi)
+        self.bridge.calibrations.pop(int(updated["hwnd"]), None)
+        self.bridge.reset_capture_backends(updated)
+        self.bridge.reset_frame_history(updated.get("hwnd"))
+        calibration = self.bridge.calibrate(updated, 1.2, self.stop_event)
+        confirmations = max(
+            RUNTIME_THRESHOLDS.confirmation_frames,
+            safe_int(
+                calibration.get("confirm_frames"),
+                RUNTIME_THRESHOLDS.confirmation_frames,
+                1,
+                120,
+            ),
+        )
+        new_state = coordinator.commit_geometry(updated, rect, dpi, calibration, confirmations)
+        self.target = coordinator.target_snapshot({"game_id": self.game_id, "session_id": self.session_id})
+        self.window_generation = new_state.generation
+        self.isolation_key = runtime_isolation_key(self.game_id, self.session_id, self.target, self.window_generation)
+        self.target["window_key"] = self.isolation_key
+        clear_runtime_isolation(key=self.isolation_key)
+        self.resume_confirmations = confirmations
+        self.pending_geometry = None
+        self.geometry_since = 0.0
+        with self.condition:
+            self.frames.clear()
+            self.sequence += 1
+            self.last_error = "窗口几何已原子更新并重新校准，等待连续有效帧"
+            self.condition.notify_all()
+        if self.on_geometry:
+            self.on_geometry(self.target, calibration)
+        return False
+
+
+FrameBuffer._legacy_geometry_ready = FrameBuffer._geometry_ready
+FrameBuffer._geometry_ready = _strict_frame_geometry_ready
+
+
+_ORIGINAL_GEOMETRY_UPDATED_STRICT = ModeSession._geometry_updated
+def _strict_geometry_updated(self, target, calibration):
+    coordinator = getattr(self, "window_runtime", None)
+    if coordinator is not None:
+        fresh = coordinator.target_snapshot(
+            {
+                "game_id": self.target.get("game_id", ""),
+                "session_id": self.target.get("session_id", ""),
+            }
+        )
+        if fresh:
+            self.target.clear()
+            self.target.update(fresh)
+            self.isolation_key = runtime_isolation_key(
+                self.target.get("game_id"),
+                self.target.get("session_id"),
+                self.target,
+                self.target.get("window_generation", 0),
+            )
+            self.target["window_key"] = self.isolation_key
+            self.app.selected_window = coordinator.target_snapshot()
+            self.app.window_generation = safe_int(self.target.get("window_generation"), self.app.window_generation, 0)
+            execution = getattr(getattr(self.app, "training_controller", None), "execution", None)
+            if execution is not None and hasattr(execution, "target"):
+                execution.target = dict(self.target)
+    return _ORIGINAL_GEOMETRY_UPDATED_STRICT(self, target, calibration)
+ModeSession._geometry_updated = _strict_geometry_updated
+
+
+def _refresh_training_window_state(execution):
+    coordinator = getattr(execution.host, "window_runtime", None)
+    if coordinator is None or coordinator.snapshot() is None or not hasattr(execution, "target"):
+        return False
+    current = coordinator.target_snapshot(
+        {
+            "game_id": str(
+                getattr(execution, "game", {}).get("id", "")
+            ),
+            "session_id": str(
+                getattr(execution, "runtime_session_id", "")
+            ),
+        }
+    )
+    if not current:
+        return False
+    old_generation = safe_int(execution.target.get("window_generation"), 0)
+    new_generation = safe_int(current.get("window_generation"), 0)
+    if new_generation == old_generation:
+        return False
+    execution.target = current
+    execution.target["window_key"] = runtime_isolation_key(
+        execution.target.get("game_id"),
+        execution.target.get("session_id"),
+        execution.target,
+        new_generation,
+    )
+    if hasattr(execution, "profile"):
+        execution.profile["perception_key"] = execution.target["window_key"]
+    if hasattr(execution, "calibration"):
+        execution.calibration = execution.host.api.calibration_for(execution.target)
+    rect = execution.host.api.client_rect(int(execution.target["hwnd"]))
+    execution.visual_runtime_layout = {
+        "content_rect": list(rect), "dpi": execution.host.api.dpi_for_window(int(execution.target["hwnd"])),
+        "capture_backend": getattr(execution, "validated_backend", ""), "aspect": rect[2] / max(1, rect[3]),
+    }
+    RUNTIME_EVENT_LOGGER.emit(
+        "ai_window_state_synchronized",
+        old_generation=old_generation,
+        new_generation=new_generation,
+        client_rect=rect,
+        dpi=execution.visual_runtime_layout["dpi"],
+    )
+    return True
+
+
+_ORIGINAL_TRAINING_PREFLIGHT_STRICT = TrainingExecution.preflight
+def _strict_training_preflight(self):
+    result = _ORIGINAL_TRAINING_PREFLIGHT_STRICT(self)
+    _refresh_training_window_state(self)
+    return result
+TrainingExecution.preflight = _strict_training_preflight
+
+
+_ORIGINAL_ASSERT_SNAPSHOT_STRICT = TrainingExecution.assert_training_snapshot
+def _strict_assert_snapshot(self, force=False):
+    _refresh_training_window_state(self)
+    return _ORIGINAL_ASSERT_SNAPSHOT_STRICT(self, force)
+TrainingExecution.assert_training_snapshot = _strict_assert_snapshot
+
+
+class ShadowLearningGate:
+    minimum_comparisons = 30
+
+    @staticmethod
+    def state_key(captured, temporal):
+        value = {
+            "coarse": hashlib.sha256(bytes(captured.get("coarse", b""))).hexdigest()[:20],
+            "objects": sorted(
+                (
+                    str(item.get("class", "")),
+                    str(item.get("role", "")),
+                )
+                for item in captured.get("semantic_targets", [])
+                if isinstance(item, dict)
+            )[:32],
+            "task": str((temporal or {}).get("subgoal_id", "")),
+            "resolution": str(captured.get("rect", "")),
+            "dpi": safe_int(captured.get("dpi"), 0),
+        }
+        return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+    def allow(self, execution, captured, temporal, selection):
+        decision = dict(getattr(execution, "last_decision_snapshot", {}) or {})
+        best = decision.get("best", {}) if isinstance(decision.get("best"), dict) else {}
+        uncertainty = safe_float(best.get("ood_uncertainty", decision.get("ood", 0.0)), 0.0)
+        if uncertainty <= 0.35:
+            return True
+        key = self.state_key(captured, temporal)
+        validation = (
+            execution.model.get("validation", {})
+            if isinstance(execution.model.get("validation"), dict)
+            else {}
+        )
+        approved = set(str(value) for value in validation.get("shadow_approved_state_keys", []) if str(value))
+        comparisons = safe_int(validation.get("shadow_comparison_count", 0), 0)
+        allowed = bool(
+            key in approved
+            and comparisons >= self.minimum_comparisons
+            and validation.get("offline_replay_passed")
+        )
+        RUNTIME_EVENT_LOGGER.emit(
+            "shadow_mode_prediction",
+            game_id=str(execution.game.get("id", "")), state_key=key, uncertainty=uncertainty,
+            predicted_action=selection.get("canonical", "") if isinstance(selection, dict) else "",
+            comparison_count=comparisons, minimum_comparisons=self.minimum_comparisons,
+            action_executed=allowed,
+            rollback_model_fingerprint=str(
+                execution.model.get("evaluation_model_fingerprint", "")
+            ),
+        )
+        if not allowed:
+            execution.host.set_status("影子模式：新状态只预测、不执行；需人工比较、离线升级和回放验收后才可放行")
+            execution.host.set_input_status("影子模式已锁定")
+        return allowed
+
+
+SHADOW_LEARNING_GATE = ShadowLearningGate()
+_ORIGINAL_CHOOSE_ACTION_STRICT = TrainingExecution.choose_action
+def _strict_choose_action(self, captured, temporal):
+    _refresh_training_window_state(self)
+    selection = _ORIGINAL_CHOOSE_ACTION_STRICT(self, captured, temporal)
+    if selection is not None and not SHADOW_LEARNING_GATE.allow(self, captured, temporal, selection):
+        return None
+    return selection
+TrainingExecution.choose_action = _strict_choose_action
+
+
+_ORIGINAL_EXECUTE_SELECTED_STRICT = TrainingExecution.execute_selected_action
+def _strict_execute_selected(self, selection):
+    _refresh_training_window_state(self)
+    coordinator = getattr(self.host, "window_runtime", None)
+    state = coordinator.snapshot() if coordinator is not None else None
+    if state is not None and not state.input_eligible:
+        self.host.api.block_input()
+        raise InputStopped("窗口新generation尚未完成连续有效帧确认")
+    return _ORIGINAL_EXECUTE_SELECTED_STRICT(self, selection)
+TrainingExecution.execute_selected_action = _strict_execute_selected
+
+
+class ModelInstanceRegistry:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.instances = {}
+
+    def register(self, backend, tier, validation):
+        key = (str(backend), normalize_model_tier(tier))
+        value = dict(validation) if isinstance(validation, dict) else {}
+        if not value.get("valid"):
+            raise ModelValidationError("完整模型实例验证失败：" + str(key))
+        value.update({"backend": key[0], "model_tier": key[1], "validated": time.time()})
+        with self.lock:
+            self.instances[key] = value
+        return value
+
+    def validated(self, backend, tier):
+        with self.lock:
+            return dict(self.instances.get((str(backend), normalize_model_tier(tier)), {}))
+
+
+MODEL_INSTANCE_REGISTRY = ModelInstanceRegistry()
+
+
+def _strict_migrate_worker(self, envelope):
+    old_worker = self.ai_worker
+    old_snapshot = RESOURCE_GOVERNOR.current_snapshot()
+    should_resume = normalize_mode_id(self.mode) == ModeId.AI.value and self.mode_state != MODE_IDLE
+    try:
+        self.api.block_input()
+        self.api.release_all_buttons()
+        if should_resume:
+            self.ui(lambda: self.request_mode_stop("stopped", "资源计划要求原子切换完整模型实例"), "resource_plan_stop")
+            deadline = time.monotonic() + 15.0
+            while self.mode_state != MODE_IDLE and time.monotonic() < deadline:
+                interruptible_wait(None, 0.05)
+            if self.mode_state != MODE_IDLE:
+                raise RuntimeError("旧AI模式未在限定时间内安全停止")
+        try:
+            self.store.emergency_checkpoint("resource_plan_migration")
+        except RECOVERABLE_ERRORS as error:
+            record_cleanup_error("RESOURCE_PLAN_CHECKPOINT", error)
+        backend = str(envelope.get("requested_backend", "windows-x64-cpu"))
+        tier = normalize_model_tier(envelope.get("requested_model_tier", "Tiny"))
+        family = backend.casefold()
+        force_cpu = (
+            "cpu" in family
+            and "nvidia" not in family
+            and "directml" not in family
+        )
+        worker = AIWorkerClient(
+            self.store.base, self._ai_worker_failed, force_cpu_safe=force_cpu,
+            requested_backend=backend, requested_model_tier=tier,
+            plan_version=safe_int(envelope.get("plan_version"), 0),
+            plan_reason=str(
+                envelope.get("plan_reason", "resource_plan")
+            ),
+        )
+        validation = worker.validate_model_tier(tier)
+        MODEL_INSTANCE_REGISTRY.register(backend, tier, validation)
+        probe = {"passed": True, "skipped": True}
+        if "nvidia" in backend.casefold() or "directml" in backend.casefold():
+            first = worker.probe_vram(256 * 1024 * 1024)
+            second = worker.probe_vram(512 * 1024 * 1024) if first.get("passed") else first
+            probe = second
+            if not probe.get("passed"):
+                raise RuntimeError("GPU安全分配试探失败")
+            RESOURCE_GOVERNOR.benchmark_profile["probe_bytes"] = safe_int(
+                probe.get("allocated_bytes", probe.get("requested_bytes", 0)),
+                0,
+            )
+            RESOURCE_GOVERNOR.benchmark_profile["probe_passed"] = True
+        vision = VisionRuntimeProxy(worker)
+        ocr = OCRRuntimeProxy(worker)
+        if self.selected_game:
+            game_id = (
+                self.selected_game["id"]
+                if isinstance(self.selected_game, dict)
+                else self.selected_game
+            )
+            vision.activate_game(game_id)
+            ocr.activate_game(self.selected_game["id"] if isinstance(self.selected_game, dict) else self.selected_game)
+            manifest = vision.manifest()
+            if normalize_model_tier(manifest.get("model_tier", tier)) != tier:
+                raise ModelValidationError("新工作进程加载的完整模型等级不一致")
+        ack = worker.apply_plan(envelope)
+        ack_version = safe_int(ack.get("worker_ack_version"), -1)
+        requested_version = safe_int(envelope.get("plan_version"), 0)
+        if ack.get("requires_restart") or ack_version != requested_version:
+            raise RuntimeError("新工作进程未确认资源计划版本")
+        self.ai_worker = worker
+        self.vision_runtime = vision
+        self.ocr_runtime = ocr
+        APP_CONTEXT.vision_runtime = vision
+        APP_CONTEXT.ocr_runtime = ocr
+        self.api.ai_runtime = vision
+        self.lifecycle.set_runtime_ready(True)
+        RESOURCE_GOVERNOR.acknowledge_worker(ack)
+        if old_worker is not None and old_worker is not worker:
+            try:
+                old_worker.quiesce()
+            except RECOVERABLE_ERRORS:
+                pass
+            old_worker.close(2.0)
+        new_snapshot = RESOURCE_GOVERNOR.sample_once()
+        RUNTIME_EVENT_LOGGER.emit(
+            "runtime_worker_migrated",
+            plan_version=envelope.get("plan_version"), plan_reason=envelope.get("plan_reason"),
+            old_backend=getattr(old_snapshot, "gpu_backend", ""), new_backend=ack.get("applied_backend"),
+            old_model_tier=getattr(old_worker, "requested_model_tier", "") if old_worker is not None else "",
+            new_model_tier=ack.get("applied_model_tier"), worker_ack_version=ack.get("worker_ack_version"),
+            probe=probe,
+            memory_released=max(
+                0,
+                getattr(old_snapshot, "process_private_bytes", 0)
+                - getattr(new_snapshot, "process_private_bytes", 0),
+            ),
+            vram_released=max(
+                0,
+                safe_int(
+                    getattr(old_snapshot, "process_dedicated_vram", 0),
+                    0,
+                )
+                - safe_int(
+                    getattr(new_snapshot, "process_dedicated_vram", 0),
+                    0,
+                ),
+            ),
+        )
+        self.ui(lambda: self.status.set("资源计划已由新工作进程确认并原子切换完整模型实例"), "resource_plan_migrated")
+        if should_resume and self.mode_state == MODE_IDLE:
+            self.ui(self.start_training, "resource_plan_resume")
+    except RECOVERABLE_ERRORS as error:
+        if self.store is not None:
+            self.store.log_error("RESOURCE_PLAN_MIGRATION_FAILED", error, mode=self.mode, envelope=dict(envelope))
+        self.ui(
+            lambda value=str(error): self.status.set(
+                "资源计划主动迁移失败，输入保持锁定：" + value
+            ),
+            "resource_plan_migration_failed",
+        )
+    finally:
+        with self._runtime_migration_lock:
+            self._runtime_migration_active = False
+
+
+def _strict_reconcile_runtime_plan(self):
+    if self.ai_worker is None or self.store is None or self.closing:
+        return
+    now = time.monotonic()
+    if now - safe_float(getattr(self, "_runtime_last_reconcile", 0.0), 0.0) < 1.0:
+        return
+    self._runtime_last_reconcile = now
+    envelope = RESOURCE_GOVERNOR.plan_envelope()
+    worker_status = dict(getattr(self.ai_worker, "status", {}) or {})
+    ack_version = max(
+        safe_int(worker_status.get("worker_ack_version"), 0),
+        safe_int(getattr(self, "_worker_ack_version", 0), 0),
+    )
+    if ack_version >= safe_int(envelope.get("plan_version"), 0):
+        return
+    try:
+        ack = self.ai_worker.apply_plan(envelope)
+        if not ack.get("requires_restart"):
+            RESOURCE_GOVERNOR.acknowledge_worker(ack)
+            self._worker_ack_version = safe_int(ack.get("worker_ack_version"), 0)
+            return
+    except RECOVERABLE_ERRORS:
+        ack = {"requires_restart": True}
+    proactive = bool(
+        envelope.get("resource_state") == ResourceState.RED.value
+        and safe_float(envelope.get("red_duration_seconds"), 0.0) >= 3.0
+    )
+    requested_tier = normalize_model_tier(
+        envelope.get("requested_model_tier")
+    )
+    applied_tier = normalize_model_tier(
+        worker_status.get(
+            "applied_model_tier",
+            getattr(self.ai_worker, "requested_model_tier", "Tiny"),
+        )
+    )
+    model_change = requested_tier != applied_tier
+    known_backends = {
+        str(worker_status.get("applied_backend", "")),
+        str(getattr(self.ai_worker, "requested_backend", "")),
+    }
+    backend_change = str(envelope.get("requested_backend")) not in known_backends
+    if not (proactive or model_change or backend_change):
+        return
+    with self._runtime_migration_lock:
+        if self._runtime_migration_active:
+            return
+        self._runtime_migration_active = True
+    threading.Thread(
+        target=_strict_migrate_worker,
+        args=(self, envelope),
+        name="UniversalGameAI-PlanMigration",
+        daemon=True,
+    ).start()
+
+
+_ORIGINAL_PERIODIC_REFRESH_STRICT = App.periodic_refresh
+def _strict_periodic_refresh(self):
+    try:
+        _strict_reconcile_runtime_plan(self)
+    except RECOVERABLE_ERRORS as error:
+        self._log_error("RUNTIME_PLAN_RECONCILE_FAILED", error)
+    return _ORIGINAL_PERIODIC_REFRESH_STRICT(self)
+App.periodic_refresh = _strict_periodic_refresh
+
+
+_ORIGINAL_UPDATE_RUNTIME_STATUS_STRICT = App._update_runtime_status
+def _strict_update_runtime_status(self):
+    result = _ORIGINAL_UPDATE_RUNTIME_STATUS_STRICT(self)
+    try:
+        accepted = False
+        lower = 0.0
+        if self.selected_game and self.store is not None:
+            model = self.store.load_model(self.selected_game["id"]) or {}
+            validation = model.get("validation", {}) if isinstance(model.get("validation"), dict) else {}
+            acceptance = model.get("online_acceptance", {}) if isinstance(model.get("online_acceptance"), dict) else {}
+            lower = safe_float(
+                acceptance.get(
+                    "success_rate_ci95_lower",
+                    validation.get("success_rate_ci95_lower", 0.0),
+                ),
+                0.0,
+            )
+            accepted = bool(acceptance.get("passed") or validation.get("online_acceptance_passed"))
+        text = self.model_text.get()
+        suffix = "；验收：已通过，成功率95%置信下限=" + str(round(lower * 100, 1)) + "%" if accepted else "；验收：尚未完成"
+        if "；验收：" in text:
+            text = text.split("；验收：", 1)[0]
+        self.model_text.set(text + suffix)
+    except RECOVERABLE_ERRORS:
+        pass
+    return result
+App._update_runtime_status = _strict_update_runtime_status
+
+
+_ORIGINAL_PORTFOLIO_BUILD_STRICT = ExperienceReplayPortfolio.build.__func__
+@classmethod
+def _strict_portfolio_build(cls, experiences, limit=MAX_TRAINING_SAMPLES):
+    result = _ORIGINAL_PORTFOLIO_BUILD_STRICT(cls, experiences, limit)
+    manifest = result.get("immutable_training_manifest", {}) if isinstance(result, dict) else {}
+    if isinstance(manifest, dict):
+        manifest["adjacent_frames_kept_together"] = True
+        manifest["leakage_guard"] = "game_task_save_session_level_resolution_ui_popup_fps_input_latency"
+        manifest["same_session_cross_split_forbidden"] = True
+        rows = [row for row in manifest.get("rows", []) if isinstance(row, dict)]
+        group_splits = defaultdict(set)
+        for row in rows:
+            group_splits[str(row.get("group", ""))].add(str(row.get("split", "")))
+        leaks = sorted(key for key, splits in group_splits.items() if len(splits) > 1)
+        manifest["group_leakage"] = leaks
+        manifest["group_overlap"] = bool(leaks)
+        if leaks:
+            manifest["split_status"] = "failed"
+    return result
+ExperienceReplayPortfolio.build = _strict_portfolio_build
+
+
+_ORIGINAL_LOGIC_SUITE_STRICT = logic_contract_suite
+def logic_contract_suite():
+    passed, checks = _ORIGINAL_LOGIC_SUITE_STRICT()
+    def record(name, condition, evidence=None):
+        checks[str(name)] = {"passed": bool(condition), "evidence": evidence}
+    class DummyBridge:
+        def client_rect(self, hwnd): return (0, 0, 1280, 720)
+        def dpi_for_window(self, hwnd): return 96
+        def block_input(self): return None
+        def release_all_buttons(self): return None
+    coordinator = WindowRuntimeCoordinator(DummyBridge())
+    first = coordinator.publish_selection(
+        {
+            "hwnd": 1,
+            "pid": 2,
+            "process_created": 3,
+            "class": "x",
+            "process_path": "x",
+            "selected_rect": [0, 0, 1280, 720],
+            "selected_dpi": 96,
+        }
+    )
+    second = coordinator.commit_geometry(
+        coordinator.target_snapshot(),
+        (10, -20, 1600, 900),
+        144,
+        {"passed": True},
+        3,
+    )
+    first_evidence = {
+        name: getattr(first, name)
+        for name in first.__dataclass_fields__
+    }
+    second_evidence = {
+        name: getattr(second, name)
+        for name in second.__dataclass_fields__
+    }
+    record(
+        "unique_window_runtime_state",
+        first.generation + 1 == second.generation
+        and second.client_rect == (10, -20, 1600, 900)
+        and second.dpi == 144,
+        {"first": first_evidence, "second": second_evidence},
+    )
+    fake = StrictHardwareSnapshot(
+        cpu_percent=0,
+        process_cpu_percent=0,
+        available_ram=1024**3,
+        process_rss=0,
+        gpu_backend="windows-x64-directml",
+        gpu_utilization=0,
+        free_vram=256 * 1024**2,
+        capture_p95_ms=0,
+        queue_ratio=0,
+        queue_oldest_ms=0,
+        disk_write_p95_ms=0,
+        total_ram=64 * 1024**3,
+        total_vram=8 * 1024**3,
+        tested_peak_vram=2 * 1024**3,
+    )
+    limits = _effective_resource_thresholds(fake)
+    record(
+        "dynamic_resource_thresholds",
+        limits["ram_red"] >= int(64 * 1024**3 * 0.08)
+        and limits["vram_red"] >= int(8 * 1024**3 * 0.10),
+        limits,
+    )
+    envelope = RESOURCE_GOVERNOR.plan_envelope()
+    protocol_fields = (
+        "plan_version",
+        "plan_reason",
+        "requested_backend",
+        "requested_model_tier",
+        "worker_ack_version",
+        "applied_backend",
+        "applied_model_tier",
+    )
+    record(
+        "worker_plan_ack_protocol",
+        all(key in envelope for key in protocol_fields),
+        envelope,
+    )
+    samples = [
+        {
+            "game_id": "g1",
+            "task_id": "t",
+            "session": "s1",
+            "context": {
+                "save_id": "save",
+                "level_id": "l",
+                "resolution": "1280x720",
+                "ui_skin": "a",
+                "popup_type": "none",
+                "frame_rate_group": "60",
+                "input_latency_group": "low",
+            },
+            "action_t": "click",
+            "observation_t": {"visual_digest": str(index)},
+        }
+        for index in range(3)
+    ]
+    key_count = len(
+        {ExperienceReplayPortfolio._group_key(item) for item in samples}
+    )
+    record(
+        "independent_dataset_grouping",
+        key_count == 1,
+        {"group": ExperienceReplayPortfolio._group_key(samples[0])},
+    )
+    tier_contract = all(
+        name in MODEL_TIER_SPECS
+        for name in ("Tiny", "Base", "Large")
+    )
+    record(
+        "tier_specific_model_instances",
+        tier_contract and AI_WORKER_PROTOCOL_VERSION >= 6,
+        {
+            "tiers": list(MODEL_TIER_SPECS),
+            "protocol": AI_WORKER_PROTOCOL_VERSION,
+        },
+    )
+    return all(item["passed"] for item in checks.values()), checks
 
 
 def parse_cli(argv=None):
