@@ -1,8 +1,12 @@
-操作系统：Windows 11 x64（已安装Python）
+操作系统：Windows 11 x64
 
-在一开始，只有main.py（无注释）
+已安装Python。
 
-不得要求用户做要求.txt中没有提及的事情。
+在一开始，用户手里只有main.py。
+
+main.py无注释。
+
+用户不能做要求中没有提及的事情。
 
 运行main.py；
 
