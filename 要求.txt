@@ -1,4 +1,6 @@
-操作系统：Windows 11 x64（已安装Python）
+操作系统：Windows 11 x64
+
+默认已安装Python。
 
 在一开始，用户手里只有main.py。
 
