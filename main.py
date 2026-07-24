@@ -182,17 +182,9 @@ MODE_STARTING = "STARTING"
 MODE_RUNNING = "RUNNING"
 MODE_STOPPING = "STOPPING"
 MODE_STATES = {MODE_IDLE, MODE_STARTING, MODE_RUNNING, MODE_STOPPING}
-DEVELOPER_MODE = "--developer-mode" in sys.argv
 AI_WORKER_PROTOCOL_VERSION = 6
 RUNTIME_INSTALL_PROTOCOL_VERSION = 2
 REVIEW_PROCESS_PROTOCOL_VERSION = 2
-STATIC_CONTRACT_VERSION = 14
-EXTERNAL_REQUIREMENT_SPEC_JSON = (
-    '{"default_buttons":["文件夹","文件","游戏名称","选择窗口","人","数","升级","AI"],'
-    '"capture_toggles":["鼠标","键盘","手柄","声音"],"numeric_region_editor":true,"success_confirmation_surface":"main_window",'
-    '"error_confirmation_surface":"modal","promotion_requires_human_baseline":true}'
-)
-EXTERNAL_REQUIREMENT_SPEC = json.loads(EXTERNAL_REQUIREMENT_SPEC_JSON)
 
 
 class AppError(Exception):
@@ -681,7 +673,6 @@ class ModeResultStatus(str, Enum):
 
 
 
-
 class NumericGoalRelation(str, Enum):
     HIGHER_BETTER = "higher_better"
     LOWER_BETTER = "lower_better"
@@ -947,130 +938,10 @@ def runtime_required_projects():
     return set(runtime_lock_manifest().get("required_projects", []))
 
 
-STRICT_ACCEPTANCE_ITEMS = (
-    "启动",
-    "默认界面",
-    "文件夹",
-    "文件完整性",
-    "窗口",
-    "采集",
-    "人",
-    "升级",
-    "AI",
-    "数",
-    "弹窗",
-    "停止",
-    "单实例与目录锁",
-    "独立运行时",
-    "离线网络封锁",
-    "写入路径审计",
-    "多显示器与DPI",
-    "输入输出",
-    "错误恢复",
-    "真实Windows发布矩阵",
-)
-STRICT_ACCEPTANCE_CASES = {
-    "启动": ("control_panel_visible",),
-    "默认界面": ("exact_eight_buttons",),
-    "文件夹": (
-        "select_prepare_confirm",
-        "migration_success",
-        "forced_failure_rollback",
-        "prepare_cancel_cleanup",
-        "folder_picker_direct",
-        "folder_picker_cancel",
-        "folder_no_custom_modal",
-        "folder_inline_confirm",
-        "folder_no_success_popup",
-        "main_py_at_root",
-        "main_py_hash_match",
-        "no_global_input_lock",
-        "exact_user_sequence",
-    ),
-    "文件完整性": (
-        "normal_complete",
-        "network_failure_retry",
-        "escape_retry",
-        "locked_manifest",
-        "integrity_checks_selected_main",
-    ),
-    "窗口": ("ldplayer_confirmed", "ordinary_confirmed", "administrator_integrity_difference", "emulator_scaling"),
-    "采集": ("minimized", "occluded", "scaled", "recreated"),
-    "人": ("client_only_real_mouse", "capture_modalities_closed_loop"),
-    "升级": ("socket_blocked", "model_optimized", "pool_optimized", "deterministic_seed"),
-    "AI": ("all_coordinates_in_client", "immutable_snapshot_change_stop"),
-    "数": (
-        "single_capture_before_editor",
-        "region_create_edit_delete_select",
-        "default_white_half_transparent",
-        "blank_deselect",
-        "inside_move",
-        "edge_resize",
-        "corner_resize",
-        "per_region_color_and_opacity",
-        "coarse_annotation_tolerance",
-        "human_ai_hidden_adaptive_tracking",
-        "all_numeric_preferences",
-        "cross_region_comparison",
-        "occlusion_and_reacquisition",
-    ),
-    "弹窗": ("confirm_only", "success_status_only", "error_confirm_only"),
-    "停止": (
-        "starting",
-        "running",
-        "stopping",
-        "latency_thresholds",
-        "buttons_released",
-        "escape_to_input_lock",
-        "escape_to_buttons_released",
-        "abnormal_exit_release",
-    ),
-    "单实例与目录锁": ("named_mutex", "directory_lock", "lock_record"),
-    "独立运行时": ("fixed_python", "worker_process", "embedded_wheel_lock", "host_abi_independent"),
-    "离线网络封锁": ("socket", "urllib", "disconnected_windows"),
-    "写入路径审计": ("internal_audit", "external_monitor"),
-    "多显示器与DPI": (
-        "dpi100",
-        "dpi125",
-        "dpi150",
-        "dpi200",
-        "mixed_dpi",
-        "negative_coordinates",
-        "cross_monitor",
-        "hwnd_reuse",
-    ),
-    "输入输出": (
-        "keyboard_scancode_directinput",
-        "combo_reverse_release",
-        "input_lease_expiry_release",
-        "xinput_button_and_axis",
-        "escape_releases_keyboard_gamepad_mouse",
-        "worker_crash_releases_all_inputs",
-        "uipi_fail_closed",
-    ),
-    "错误恢复": ("input_locked", "rollback", "retry", "no_pressed_buttons", "no_orphan_process", "no_staging"),
-    "真实Windows发布矩阵": (
-        "low_end_cpu_machine",
-        "nvidia_cuda_machine",
-        "amd_or_intel_directml_machine",
-        "native_folder_picker_cancel",
-        "forced_exit_during_migration",
-        "mixed_dpi_100_125_150_200",
-        "negative_coordinates_and_cross_monitor",
-        "ldplayer_and_ordinary_window",
-        "administrator_uipi",
-        "real_mouse_keyboard_gamepad",
-        "escape_starting_running_stopping",
-        "gpu_driver_fault_and_recovery",
-        "window_destroy_and_recreate",
-        "release_evidence_attached",
-    ),
-}
 SAMPLE_IMAGE_VERSION = 1
 NEURAL_FEATURE_VERSION = 3
 MODEL_MAX_BYTES = 256 * 1024 * 1024
 REQUIRED_DEFAULT_BUTTONS = {"文件夹", "文件", "游戏名称", "选择窗口", "人", "数", "升级", "AI"}
-REQUIRED_CAPTURE_TOGGLES = ("鼠标", "键盘", "手柄", "声音")
 AUTHORITATIVE_DATA_PATHS = (
     "universal_game_ai.db",
     "models/vision",
@@ -1079,7 +950,6 @@ AUTHORITATIVE_DATA_PATHS = (
     "runtime.current",
     "backups",
     "quarantine",
-    "project",
     "audit",
 )
 RUNTIME_PYPI_INDEX = "https://pypi.org/simple"
@@ -1236,6 +1106,28 @@ class HardwareSnapshot:
     free_vram_known: bool = False
     total_vram: int | None = None
     tested_peak_vram: int | None = None
+    total_ram: int = 0
+    total_commit: int = 0
+    available_commit: int = 0
+    process_private_bytes: int = 0
+    commit_pressure: float = 0.0
+    pagefile_pressure: float = 0.0
+    vram_budget: int | None = None
+    vram_current_usage: int | None = None
+    vram_available_for_reservation: int | None = None
+    vram_current_reservation: int | None = None
+    shared_vram_budget: int | None = None
+    shared_vram_current_usage: int | None = None
+    process_dedicated_vram: int | None = None
+    process_shared_vram: int | None = None
+    telemetry_source: str = ""
+    probe_bytes: int | None = None
+    probe_passed: bool = False
+    effective_ram_red_bytes: int = 0
+    effective_ram_yellow_bytes: int = 0
+    effective_vram_red_bytes: int = 0
+    effective_vram_yellow_bytes: int = 0
+
 
 
 def physical_core_count():
@@ -1417,33 +1309,26 @@ def classify_accelerator_fault(error):
 class WindowsGpuTelemetry:
     def __init__(self):
         self.lock = threading.RLock()
-        self.cache = (0.0, {})
+        self.cache = {}
 
-    def sample(self, backend, cache_seconds=3.0):
+    def _performance_counters(self, pid):
         if os.name != "nt":
             return {}
-        family = str(backend or "").casefold()
-        if "directml" not in family and "nvidia" not in family:
-            return {}
-        now = time.monotonic()
-        with self.lock:
-            if now - self.cache[0] <= max(0.25, float(cache_seconds)):
-                return dict(self.cache[1])
         command = (
-            r"$p=@('\GPU Engine(*)\Utilization Percentage',"
-            r"'\GPU Adapter Memory(*)\Dedicated Usage',"
-            r"'\GPU Adapter Memory(*)\Shared Usage');"
+            r"$p=@('\\GPU Engine(*)\\Utilization Percentage',"
+            r"'\\GPU Adapter Memory(*)\\Dedicated Usage',"
+            r"'\\GPU Adapter Memory(*)\\Shared Usage',"
+            r"'\\GPU Process Memory(*)\\Dedicated Usage','\\GPU Process Memory(*)\\Shared Usage');"
             "$s=(Get-Counter -Counter $p -MaxSamples 1 -ErrorAction Stop).CounterSamples;"
             "$s|Select-Object Path,CookedValue|ConvertTo-Json -Compress"
         )
-        result = {}
         try:
             output = subprocess.check_output(
                 ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=5,
+                timeout=6,
                 creationflags=0x08000000,
                 stderr=subprocess.DEVNULL,
             ).strip()
@@ -1453,26 +1338,165 @@ class WindowsGpuTelemetry:
             utilization = []
             dedicated = []
             shared = []
+            process_dedicated = []
+            process_shared = []
+            pid_token = "pid_" + str(int(pid)) + "_"
             for row in rows if isinstance(rows, list) else []:
-                path_value = str(row.get("Path", "")).casefold()
-                cooked = max(0.0, float(row.get("CookedValue", 0.0) or 0.0))
-                if "utilization percentage" in path_value:
-                    utilization.append(cooked)
-                elif "dedicated usage" in path_value:
-                    dedicated.append(cooked)
-                elif "shared usage" in path_value:
-                    shared.append(cooked)
-            result = {
+                path = str(row.get("Path", "")).casefold()
+                value = max(0.0, safe_float(row.get("CookedValue"), 0.0))
+                if "utilization percentage" in path:
+                    utilization.append(value)
+                elif "gpu process memory" in path and "dedicated usage" in path and pid_token in path:
+                    process_dedicated.append(value)
+                elif "gpu process memory" in path and "shared usage" in path and pid_token in path:
+                    process_shared.append(value)
+                elif "gpu adapter memory" in path and "dedicated usage" in path:
+                    dedicated.append(value)
+                elif "gpu adapter memory" in path and "shared usage" in path:
+                    shared.append(value)
+            return {
                 "gpu_utilization": min(100.0, sum(utilization)),
                 "dedicated_vram_used": int(max(dedicated) if dedicated else 0),
                 "shared_vram_used": int(max(shared) if shared else 0),
-                "source": "windows_performance_counters",
+                "process_dedicated_vram": int(sum(process_dedicated)),
+                "process_shared_vram": int(sum(process_shared)),
+                "performance_counter_source": True,
             }
         except (OSError, ValueError, TypeError, subprocess.SubprocessError, json.JSONDecodeError):
-            result = {}
+            return {}
+
+    def _nvml(self, pid):
+        handled = RECOVERABLE_ERRORS
+        try:
+            import pynvml
+            handled = handled + (getattr(pynvml, "NVMLError", RuntimeError),)
+            pynvml.nvmlInit()
+            best = None
+            for index in range(pynvml.nvmlDeviceGetCount()):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+                memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                process_bytes = 0
+                process_getters = (
+                    "nvmlDeviceGetComputeRunningProcesses_v3",
+                    "nvmlDeviceGetComputeRunningProcesses_v2",
+                    "nvmlDeviceGetComputeRunningProcesses",
+                    "nvmlDeviceGetGraphicsRunningProcesses_v3",
+                    "nvmlDeviceGetGraphicsRunningProcesses_v2",
+                    "nvmlDeviceGetGraphicsRunningProcesses",
+                )
+                for name in process_getters:
+                    getter = getattr(pynvml, name, None)
+                    if getter is None:
+                        continue
+                    try:
+                        for process in getter(handle):
+                            if safe_int(getattr(process, "pid", 0), 0) == int(pid):
+                                used = getattr(process, "usedGpuMemory", 0)
+                                if isinstance(used, int) and used > 0:
+                                    process_bytes += used
+                    except handled:
+                        pass
+                row = {
+                    "gpu_utilization": float(utilization.gpu),
+                    "total_vram": int(memory.total),
+                    "free_vram": int(memory.free),
+                    "dedicated_vram_used": int(memory.used),
+                    "process_dedicated_vram": int(process_bytes),
+                    "source": "nvml",
+                }
+                if best is None or row["process_dedicated_vram"] > best["process_dedicated_vram"]:
+                    best = row
+            return best or {}
+        except handled:
+            return {}
+        finally:
+            try:
+                pynvml.nvmlShutdown()
+            except handled:
+                pass
+
+    def _nvidia_smi(self, pid):
+        try:
+            output = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.total,memory.free,memory.used",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=4,
+                creationflags=0x08000000 if os.name == "nt" else 0,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            values = [item.strip() for item in output.splitlines()[0].split(",")]
+            process_bytes = 0
+            try:
+                process_output = subprocess.check_output(
+                    ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=4,
+                    creationflags=0x08000000 if os.name == "nt" else 0,
+                    stderr=subprocess.DEVNULL,
+                )
+                for line in process_output.splitlines():
+                    parts = [item.strip() for item in line.split(",")]
+                    if len(parts) >= 2 and safe_int(parts[0], -1) == int(pid):
+                        process_bytes += int(float(parts[1]) * 1024 * 1024)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                record_cleanup_error("NVIDIA_PROCESS_TELEMETRY_FAILED", error)
+            return {
+                "gpu_utilization": max(0.0, min(100.0, float(values[0]))),
+                "total_vram": int(float(values[1]) * 1024 * 1024),
+                "free_vram": int(float(values[2]) * 1024 * 1024),
+                "dedicated_vram_used": int(float(values[3]) * 1024 * 1024),
+                "process_dedicated_vram": process_bytes,
+                "source": "nvidia_smi_fallback",
+            }
+        except RECOVERABLE_ERRORS:
+            return {}
+
+    def sample(self, backend, process_pid=None, cache_seconds=2.0):
+        if os.name != "nt":
+            return {}
+        pid = safe_int(process_pid, os.getpid(), 1)
+        key = (str(backend), pid)
+        now = time.monotonic()
         with self.lock:
-            self.cache = (now, dict(result))
+            cached = self.cache.get(key)
+            if cached is not None and now - cached[0] <= max(0.25, float(cache_seconds)):
+                return dict(cached[1])
+        family = str(backend or "").casefold()
+        counters = self._performance_counters(pid)
+        if "nvidia" in family:
+            result = self._nvml(pid) or self._nvidia_smi(pid)
+            dxgi = DXGI_VIDEO_MEMORY_TELEMETRY.sample(backend)
+            for key_name, value in dxgi.items():
+                result.setdefault(key_name, value)
+        elif "directml" in family:
+            result = DXGI_VIDEO_MEMORY_TELEMETRY.sample(backend)
+        else:
+            result = {}
+        for key_name, value in counters.items():
+            process_keys = {
+                "process_dedicated_vram",
+                "process_shared_vram",
+            }
+            if (
+                key_name in process_keys
+                or key_name not in result
+                or result.get(key_name) in {None, 0}
+            ):
+                result[key_name] = value
+        result.setdefault("source", "windows_performance_counters")
+        with self.lock:
+            self.cache[key] = (now, dict(result))
         return result
+
 
 
 WINDOWS_GPU_TELEMETRY = WindowsGpuTelemetry()
@@ -2682,7 +2706,7 @@ def runtime_hardware_fingerprint(torch_module=None, device=None, backend="window
 
 
 def _hardware_health_path(base):
-    return Path(base) / "manifests" / "hardware_profile_health.json"
+    return Path(base) / "audit" / "hardware_profile_health.json"
 
 
 def mark_hardware_rebenchmark_required(base, reason):
@@ -2707,7 +2731,7 @@ def mark_hardware_rebenchmark_required(base, reason):
 
 def update_hardware_profile_health(base, latency_ms=None, gpu_oom=False, driver_reset=False, manual=False):
     root = Path(base)
-    profile_path = root / "manifests" / "hardware_profile.json"
+    profile_path = root / "audit" / "hardware_profile.json"
     health_path = _hardware_health_path(root)
     try:
         profile = json.loads(profile_path.read_text(encoding="utf-8")) if profile_path.is_file() else {}
@@ -2755,7 +2779,7 @@ def hardware_profile_rebenchmark_requested(base):
 
 
 def current_hardware_training_profile(base):
-    path = Path(base) / "manifests" / "hardware_profile.json"
+    path = Path(base) / "audit" / "hardware_profile.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
@@ -2863,9 +2887,9 @@ def run_startup_microbenchmark(
     runtime_instance=None,
 ):
     root = Path(base)
-    manifest_dir = root / "manifests"
-    manifest_dir.mkdir(parents=True, exist_ok=True)
-    path = manifest_dir / "hardware_profile.json"
+    audit_dir = root / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    path = audit_dir / "hardware_profile.json"
     fingerprint = runtime_hardware_fingerprint(torch_module, device, backend)
     fingerprint_hash = hashlib.sha256(canonical_bytes(fingerprint)).hexdigest()
     requested = hardware_profile_rebenchmark_requested(root)
@@ -3453,8 +3477,8 @@ def release_torch_training_resources(torch_module):
         if bool(torch_module.cuda.is_available()):
             torch_module.cuda.empty_cache()
             torch_module.cuda.ipc_collect()
-    except RECOVERABLE_ERRORS:
-        pass
+    except (RuntimeError, AttributeError) as error:
+        record_cleanup_error("TORCH_RESOURCE_RELEASE_FAILED", error)
     collect_garbage("torch_training_release", 10.0)
 
 
@@ -7765,7 +7789,6 @@ def semantic_action_from_interaction(action, targets=None):
 
 
 def build_counterfactual_training_payload(frame, chosen_semantic, source="learn", recent_results=None):
-    """Build auditable positive/negative action supervision from the same observed state."""
     targets = list(frame.get("semantic_targets", [])) if isinstance(frame, dict) else []
     chosen = normalize_semantic_action(chosen_semantic) if isinstance(chosen_semantic, dict) else None
     if chosen is None:
@@ -8570,11 +8593,11 @@ def runtime_tree_path(base, family=None):
     root = Path(base)
     if family is None:
         return root / "runtime.current"
-    return root / "runtime" / runtime_backend_slot(family)
+    return root / "runtime.current" / "retained" / runtime_backend_slot(family)
 
 
 def runtime_active_path(base):
-    return Path(base) / "runtime" / "active.json"
+    return Path(base) / "runtime.current" / "retained" / "active.json"
 
 
 def runtime_python_path(base, family=None):
@@ -8591,7 +8614,7 @@ def runtime_manifest_path(base, family=None):
 
 
 def write_runtime_active_state(base, selected_family, reason="selection"):
-    root = Path(base) / "runtime"
+    root = Path(base) / "runtime.current" / "retained"
     root.mkdir(parents=True, exist_ok=True)
     available = {}
     for family in ("windows-x64-cpu", "windows-x64-nvidia-cu130", "windows-x64-directml"):
@@ -10018,227 +10041,6 @@ def remove_data_path(base, path, missing_ok=True):
             raise
     return target
 
-
-class AcceptanceReport:
-    def __init__(self, base):
-        self.base = Path(base).resolve()
-        self.path = self.base / "audit" / "acceptance_report.json"
-        self.lock = threading.RLock()
-        self.data = {
-            "schema_version": 4,
-            "build_hash": current_build_hash(),
-            "updated": time.time(),
-            "strict_pass": False,
-            "items": {},
-            "environment": {},
-            "failures": [],
-            "invalidated_reason": "",
-        }
-        self.load()
-
-    def _fresh_item(self, name):
-        return {
-            "status": "pending",
-            "updated": 0.0,
-            "evidence": [],
-            "cases": {
-                case: {"status": "pending", "updated": 0.0, "evidence": []} for case in STRICT_ACCEPTANCE_CASES[name]
-            },
-        }
-
-    def load(self):
-        current = current_build_hash()
-        loaded = None
-        try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
-            if isinstance(value, dict) and isinstance(value.get("items"), dict):
-                loaded = value
-        except RECOVERABLE_ERRORS:
-            loaded = None
-        if (
-            loaded is not None
-            and str(loaded.get("build_hash", "")) == current
-            and safe_int(loaded.get("schema_version"), 0) == 4
-        ):
-            self.data = loaded
-        elif loaded is not None:
-            self.data["invalidated_reason"] = "构建哈希或验收schema变化，旧证据已失效"
-        self.data["schema_version"] = 4
-        self.data["build_hash"] = current
-        self.data.setdefault("environment", {})
-        self.data.setdefault("items", {})
-        self.data.setdefault("measurements", {})
-        for name in STRICT_ACCEPTANCE_ITEMS:
-            item = self.data["items"].setdefault(name, self._fresh_item(name))
-            item.setdefault("status", "pending")
-            item.setdefault("updated", 0.0)
-            item.setdefault("evidence", [])
-            cases = item.setdefault("cases", {})
-            for case in STRICT_ACCEPTANCE_CASES[name]:
-                cases.setdefault(case, {"status": "pending", "updated": 0.0, "evidence": []})
-            for extra in list(cases):
-                if extra not in STRICT_ACCEPTANCE_CASES[name]:
-                    cases.pop(extra, None)
-        self._evaluate_locked()
-        return self.data
-
-    def record_case(self, name, case, status, evidence=None):
-        if name not in STRICT_ACCEPTANCE_CASES or case not in STRICT_ACCEPTANCE_CASES[name]:
-            raise ValueError("未知验收用例：" + str(name) + "/" + str(case))
-        value = str(status)
-        if value not in {"passed", "failed", "pending", "not_run"}:
-            raise ValueError("验收状态无效")
-        with self.lock:
-            item = self.data["items"].setdefault(name, self._fresh_item(name))
-            target = item["cases"].setdefault(case, {"status": "pending", "updated": 0.0, "evidence": []})
-            target["status"] = value
-            target["updated"] = time.time()
-            target["evidence"] = (
-                list(evidence) if isinstance(evidence, (list, tuple)) else ([evidence] if evidence is not None else [])
-            )
-            self._save_locked()
-        return value
-
-    def record(self, name, status, evidence=None):
-        if name not in STRICT_ACCEPTANCE_ITEMS:
-            raise ValueError("未知验收项目：" + str(name))
-        value = str(status)
-        if value == "passed":
-            with self.lock:
-                cases = self.data["items"].setdefault(name, self._fresh_item(name))["cases"]
-                if not all(cases.get(case, {}).get("status") == "passed" for case in STRICT_ACCEPTANCE_CASES[name]):
-                    raise RuntimeError("不能跳过真实验收用例直接标记严格通过：" + str(name))
-                self._save_locked()
-            return value
-        if value not in {"failed", "pending", "not_run"}:
-            raise ValueError("验收状态无效")
-        with self.lock:
-            item = self.data["items"].setdefault(name, self._fresh_item(name))
-            for case in STRICT_ACCEPTANCE_CASES[name]:
-                if item["cases"][case].get("status") != "passed":
-                    item["cases"][case] = {
-                        "status": value,
-                        "updated": time.time(),
-                        "evidence": (
-                            list(evidence)
-                            if isinstance(evidence, (list, tuple))
-                            else ([evidence] if evidence is not None else [])
-                        ),
-                    }
-            self._save_locked()
-        return value
-
-    def record_measurement(self, name, value, unit="", context=None):
-        key = str(name)
-        number = safe_float(value, 0.0)
-        with self.lock:
-            target = self.data.setdefault("measurements", {}).setdefault(key, {"unit": str(unit), "values": []})
-            target["unit"] = str(unit)
-            target["values"].append(
-                {"value": number, "time": time.time(), "context": dict(context) if isinstance(context, dict) else {}}
-            )
-            target["values"] = target["values"][-2048:]
-            ordered = sorted(item["value"] for item in target["values"])
-            target["count"] = len(ordered)
-            target["p50"] = quantile(ordered, 0.50)
-            target["p95"] = quantile(ordered, 0.95)
-            target["p99"] = quantile(ordered, 0.99)
-            target["latest"] = number
-            self._save_locked()
-        return number
-
-    def set_environment(self, **values):
-        with self.lock:
-            self.data.setdefault("environment", {}).update(values)
-            self._save_locked()
-
-    def _evaluate_locked(self):
-        failures = []
-        for name in STRICT_ACCEPTANCE_ITEMS:
-            item = self.data["items"].setdefault(name, self._fresh_item(name))
-            states = [item["cases"].get(case, {}).get("status", "pending") for case in STRICT_ACCEPTANCE_CASES[name]]
-            if states and all(value == "passed" for value in states):
-                status = "passed"
-            elif any(value == "failed" for value in states):
-                status = "failed"
-            elif any(value == "not_run" for value in states):
-                status = "not_run"
-            else:
-                status = "pending"
-            item["status"] = status
-            item["updated"] = max(
-                [safe_float(item["cases"].get(case, {}).get("updated"), 0.0) for case in STRICT_ACCEPTANCE_CASES[name]]
-                or [0.0]
-            )
-            item["evidence"] = [
-                {
-                    "case": case,
-                    "status": item["cases"].get(case, {}).get("status", "pending"),
-                    "evidence": item["cases"].get(case, {}).get("evidence", []),
-                }
-                for case in STRICT_ACCEPTANCE_CASES[name]
-            ]
-            if status != "passed":
-                failures.append(name)
-        environment = self.data.setdefault("environment", {})
-        windows_ok = (
-            safe_int(environment.get("windows_build"), 0) >= 22000 and environment.get("real_windows_11") is True
-        )
-        architecture_ok = str(environment.get("architecture", "")).lower() == RUNTIME_ARCH_X64
-        e2e_ok = environment.get("end_to_end_download_worker") is True
-        monitor_ok = environment.get("external_write_monitor") is True
-        geometry_ok = environment.get("window_geometry_test") is True
-        measurements = self.data.setdefault("measurements", {})
-        required_measurements = (
-            "escape_to_input_lock_ms",
-            "escape_to_all_buttons_released_ms",
-            "escape_to_all_inputs_released_ms",
-            "pressed_buttons_after_exit",
-            "pressed_keys_after_exit",
-            "virtual_gamepad_neutral_after_exit",
-            "capture_frame_interval_ms",
-        )
-        measurements_ok = all(
-            name in measurements and safe_int(measurements[name].get("count"), 0) > 0 for name in required_measurements
-        )
-        build_ok = str(self.data.get("build_hash", "")) == current_build_hash()
-        environment_failures = []
-        if not windows_ok:
-            environment_failures.append("Windows 11真实环境未证明")
-        if not architecture_ok:
-            environment_failures.append("仅Windows 11 x64可进入严格验收")
-        if not e2e_ok:
-            environment_failures.append("真实文件完整性检查并启动独立AI worker未证明")
-        if not monitor_ok:
-            environment_failures.append("外部写入监控未证明")
-        if not geometry_ok:
-            environment_failures.append("专用窗口坐标/DPI/重建测试未证明")
-        if not measurements_ok:
-            environment_failures.append("ESC、按键释放与捕获间隔原始测量值不完整")
-        if not build_ok:
-            environment_failures.append("构建哈希不匹配")
-        self.data["failures"] = failures + environment_failures
-        self.data["strict_pass"] = bool(
-            not self.data["failures"]
-            and all(self.data["items"][name].get("status") == "passed" for name in STRICT_ACCEPTANCE_ITEMS)
-        )
-        return self.data["strict_pass"]
-
-    def _save_locked(self):
-        self.data["updated"] = time.time()
-        self.data["runtime_metrics"] = RUNTIME_METRICS.snapshot()
-        self._evaluate_locked()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".json.tmp." + uuid.uuid4().hex)
-        temporary.write_text(
-            json.dumps(self.data, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8"
-        )
-        os.replace(temporary, self.path)
-
-    def strict_passed(self):
-        with self.lock:
-            self._save_locked()
-            return bool(self.data.get("strict_pass"))
 
 
 class WindowIdentityService:
@@ -13970,7 +13772,6 @@ class ModeSession:
 
 
 
-
 def _valid_norm_rect(value):
     if not isinstance(value, (list, tuple)) or len(value) < 4:
         return None
@@ -13978,17 +13779,6 @@ def _valid_norm_rect(value):
     if norm[2] <= 0.0 or norm[3] <= 0.0 or norm[0] + norm[2] > 1.000001 or norm[1] + norm[3] > 1.000001:
         return None
     return norm
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -15065,7 +14855,6 @@ def state_coverage_bucket(frame, context=None):
 
 
 
-
 def high_value_learning_reasons(frame, ranked, decision, temporal=None):
     value = decision if isinstance(decision, dict) else {}
     items = [item for item in ranked or [] if isinstance(item, dict)]
@@ -15114,9 +14903,6 @@ def high_value_learning_reasons(frame, ranked, decision, temporal=None):
     if confidence >= 0.92 and not reasons and str(value.get("risk_class", "safe")) == "safe":
         return []
     return sorted(reasons)
-
-
-
 
 
 
@@ -18356,7 +18142,6 @@ def build_offline_policy_models(experience_model, experiences, default_task_id):
 
 
 
-
 class ReviewExecution:
     def __init__(self, controller, phase=None):
         self.controller = controller
@@ -20773,12 +20558,6 @@ class TrainingExecution:
 
 
 
-
-
-
-
-
-
 class GameRepository:
     def __init__(self, store):
         self.store = store
@@ -21799,7 +21578,7 @@ class DataStoreLifecycleMixin:
             "read_only": self.read_only,
         }
         try:
-            path = self.base / "recovery.log"
+            path = self.base / "audit" / "recovery.log"
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
         except RECOVERABLE_ERRORS as error:
@@ -22293,15 +22072,11 @@ class DataStoreGameTaskMixin:
 
     def _managed_payload_roots(self):
         roots = []
-        for name in ("backups", "quarantine", "audit", "logs", "models", "cache", "temp", "replays"):
+        for name in ("backups", "quarantine", "audit", "models", "cache", "temp"):
             candidate = self.base / name
             if candidate.exists():
                 roots.append(candidate)
         roots.extend(path for path in self.base.glob("recovery_*") if path.exists())
-        for name in ("runtime_errors.jsonl", "recovery.log"):
-            candidate = self.base / name
-            if candidate.exists():
-                roots.append(candidate)
         return roots
 
     def _backup_contains_deleted_game(self, path, descriptor):
@@ -22342,11 +22117,11 @@ class DataStoreGameTaskMixin:
         if path.is_absolute() or not path.parts or ".." in path.parts:
             return False
         first = path.parts[0].casefold()
-        if first in {"models", "cache", "temp", "replays", "audit", "logs", "backups", "quarantine", "project"}:
+        if first in {"models", "cache", "temp", "audit", "backups", "quarantine"}:
             return True
         if first.startswith("recovery_"):
             return True
-        return path.as_posix().casefold() in {"runtime_errors.jsonl", "recovery.log"}
+        return False
 
     @staticmethod
     def _decode_asset_reference_value(value):
@@ -22361,8 +22136,8 @@ class DataStoreGameTaskMixin:
                 pass
             try:
                 candidates.append(bounded_decompress(raw, 64 * 1024 * 1024).decode("utf-8"))
-            except RECOVERABLE_ERRORS:
-                pass
+            except (ValueError, zlib.error, UnicodeError, MemoryError) as error:
+                record_cleanup_error("ASSET_REFERENCE_DECODE_FAILED", error)
         for text in candidates:
             try:
                 parsed = json.loads(text)
@@ -22468,7 +22243,7 @@ class DataStoreGameTaskMixin:
         paths.update(target_tensor_paths - other_tensor_paths)
         for game_id in deleting:
             digest = hashlib.sha256(game_id.encode("utf-8", "replace")).hexdigest()
-            paths.add(Path("replays") / digest[:24])
+            paths.add(Path("models") / "replays" / digest[:24])
             paths.add(online_acceptance_relative_path(game_id))
             paths.add(Path("models") / "vision" / "adapters" / "games" / (digest + ".json"))
             paths.add(Path("models") / "task_graph" / (digest[:16] + ".json"))
@@ -22543,7 +22318,7 @@ class DataStoreGameTaskMixin:
 
     def _stage_game_assets(self, descriptor):
         transaction_id = uuid.uuid4().hex
-        transaction_root = self.base / ".trash" / transaction_id
+        transaction_root = self.base / "quarantine" / "game_trash" / transaction_id
         files_root = transaction_root / "files"
         moved = []
         try:
@@ -22613,8 +22388,8 @@ class DataStoreGameTaskMixin:
                 for candidate in root.rglob("*"):
                     try:
                         os.chmod(candidate, 0o700)
-                    except RECOVERABLE_ERRORS:
-                        pass
+                    except OSError as error:
+                        record_cleanup_error("GAME_ASSET_PERMISSION_REPAIR_FAILED", error)
                 time.sleep(0.05)
         if root.exists():
             raise StorageError("无法彻底删除游戏暂存数据：" + str(last_error or root))
@@ -22622,12 +22397,12 @@ class DataStoreGameTaskMixin:
         try:
             if parent.is_dir() and not any(parent.iterdir()):
                 parent.rmdir()
-        except RECOVERABLE_ERRORS:
-            pass
+        except OSError as error:
+            record_cleanup_error("EMPTY_GAME_TRASH_PARENT_REMOVE_FAILED", error)
         return True
 
     def recover_game_trash_transactions(self):
-        trash = self.base / ".trash"
+        trash = self.base / "quarantine" / "game_trash"
         if not trash.is_dir():
             return {"restored": 0, "purged": 0, "failed": 0}
         result = {"restored": 0, "purged": 0, "failed": 0}
@@ -22657,8 +22432,8 @@ class DataStoreGameTaskMixin:
         try:
             if trash.is_dir() and not any(trash.iterdir()):
                 trash.rmdir()
-        except RECOVERABLE_ERRORS:
-            pass
+        except OSError as error:
+            self.logger.write("EMPTY_GAME_TRASH_REMOVE_FAILED", error)
         return result
 
     def _delete_database_payload_references(self, descriptor):
@@ -24695,7 +24470,7 @@ class DataStoreSampleMixin:
         return selected
 
     def compact_samples(self, gid, keep=None, sleep_commit=False):
-        if not sleep_commit and not DEVELOPER_MODE:
+        if not sleep_commit:
             raise RuntimeError("破坏性经验池压缩只允许在睡眠提交阶段执行")
         plan = self.plan_experience_pool_optimization(gid, None, keep)
         result = self.apply_experience_pool_optimization(plan)
@@ -26130,7 +25905,7 @@ class DataStore(
         self.base.mkdir(parents=True, exist_ok=True)
         ensure_free_space(self.base, MIN_DATA_OPERATION_RESERVE, "数据库初始化")
         self.db_path = self.base / "universal_game_ai.db"
-        self.logger = LightweightLogger(self.base / "runtime_errors.jsonl")
+        self.logger = LightweightLogger(self.base / "audit" / "runtime_errors.jsonl")
         self.lock = threading.RLock()
         self.pending_lock = threading.RLock()
         self.writer_condition = threading.Condition(self.pending_lock)
@@ -26244,7 +26019,6 @@ class GameSelectionDialog:
         working_games = [dict(item) for item in app.store.games()]
         original_selected = app.selected_game["id"] if app.selected_game else None
         working_selected = original_selected
-        deleted_stack = []
         win = tk.Toplevel(app.root)
         win.title("游戏名称")
         fit_window(win, 540, 450, 420, 340)
@@ -26253,12 +26027,8 @@ class GameSelectionDialog:
         state = {"closed": False}
         frame = ttk.Frame(win, padding=16)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="选择、新建、编辑或删除游戏名称", font=("Microsoft YaHei UI", 13, "bold")).pack(
-            anchor="w", pady=(0, 10)
-        )
-        ttk.Label(
-            frame, text="所有修改仅保存在本对话框的临时副本中；只有点击总“确认”才一次性写入数据库。", wraplength=500
-        ).pack(anchor="w", pady=(0, 8))
+        ttk.Label(frame, text="选择、新建、编辑或删除游戏名称", font=("Microsoft YaHei UI", 13, "bold")).pack(anchor="w", pady=(0, 10))
+        ttk.Label(frame, text="所有修改仅保存在本对话框中；点击“确认”后一次性写入数据库。", wraplength=500).pack(anchor="w", pady=(0, 8))
         list_frame = ttk.Frame(frame)
         list_frame.pack(fill="both", expand=True)
         box = tk.Listbox(list_frame, exportselection=False, font=("Microsoft YaHei UI", 11))
@@ -26271,7 +26041,7 @@ class GameSelectionDialog:
             nonlocal working_selected
             box.delete(0, "end")
             for game in working_games:
-                suffix = "  [需要睡眠]" if game.get("needs_review") else ""
+                suffix = "  [需要升级]" if game.get("needs_review") else ""
                 box.insert("end", game["name"] + suffix)
             wanted = target if target is not None else working_selected
             if wanted is not None:
@@ -26295,13 +26065,7 @@ class GameSelectionDialog:
             if any(item["name"].casefold() == name.casefold() for item in working_games):
                 app.show_error("游戏名称已存在")
                 return
-            game = {
-                "id": uuid.uuid4().hex,
-                "name": name,
-                "created": time.time(),
-                "needs_review": False,
-                "last_review": None,
-            }
+            game = {"id": uuid.uuid4().hex, "name": name, "created": time.time(), "needs_review": False, "last_review": None}
             working_games.append(game)
             working_selected = game["id"]
             refresh(working_selected)
@@ -26314,10 +26078,7 @@ class GameSelectionDialog:
             name = app.prompt_text("编辑游戏", "修改游戏名称", working_games[index]["name"])
             if name is None:
                 return
-            if any(
-                position != index and item["name"].casefold() == name.casefold()
-                for position, item in enumerate(working_games)
-            ):
+            if any(position != index and item["name"].casefold() == name.casefold() for position, item in enumerate(working_games)):
                 app.show_error("游戏名称已存在")
                 return
             working_games[index]["name"] = name
@@ -26329,32 +26090,13 @@ class GameSelectionDialog:
             if index is None:
                 app.show_error("请先选择一个游戏")
                 return
-            item = dict(working_games.pop(index))
-            deleted_stack.append((index, item, working_selected))
-            if app.developer_mode:
-                undo_button.configure(state="normal")
-            box.selection_clear(0, "end")
-            if item["id"] == original_selected or item["id"] == working_selected:
+            item = working_games.pop(index)
+            if item["id"] in {original_selected, working_selected}:
                 working_selected = None
             elif working_games:
                 working_selected = working_games[min(index, len(working_games) - 1)]["id"]
             refresh(working_selected)
-            app.status.set(
-                "已在临时列表标记删除："
-                + item["name"]
-                + ("；点击“撤销删除”可恢复" if app.developer_mode else "")
-                + "；只有总“确认”才写入数据库"
-            )
-
-        def undo_delete():
-            nonlocal working_selected
-            if not deleted_stack:
-                return
-            index, item, previous_selected = deleted_stack.pop()
-            working_games.insert(min(index, len(working_games)), item)
-            working_selected = item["id"] if previous_selected == item["id"] else previous_selected
-            undo_button.configure(state="normal" if deleted_stack else "disabled")
-            refresh(item["id"])
+            app.status.set("已在临时列表标记删除：" + item["name"] + "；点击“确认”后删除相关文件和数据")
 
         def confirm():
             nonlocal working_selected
@@ -26366,8 +26108,6 @@ class GameSelectionDialog:
                     return
                 chosen = working_games[selection[0]]
                 working_selected = chosen["id"]
-            else:
-                working_selected = None
             result = app.store.replace_games(working_games, working_selected)
             clear_runtime_isolation()
             app.window_generation += 1
@@ -26378,330 +26118,87 @@ class GameSelectionDialog:
             deleted = len(result.get("deleted_games", [])) if isinstance(result, dict) else 0
             assets = safe_int(result.get("deleted_asset_count"), 0) if isinstance(result, dict) else 0
             if chosen is None:
-                app.status.set(
-                    "已删除全部游戏及相关数据"
-                    + ("；已清理" + str(assets) + "项磁盘资产" if assets else "")
-                    + "；请新建游戏"
-                )
+                app.status.set("已删除全部游戏及相关数据" + ("；已清理" + str(assets) + "项磁盘资产" if assets else "") + "；请新建游戏")
             else:
-                app.status.set(
-                    "已提交游戏列表并选择："
-                    + chosen["name"]
-                    + ("；已删除" + str(deleted) + "个游戏及其全部数据" if deleted else "")
-                    + ("；已清理" + str(assets) + "项磁盘资产" if assets else "")
-                )
+                app.status.set("已提交游戏列表并选择：" + chosen["name"] + ("；已删除" + str(deleted) + "个游戏及其全部数据" if deleted else "") + ("；已清理" + str(assets) + "项磁盘资产" if assets else ""))
             app.close_dialog(win, state)
-
-        def refuse_close():
-            win.bell()
-            win.lift()
-            win.focus_force()
 
         tools = ttk.Frame(frame)
         tools.pack(fill="x", pady=10)
         ttk.Button(tools, text="新建", command=add_game).pack(side="left", padx=(0, 6))
         ttk.Button(tools, text="编辑", command=edit_game).pack(side="left", padx=6)
         ttk.Button(tools, text="删除", command=delete_game).pack(side="left", padx=6)
-        undo_button = ttk.Button(tools, text="撤销删除", command=undo_delete, state="disabled")
-        if app.developer_mode:
-            undo_button.pack(side="left", padx=6)
         actions = ttk.Frame(frame)
         actions.pack(fill="x")
-        cancel = lambda: app.close_dialog(win, state)
-        ttk.Button(actions, text="取消", command=cancel).pack(side="right")
+        ttk.Button(actions, text="取消", command=lambda: app.close_dialog(win, state)).pack(side="right")
         ttk.Button(actions, text="确认", command=confirm).pack(side="right", padx=(0, 8))
-        win.protocol("WM_DELETE_WINDOW", cancel)
-        win.bind("<Escape>", lambda event: cancel())
+        win.protocol("WM_DELETE_WINDOW", lambda: app.close_dialog(win, state))
+        win.bind("<Escape>", lambda event: app.close_dialog(win, state))
         refresh()
         win.wait_visibility()
         box.focus_set()
 
 
+
 @dataclass(slots=True)
 class WindowSelectionState:
     closed: bool = False
-    background_keys: tuple = ("window_dialog_enumeration", "window_dialog_preview")
+    background_keys: tuple = ("window_dialog_enumeration",)
     norm: list = field(default_factory=lambda: [0.0, 0.0, 1.0, 1.0])
     auto: object = None
     client: object = None
     target_key: object = None
-    start: object = None
-    rect_id: object = None
-    image: object = None
 
 
 class WindowSelectionController:
-    MODE_MAP = {"不检查": "none", "包含": "contains", "前缀": "prefix", "精确": "exact"}
-    MODE_TEXT = {"auto": "自动区域", "full": "整个客户区", "manual": "手动调整"}
-
     def __init__(self, app):
         self.app = app
         self.state = WindowSelectionState()
         self.windows = []
-        self.widgets = {"refresh": None}
-        self.canvas_w = 640
-        self.canvas_h = 360
 
     def open(self):
         if self.app.mode:
             self.app.show_error("请先停止当前模式")
             return
-        self._create_window()
-        self._build_header()
-        self._build_body()
-        self._bind_events()
-        self.refresh()
-        self.win.wait_visibility()
-        self.box.focus_set()
-
-    def _create_window(self):
         self.win = tk.Toplevel(self.app.root)
         self.win.title("选择窗口")
-        fit_window(self.win, 1200, 760, 560, 400)
+        fit_window(self.win, 760, 560, 520, 380)
         self.win.transient(self.app.root)
         self.win.grab_set()
-        self.frame = scrollable_frame(self.win, 16, True)
-
-    def _build_header(self):
-        ttk.Label(
-            self.frame,
-            text="选择雷电模拟器窗口或其他窗口",
-            font=("Microsoft YaHei UI", 13, "bold"),
-        ).pack(anchor="w", pady=(0, 6))
-        developer_text = (
-            "默认自动选择最大可见游戏子窗口。开发者模式可设置标题规则、整个客户区或手动区域；"
-            "点击一次总“确认”同时保存窗口身份和区域。"
-        )
-        normal_text = "请选择窗口并点击“确认”；程序将自动选择客户区内的游戏内容区域。"
-        ttk.Label(
-            self.frame,
-            text=developer_text if self.app.developer_mode else normal_text,
-            wraplength=1140,
-        ).pack(anchor="w", pady=(0, 10))
-
-    def _build_body(self):
-        body = ttk.Frame(self.frame)
-        body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=5 if self.app.developer_mode else 1)
-        if self.app.developer_mode:
-            body.columnconfigure(1, weight=4)
-        body.rowconfigure(0, weight=1)
-        left = ttk.Frame(body)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        right = ttk.LabelFrame(body, text="游戏渲染区域", padding=10)
-        if self.app.developer_mode:
-            right.grid(row=0, column=1, sticky="nsew")
-        self._build_window_list(left)
-        self._build_preview(right)
-        self._build_actions()
-
-    def _build_window_list(self, left):
-        list_frame = ttk.Frame(left)
+        frame = ttk.Frame(self.win, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="选择雷电模拟器窗口或其他窗口", font=("Microsoft YaHei UI", 13, "bold")).pack(anchor="w", pady=(0, 6))
+        ttk.Label(frame, text="请选择窗口并点击“确认”；程序会自动使用客户区内的游戏内容区域。", wraplength=700).pack(anchor="w", pady=(0, 10))
+        list_frame = ttk.Frame(frame)
         list_frame.pack(fill="both", expand=True)
         self.box = tk.Listbox(list_frame, exportselection=False, font=("Microsoft YaHei UI", 9))
         scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.box.yview)
         self.box.configure(yscrollcommand=scroll.set)
         self.box.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        rule_frame = ttk.LabelFrame(left, text="可选标题规则", padding=8)
-        if self.app.developer_mode:
-            rule_frame.pack(fill="x", pady=(8, 0))
-        self.rule_label = tk.StringVar(value="不检查")
-        self.rule_value = tk.StringVar(value="")
-        combo = ttk.Combobox(
-            rule_frame,
-            textvariable=self.rule_label,
-            values=list(self.MODE_MAP),
-            state="readonly",
-            width=10,
-        )
-        combo.pack(side="left")
-        ttk.Entry(rule_frame, textvariable=self.rule_value).pack(
-            side="left",
-            fill="x",
-            expand=True,
-            padx=(8, 0),
-        )
         self.status = tk.StringVar(value="请选择窗口")
-        ttk.Label(left, textvariable=self.status, wraplength=620).pack(
-            anchor="w",
-            fill="x",
-            pady=(8, 2),
-        )
-
-    def _build_preview(self, right):
-        self.preview_status = tk.StringVar(value="选择窗口后自动读取预览")
-        ttk.Label(right, textvariable=self.preview_status, wraplength=620).pack(
-            anchor="w",
-            fill="x",
-            pady=(0, 8),
-        )
-        self.canvas = tk.Canvas(
-            right,
-            width=self.canvas_w,
-            height=self.canvas_h,
-            bg="black",
-            highlightthickness=1,
-            highlightbackground="#777777",
-        )
-        self.canvas.pack(fill="both", expand=False)
-        placeholder = bytes(PREVIEW_W * PREVIEW_H * 3)
-        image = self._photo_image(placeholder)
-        scaled = image.zoom(2, 2)
-        self.image_id = self.canvas.create_image(0, 0, image=scaled, anchor="nw")
-        self.state.image = (image, scaled)
-        self.region_mode = tk.StringVar(value="auto")
-        self.region_info = tk.StringVar(value="区域：未选择")
-        options = ttk.Frame(right)
-        if self.app.developer_mode:
-            options.pack(fill="x", pady=(8, 0))
-        ttk.Radiobutton(options, text="自动区域", value="auto", variable=self.region_mode).pack(side="left")
-        ttk.Radiobutton(options, text="整个客户区", value="full", variable=self.region_mode).pack(
-            side="left",
-            padx=8,
-        )
-        ttk.Radiobutton(options, text="手动调整", value="manual", variable=self.region_mode).pack(side="left")
-        ttk.Label(right, textvariable=self.region_info, wraplength=620).pack(
-            anchor="w",
-            fill="x",
-            pady=(6, 0),
-        )
-        self.region_mode.trace_add("write", self.apply_region_mode)
-
-    def _build_actions(self):
-        tools = ttk.Frame(self.frame)
+        ttk.Label(frame, textvariable=self.status, wraplength=700).pack(anchor="w", fill="x", pady=(8, 2))
+        tools = ttk.Frame(frame)
         tools.pack(fill="x", pady=(10, 0))
-        if self.app.developer_mode:
-            self.widgets["refresh"] = ttk.Button(tools, text="刷新", command=self.refresh)
-            self.widgets["refresh"].pack(side="left")
+        self.refresh_button = ttk.Button(tools, text="刷新", command=self.refresh)
+        self.refresh_button.pack(side="left")
         ttk.Button(tools, text="取消", command=self.cancel).pack(side="right")
         ttk.Button(tools, text="确认", command=self.confirm).pack(side="right", padx=(0, 8))
-
-    def _bind_events(self):
-        if self.app.developer_mode:
-            self.canvas.bind("<Button-1>", self.press)
-            self.canvas.bind("<B1-Motion>", self.drag)
-            self.canvas.bind("<ButtonRelease-1>", self.release)
         self.box.bind("<<ListboxSelect>>", self.prepare_selection)
         self.win.protocol("WM_DELETE_WINDOW", self.cancel)
         self.win.bind("<Escape>", lambda event: self.cancel())
+        self.refresh()
+        self.win.wait_visibility()
+        self.box.focus_set()
 
     def cancel(self):
         self.app.close_dialog(self.win, self.state)
-
-    @staticmethod
-    def _photo_image(rgb):
-        header = b"P6\n" + str(PREVIEW_W).encode("ascii") + b" "
-        ppm = header + str(PREVIEW_H).encode("ascii") + b"\n255\n" + rgb
-        return tk.PhotoImage(data=base64.b64encode(ppm).decode("ascii"), format="PPM")
 
     def selected_item(self):
         selection = self.box.curselection()
         if not selection or selection[0] >= len(self.windows):
             return None
         return dict(self.windows[selection[0]])
-
-    def redraw(self):
-        if self.state.rect_id is not None:
-            try:
-                self.canvas.delete(self.state.rect_id)
-            except RECOVERABLE_ERRORS as error:
-                record_cleanup_error("BEST_EFFORT_EXCEPTION", error)
-        x, y, width, height = list(self.state.norm or [0.0, 0.0, 1.0, 1.0])
-        self.state.rect_id = self.canvas.create_rectangle(
-            x * self.canvas_w,
-            y * self.canvas_h,
-            (x + width) * self.canvas_w,
-            (y + height) * self.canvas_h,
-            outline="#00ffff",
-            width=3,
-        )
-        if not self.state.client:
-            self.region_info.set("区域：未选择")
-            return
-        rect = apply_normalized_rect(self.state.client, self.state.norm)
-        norm_text = ",".join(str(round(value, 4)) for value in self.state.norm)
-        mode_text = self.MODE_TEXT.get(self.region_mode.get(), "手动调整")
-        self.region_info.set(f"区域：{rect[2]}×{rect[3]}；归一化：{norm_text}；模式：{mode_text}")
-
-    def apply_region_mode(self, *args):
-        if self.state.client is None:
-            return
-        mode = self.region_mode.get()
-        if mode == "auto" and isinstance(self.state.auto, dict):
-            self.state.norm = list(self.state.auto["norm"])
-        elif mode == "full":
-            self.state.norm = [0.0, 0.0, 1.0, 1.0]
-        self.redraw()
-
-    def load_preview(self, snapshot):
-        temporary = dict(snapshot)
-        temporary["content_rect_norm"] = [0.0, 0.0, 1.0, 1.0]
-        temporary["content_aspect"] = snapshot["selected_rect"][2] / max(1, snapshot["selected_rect"][3])
-        captured = self.app.api.capture_gray(temporary, False, True, True)
-        rgb = preview_rgb_bytes(captured.get("preview_rgb"))
-        if rgb is None:
-            raise CaptureUnavailable("预览截图尺寸无效")
-        return {"key": snapshot["_preview_key"], "rgb": rgb}
-
-    def apply_preview(self, result):
-        if self.state.closed or not self.win.winfo_exists() or result.get("key") != self.state.target_key:
-            return
-        loaded = self._photo_image(result["rgb"])
-        loaded_scaled = loaded.zoom(2, 2)
-        self.canvas.itemconfigure(self.image_id, image=loaded_scaled)
-        self.state.image = (loaded, loaded_scaled)
-        self.preview_status.set("预览读取完成；青色框内是学习、睡眠、训练和指导使用的唯一区域")
-
-    def preview_failed(self, error):
-        if self.state.closed or not self.win.winfo_exists():
-            return
-        self.preview_status.set(f"预览告警：{error}；仍可使用自动区域、整个客户区或手动调整")
-
-    def prepare_selection(self, event=None):
-        item = self.selected_item()
-        if item is None:
-            return
-        self._restore_rule(item)
-        try:
-            identity = self.app.api.target_identity(item)
-            client = self.app.api.client_rect(identity["hwnd"])
-            auto = self.app.api.auto_content_region(identity)
-            key = f"{identity.get('hwnd')}|{identity.get('pid')}|{identity.get('process_created')}"
-            self.state.client = client
-            self.state.auto = auto
-            self.state.target_key = key
-            self.state.norm = list(auto["norm"])
-            self.region_mode.set("auto")
-            self.status.set(f"进程路径：{identity.get('process_path', '读取失败')}")
-            self.preview_status.set("正在后台读取预览…")
-            self.redraw()
-            snapshot = dict(identity)
-            snapshot["selected_rect"] = list(client)
-            snapshot["_preview_key"] = key
-            self.app.run_background(
-                "window_dialog_preview",
-                lambda snapshot=snapshot: self.load_preview(snapshot),
-                self.apply_preview,
-                self.preview_failed,
-            )
-        except RECOVERABLE_ERRORS as error:
-            self.state.client = None
-            self.state.auto = None
-            self.state.target_key = None
-            self.status.set(f"窗口身份或区域读取失败：{error}")
-            self.preview_status.set("无法读取预览")
-            self.redraw()
-
-    def _restore_rule(self, item):
-        existing = item.get("title_rule") if isinstance(item.get("title_rule"), dict) else None
-        if self.app.selected_window and item.get("hwnd") == self.app.selected_window.get("hwnd"):
-            existing = self.app.selected_window.get("title_rule")
-        if not isinstance(existing, dict):
-            existing = {"mode": "none", "value": ""}
-        reverse = {value: key for key, value in self.MODE_MAP.items()}
-        self.rule_label.set(reverse.get(str(existing.get("mode", "none")), "不检查"))
-        self.rule_value.set(str(existing.get("value", "")))
 
     def load_windows(self):
         hydrated = []
@@ -26733,8 +26230,8 @@ class WindowSelectionController:
             self.box.selection_set(selected_index)
             self.box.see(selected_index)
             self.prepare_selection()
-        self.status.set(f"已读取{len(self.windows)}个可见窗口")
-        self._set_refresh_state("normal")
+        self.status.set("已读取" + str(len(self.windows)) + "个可见窗口")
+        self.refresh_button.configure(state="normal")
 
     def _recommended_index(self):
         scores = [window_descriptor_score(self.app.window_recommendation, item) for item in self.windows]
@@ -26745,71 +26242,47 @@ class WindowSelectionController:
     @staticmethod
     def _window_label(item, recommended):
         prefix = ("[推荐] " if recommended else "") + ("[最小化] " if item.get("minimized") else "")
-        return (
-            f"{prefix}{item.get('title', '')}  [PID {item.get('pid', '-')}]  "
-            f"[{item.get('class', '')}]  {item.get('process_path', '路径读取失败')}"
-        )
+        return prefix + str(item.get("title", "")) + "  [PID " + str(item.get("pid", "-")) + "]  [" + str(item.get("class", "")) + "]  " + str(item.get("process_path", "路径读取失败"))
 
     def _matches_selected(self, item):
         selected = self.app.selected_window
-        return bool(
-            selected
-            and item.get("hwnd") == selected.get("hwnd")
-            and item.get("pid") == selected.get("pid")
-            and item.get("class") == selected.get("class")
-        )
+        return bool(selected and item.get("hwnd") == selected.get("hwnd") and item.get("pid") == selected.get("pid") and item.get("class") == selected.get("class"))
 
     def refresh_error(self, error):
         if self.state.closed or not self.win.winfo_exists():
             return
-        self.status.set(f"窗口读取失败：{error}")
-        self._set_refresh_state("normal")
+        self.status.set("窗口读取失败：" + str(error))
+        self.refresh_button.configure(state="normal")
         self.app.show_error(str(error))
 
     def refresh(self):
         if self.state.closed:
             return
-        self.status.set("正在后台读取窗口和进程完整身份…")
+        self.status.set("正在读取窗口和进程身份……")
         self.box.delete(0, "end")
-        self.box.insert("end", "正在读取…")
-        self._set_refresh_state("disabled")
-        self.app.run_background(
-            "window_dialog_enumeration",
-            self.load_windows,
-            self.apply_windows,
-            self.refresh_error,
-        )
+        self.box.insert("end", "正在读取……")
+        self.refresh_button.configure(state="disabled")
+        self.app.run_background("window_dialog_enumeration", self.load_windows, self.apply_windows, self.refresh_error)
 
-    def _set_refresh_state(self, value):
-        if self.widgets["refresh"] is not None:
-            self.widgets["refresh"].configure(state=value)
-
-    def press(self, event):
-        if self.state.client is None:
+    def prepare_selection(self, event=None):
+        item = self.selected_item()
+        if item is None:
             return
-        self.region_mode.set("manual")
-        self.state.start = (
-            max(0, min(self.canvas_w, event.x)),
-            max(0, min(self.canvas_h, event.y)),
-        )
-
-    def drag(self, event):
-        if self.state.start is None:
-            return
-        x0, y0 = self.state.start
-        x1 = max(0, min(self.canvas_w, event.x))
-        y1 = max(0, min(self.canvas_h, event.y))
-        left = min(x0, x1) / self.canvas_w
-        top = min(y0, y1) / self.canvas_h
-        width = abs(x1 - x0) / self.canvas_w
-        height = abs(y1 - y0) / self.canvas_h
-        if width >= 0.02 and height >= 0.02:
-            self.state.norm = [left, top, width, height]
-            self.redraw()
-
-    def release(self, event):
-        self.drag(event)
-        self.state.start = None
+        try:
+            identity = self.app.api.target_identity(item)
+            client = self.app.api.client_rect(identity["hwnd"])
+            auto = self.app.api.auto_content_region(identity)
+            self.state.client = client
+            self.state.auto = auto
+            self.state.target_key = str(identity.get("hwnd")) + "|" + str(identity.get("pid")) + "|" + str(identity.get("process_created"))
+            self.state.norm = list(auto["norm"])
+            rect = apply_normalized_rect(client, self.state.norm)
+            self.status.set("已选择：" + str(identity.get("title", "")) + "；游戏区域" + str(rect[2]) + "×" + str(rect[3]))
+        except RECOVERABLE_ERRORS as error:
+            self.state.client = None
+            self.state.auto = None
+            self.state.target_key = None
+            self.status.set("窗口身份或区域读取失败：" + str(error))
 
     def confirm(self):
         item = self.selected_item()
@@ -26826,41 +26299,28 @@ class WindowSelectionController:
     def _validated_selection(self, item):
         item = self.app.api.target_identity(item)
         client = self.app.api.client_rect(item["hwnd"])
-        key = f"{item.get('hwnd')}|{item.get('pid')}|{item.get('process_created')}"
+        key = str(item.get("hwnd")) + "|" + str(item.get("pid")) + "|" + str(item.get("process_created"))
         if key != self.state.target_key:
-            raise RuntimeError("窗口选择已变化，请等待区域信息刷新后再确认")
+            raise RuntimeError("窗口选择已变化，请重新选择后再确认")
         rect = apply_normalized_rect(client, self.state.norm)
         if rect[2] < FEATURE_W or rect[3] < FEATURE_H:
             raise RuntimeError("游戏区域过小")
+        auto = self.state.auto or {}
         item["integrity"] = self.app.api.validate_uipi(item)
         item["selected_rect"] = list(client)
         item["client_size"] = [int(client[2]), int(client[3])]
         item["selected_dpi"] = self.app.api.dpi_for_window(item["hwnd"])
-        title_mode = self.MODE_MAP.get(self.rule_label.get(), "none")
-        title_value = self.rule_value.get().strip()
-        if title_mode != "none" and not title_value:
-            raise RuntimeError("标题规则不是“不检查”时必须填写匹配文本")
-        item["title_rule"] = {"mode": title_mode, "value": title_value}
-        source_mode = self.region_mode.get()
-        auto = self.state.auto or {}
-        item.update(self._region_payload(rect, source_mode, auto))
-        item = self.app.api.target_identity(item)
-        self.app.api.validate_target(item, False)
-        return item, source_mode, rect
-
-    def _region_payload(self, rect, source_mode, auto):
-        source = auto.get("source", "auto")
-        if source_mode == "full":
-            source = "full_client"
-        elif source_mode == "manual":
-            source = "manual"
-        return {
+        item["title_rule"] = {"mode": "none", "value": ""}
+        item.update({
             "content_rect_norm": [round(value, 8) for value in self.state.norm],
             "content_aspect": round(rect[2] / max(1, rect[3]), 8),
-            "content_source": source,
-            "content_child_class": auto.get("child_class", "") if source_mode == "auto" else "",
+            "content_source": auto.get("source", "auto"),
+            "content_child_class": auto.get("child_class", ""),
             "window_rule_version": WINDOW_RULE_VERSION,
-        }
+        })
+        item = self.app.api.target_identity(item)
+        self.app.api.validate_target(item, False)
+        return item, "auto", rect
 
     def _base_commit_selection_strict(self, item, source_mode, rect):
         previous = self.app.selected_window
@@ -26868,52 +26328,19 @@ class WindowSelectionController:
         self.app.window_generation += 1
         item["window_generation"] = self.app.window_generation
         self.app.selected_window = item
-        changed = not previous or any(
-            previous.get(key) != item.get(key)
-            for key in ("hwnd", "pid", "class", "process_created", "content_rect_norm")
-        )
+        changed = not previous or any(previous.get(key) != item.get(key) for key in ("hwnd", "pid", "class", "process_created", "content_rect_norm"))
         if changed:
             self.app.api.calibrations.pop(int(item["hwnd"]), None)
         self.app.window_recommendation = self.app.store.save_window_descriptor(item)
-        identity = self._identity_payload(item)
-        identity_text = f"{item.get('title', '')}|{item.get('class', '')}|{item.get('process_path', '')}".lower()
-        case = "ldplayer_confirmed" if any(
-            token in identity_text for token in ("ldplayer", "dnplayer", "雷电")
-        ) else "ordinary_confirmed"
-        self.app.record_acceptance_case("窗口", case, "passed", identity)
         self.app.api.reset_capture_backends(item)
         self.app.api.reset_frame_history(item["hwnd"])
         self.app._refresh_all()
-        message = (
-            f"一次确认已保存窗口身份和游戏内容区域：{item['title']}；"
-            f"区域模式={source_mode}；标题规则={item['title_rule']['mode']}"
-        )
-        self.app.status.set(message)
+        self.app.status.set("已选择窗口：" + str(item.get("title", "")))
         self.app.close_dialog(self.win, self.state)
 
     def _commit_selection(self, item, source_mode, rect):
         return _strict_window_commit(self, item, source_mode, rect)
 
-    @staticmethod
-    def _identity_payload(item):
-        keys = (
-            "hwnd",
-            "pid",
-            "title",
-            "class",
-            "process_path",
-            "process_created",
-            "client_size",
-            "selected_dpi",
-            "content_rect_norm",
-            "content_aspect",
-        )
-        return {key: item.get(key) for key in keys}
-
-    def refuse_close(self):
-        self.win.bell()
-        self.win.lift()
-        self.win.focus_force()
 
 
 class WindowSelectionDialog:
@@ -27309,7 +26736,7 @@ class TaskSettingsDialog:
                 app._refresh_all()
                 message = "配置已保存。安全配置或状态定义改变后，必须重新睡眠才能训练。"
                 app.status.set(message)
-                app.show_main_confirmation("任务与安全", message)
+                app.show_info("任务与安全", message)
                 app.close_dialog(win, state)
             except RECOVERABLE_ERRORS as error:
                 feedback.set("无法保存：" + str(error))
@@ -28720,50 +28147,11 @@ class AppUiService(AppServiceBase):
             anchor="w", fill="x"
         )
 
-        self.advanced_visible = tk.BooleanVar(value=False)
-        self.advanced_frame = ttk.Frame(outer)
-        if self.developer_mode:
-            advanced_header = ttk.Frame(outer)
-            advanced_header.pack(fill="x", pady=(0, 6))
-            ttk.Checkbutton(
-                advanced_header, text="开发者信息", variable=self.advanced_visible, command=self._toggle_advanced
-            ).pack(anchor="w")
-            detail = ttk.LabelFrame(self.advanced_frame, text="技术详情", padding=10)
-            detail.pack(fill="x", pady=(0, 6))
-            for value in (self.window_detail, self.capture_text, self.input_text, self.confidence_text, self.flow_text):
-                ttk.Label(detail, textvariable=value, wraplength=730).pack(anchor="w", fill="x", pady=2)
-            actions = ttk.Frame(self.advanced_frame)
-            actions.pack(fill="x")
-            advanced_specs = [
-                ("任务与安全", self.open_task_dialog),
-                ("重新测试采集后端", self.retest_capture_backends),
-                ("数据清理", self.open_data_dialog),
-            ]
-            for index, (name, command) in enumerate(advanced_specs):
-                button = ttk.Button(actions, text=name, command=command, style="Workflow.TButton")
-                self.control_buttons[name] = button
-                self.controls.append(button)
-                button.grid(row=0, column=index, sticky="nsew", padx=4, pady=4)
-                actions.columnconfigure(index, weight=1)
-            stop_frame = ttk.Frame(self.advanced_frame)
-            stop_frame.pack(fill="x", pady=(6, 0))
-            self.stop_button = ttk.Button(
-                stop_frame, text="停止", command=self.request_stop, state="disabled", style="Workflow.TButton"
-            )
-            self.control_buttons["停止"] = self.stop_button
-            self.controls.append(self.stop_button)
-            self.stop_button.pack(fill="x")
-
         self.progress_bar = ttk.Progressbar(outer, variable=self.progress_value, maximum=100)
         self.progress_bar.pack(fill="x", pady=(4, 8))
         bottom = ttk.Frame(outer)
         bottom.pack(fill="x")
         ttk.Label(bottom, textvariable=self.status, wraplength=570).pack(side="left", fill="x", expand=True)
-        self.main_confirm_button = ttk.Button(
-            bottom, text="确认", command=self.acknowledge_main_confirmation, style="Primary.TButton"
-        )
-        self.main_confirm_button.pack(side="right", padx=(12, 0))
-        self.main_confirm_button.pack_forget()
         ttk.Label(bottom, text="ESC 结束当前长流程").pack(side="right", padx=(12, 0))
 
     def _capture_options_from_vars(self):
@@ -28831,47 +28219,6 @@ class AppUiService(AppServiceBase):
         except (StorageError, sqlite3.Error, OSError, ValueError, RuntimeError) as error:
             self._set_capture_options(self.capture_options, False)
             self.show_error(str(error))
-
-    def show_main_confirmation(self, title, text):
-        self.pending_main_confirmation = {"title": str(title), "text": str(text), "created": time.time()}
-        self.status.set(str(text))
-        if self.main_confirm_button is not None:
-            self.main_confirm_button.configure(text="确认", state="normal")
-            self.main_confirm_button.pack(side="right", padx=(12, 0))
-            self.main_confirm_button.focus_set()
-        self.record_acceptance_case(
-            "弹窗", "success_status_only", "passed", {"title": str(title), "surface": "main_window", "popup": False}
-        )
-
-    def acknowledge_main_confirmation(self):
-        payload = self.pending_main_confirmation
-        if not isinstance(payload, dict):
-            return
-        self.pending_main_confirmation = None
-        if self.main_confirm_button is not None:
-            self.main_confirm_button.pack_forget()
-        self.status.set(payload.get("title", "") + "已确认")
-        self.record_acceptance_case(
-            "弹窗",
-            "main_window_confirm",
-            "passed",
-            {"title": payload.get("title"), "confirmed_at": time.time(), "buttons": ["确认"]},
-        )
-        self._update_control_availability()
-
-    def _hide_main_confirmation(self):
-        self.pending_main_confirmation = None
-        if self.main_confirm_button is not None:
-            self.main_confirm_button.pack_forget()
-
-    def _toggle_advanced(self):
-        if not self.developer_mode:
-            self.advanced_frame.pack_forget()
-            return
-        if self.advanced_visible.get():
-            self.advanced_frame.pack(fill="x", pady=(0, 8), before=self.progress_bar)
-        else:
-            self.advanced_frame.pack_forget()
 
     def tk_exception(self, exc_type, exc_value, exc_traceback):
         self.show_error("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
@@ -28986,8 +28333,6 @@ class AppUiService(AppServiceBase):
             self.result_modal = None
             self.result_modal_widget = None
             evidence = {"title": str(title), "confirmed_at": time.time(), "close_path": "确认", "buttons": ["确认"]}
-            self.record_acceptance_case("弹窗", "confirm_only", "passed", evidence)
-            self.record_acceptance_case("弹窗", "error_confirm_only", "passed", evidence)
             self.close_dialog(win, closed)
             if previous_grab is not None:
                 try:
@@ -29033,9 +28378,6 @@ class AppUiService(AppServiceBase):
             return
         message = (str(title).strip() + "：" if str(title).strip() else "") + str(text).strip()
         self.status.set(message)
-        self.record_acceptance_case(
-            "弹窗", "success_status_only", "passed", {"title": str(title), "status": message, "popup": False}
-        )
 
     def prompt_text(self, title, label, initial=""):
         result = {"value": None}
@@ -29527,7 +28869,7 @@ class AppUiService(AppServiceBase):
             result = self.store.compact_samples(game["id"])
             message = UserMessageCatalog.compaction(result)
             self.status.set(message)
-            self.show_main_confirmation("数据压缩完成", message)
+            self.show_info("数据压缩完成", message)
             refresh()
             self._refresh_all()
 
@@ -29535,7 +28877,7 @@ class AppUiService(AppServiceBase):
             self.store.restore_model_backup(game["id"])
             message = "已从数据库中的完整校验备份恢复模型"
             self.status.set(message)
-            self.show_main_confirmation("模型恢复完成", message)
+            self.show_info("模型恢复完成", message)
             refresh()
             self._refresh_all()
 
@@ -29543,7 +28885,7 @@ class AppUiService(AppServiceBase):
             path = self.store.create_recovery_backup("manual")
             message = UserMessageCatalog.backup_created(path)
             self.status.set(message)
-            self.show_main_confirmation("恢复备份已创建", message)
+            self.show_info("恢复备份已创建", message)
 
         def clear():
             if not self.confirm_dialog("清空数据", "确认清空当前游戏的全部样本、模型和备份吗？此操作不可撤销。"):
@@ -29551,7 +28893,7 @@ class AppUiService(AppServiceBase):
             self.store.clear_game_data(game["id"])
             message = "已清空当前游戏的样本、模型、备份和拒绝记录"
             self.status.set(message)
-            self.show_main_confirmation("数据清空完成", message)
+            self.show_info("数据清空完成", message)
             self.close_dialog(win, state)
             self._refresh_all()
 
@@ -29928,23 +29270,14 @@ class AppLifecycleService(AppServiceBase):
                         handle.write(json.dumps(metrics, ensure_ascii=False, separators=(",", ":")) + "\n")
                 except RECOVERABLE_ERRORS as audit_error:
                     self._log_error("ESC_LATENCY_AUDIT_WRITE_FAILED", audit_error, metrics)
-        self._record_mode_acceptance(name, result, metrics)
         self._refresh_all()
         if self.closing:
             self._poll_shutdown()
             return
         if result.status == "failed" or error:
             self.show_error(error or result.summary)
-        elif result.status == "completed" and name in {"文件", MODE_LABELS[ModeId.UPGRADE]}:
-            self.show_main_confirmation(name, result.summary)
         else:
             self.status.set(result.summary)
-            self.record_acceptance_case(
-                "弹窗",
-                "success_status_only",
-                "passed",
-                {"mode": name, "status": result.status, "summary": result.summary, "popup": False},
-            )
 
     def _fail_active_mode(self, message):
         self.request_mode_stop("failed", str(message))
@@ -30025,7 +29358,6 @@ class AppLifecycleService(AppServiceBase):
             return False
         begun = False
         try:
-            self._hide_main_confirmation()
             if require_game:
                 self.require_game()
             if self.storage_fault and normalize_mode_id(name) in {
@@ -30046,7 +29378,6 @@ class AppLifecycleService(AppServiceBase):
             self.mode_shutdown_forced = []
             self.mode_stop_started = False
             self.mode_shutdown_polling = False
-            self.record_acceptance_case("停止", "starting", "pending", {"mode": str(name), "time": time.time()})
             self.api.block_input()
             self.set_input_status("已锁定")
             self.set_controls(True)
@@ -32064,8 +31395,6 @@ class AppModeService(AppServiceBase):
 
 
 
-
-
 class AppStorageService(AppServiceBase):
     def _restore_directory_display(self):
         self.data_dir_text.set(str(self.data_directory) if self.data_directory is not None else "未选择")
@@ -32127,13 +31456,11 @@ class AppStorageService(AppServiceBase):
             selected_game = store.selected_game()
             recommendation = store.load_window_descriptor()
             write_audit = WritePathAudit(base)
-            acceptance = AcceptanceReport(base)
             self.store = store
             context.store = store
             self.data_directory = base
             self.data_directory_lock = directory_lock
             self.write_audit = write_audit
-            self.acceptance_report = acceptance
             self.runtime_installer = installer
             self.ai_worker = worker
             self.vision_runtime = vision
@@ -32177,7 +31504,6 @@ class AppStorageService(AppServiceBase):
             self.data_directory = None
             self.data_directory_lock = None
             self.write_audit = None
-            self.acceptance_report = None
             self.runtime_installer = None
             self.ai_worker = None
             self.vision_runtime = None
@@ -32212,18 +31538,60 @@ class AppStorageService(AppServiceBase):
             self.show_error("运行模式期间不能切换文件夹")
             return
         button = self.control_buttons.get("文件夹")
-        candidate = self.prepared_directory
-        if candidate is not None:
+        if self.pending_directory is not None and self.lifecycle.directory_phase == "prepared":
+            selected = Path(self.pending_directory)
+            self.status.set("正在确认并写入数据目录……")
             if button is not None:
                 button.configure(text="正在确认…", state="disabled")
-            self.status.set("正在确认数据目录……")
-            try:
-                self._commit_prepared_directory(candidate)
-            except RECOVERABLE_ERRORS as error:
+            self.lifecycle.set_directory_phase("preparing")
+            self._update_control_availability()
+            stop = threading.Event()
+            self.directory_prepare_stop = stop
+            self.directory_prepare_generation += 1
+            generation = self.directory_prepare_generation
+
+            def confirmed_ok(prepared):
+                if self.closing or generation != self.directory_prepare_generation:
+                    prepared.close()
+                    return
                 try:
-                    candidate.close()
-                except RECOVERABLE_ERRORS as close_error:
-                    record_cleanup_error("BEST_EFFORT_EXCEPTION", close_error)
+                    self._commit_prepared_directory(prepared)
+                except RECOVERABLE_ERRORS as error:
+                    try:
+                        prepared.close()
+                    except RECOVERABLE_ERRORS as close_error:
+                        record_cleanup_error("DIRECTORY_CONFIRM_CLEANUP_FAILED", close_error)
+                    self.directory_prepare_thread = None
+                    self.directory_prepare_stop = None
+                    self.prepared_directory = None
+                    self.directory_prepare_candidate = None
+                    self.pending_directory = None
+                    self.lifecycle.set_directory_phase("ready" if self.store is not None else "failed")
+                    self.progress_value.set(0.0)
+                    self._restore_directory_display()
+                    if button is not None:
+                        button.configure(text="文件夹")
+                    self._update_control_availability()
+                    self.show_error("确认切换失败，原目录未改变：" + str(error))
+                    return
+                self.directory_prepare_thread = None
+                self.directory_prepare_stop = None
+                self.prepared_directory = None
+                self.directory_prepare_candidate = None
+                self.pending_directory = None
+                self.lifecycle.set_directory_phase("ready")
+                if button is not None:
+                    button.configure(text="文件夹")
+                self.data_dir_text.set(str(self.data_directory))
+                self.progress_value.set(100.0)
+                self.status.set("文件夹已确认：" + str(self.data_directory))
+                self._update_control_availability()
+
+            def confirmed_failed(error):
+                if generation != self.directory_prepare_generation:
+                    return
+                self.directory_prepare_thread = None
+                self.directory_prepare_stop = None
                 self.prepared_directory = None
                 self.directory_prepare_candidate = None
                 self.pending_directory = None
@@ -32233,117 +31601,76 @@ class AppStorageService(AppServiceBase):
                 if button is not None:
                     button.configure(text="文件夹")
                 self._update_control_availability()
-                self.show_error("确认切换失败，原目录未改变：" + str(error))
-                return
-            self.prepared_directory = None
-            self.directory_prepare_candidate = None
-            self.pending_directory = None
-            self.lifecycle.set_directory_phase("ready")
-            if button is not None:
-                button.configure(text="文件夹")
-            self.data_dir_text.set(str(self.data_directory))
-            self.progress_value.set(100.0)
-            self.status.set("文件夹已确认：" + str(self.data_directory))
-            self._update_control_availability()
+                if not self.closing and not isinstance(error, InputStopped):
+                    self.show_error("目录写入失败，当前目录未改变：" + str(error))
+
+            def worker():
+                directory_lock = None
+                prepared = None
+                destination_existed = selected.exists()
+                try:
+                    if self.data_directory is not None and same_directory(selected, self.data_directory):
+                        directory_lock = self.data_directory_lock
+                    else:
+                        directory_lock = DataDirectoryLock(selected).acquire()
+                    prepared = prepare_data_directory(
+                        selected,
+                        stop,
+                        lambda amount: self.ui(lambda amount=amount: self.progress_value.set(amount), "prepare_progress"),
+                        self.store,
+                        self.data_directory,
+                        destination_existed,
+                    )
+                    prepared.directory_lock = directory_lock
+                    prepared.directory_lock_owned = directory_lock is not self.data_directory_lock
+                    self.ui(lambda prepared=prepared: confirmed_ok(prepared))
+                except RECOVERABLE_ERRORS as error:
+                    if prepared is not None:
+                        try:
+                            prepared.close()
+                        except RECOVERABLE_ERRORS as close_error:
+                            record_cleanup_error("DIRECTORY_PREPARE_CLEANUP_FAILED", close_error)
+                    elif directory_lock is not None and directory_lock is not self.data_directory_lock:
+                        try:
+                            directory_lock.close()
+                        except RECOVERABLE_ERRORS as close_error:
+                            record_cleanup_error("DIRECTORY_LOCK_RELEASE_FAILED", close_error)
+                    if not destination_existed:
+                        try:
+                            (selected / ".ugai.lock").unlink(missing_ok=True)
+                            if selected.exists() and not any(selected.iterdir()):
+                                selected.rmdir()
+                        except OSError as cleanup_error:
+                            record_cleanup_error("DIRECTORY_FAILED_TARGET_CLEANUP_FAILED", cleanup_error)
+                    self.ui(lambda error=error: confirmed_failed(error))
+
+            thread = threading.Thread(target=worker, name="UniversalGameAI-ConfirmDataDirectory", daemon=False)
+            self.directory_prepare_thread = thread
+            thread.start()
             return
         if self.lifecycle.directory_phase == "preparing":
             return
         initial = str(self.data_directory) if self.data_directory is not None else str(Path.home())
-        value = filedialog.askdirectory(
-            parent=self.root, title="选择通用游戏AI文件夹", mustexist=False, initialdir=initial
-        )
+        value = filedialog.askdirectory(parent=self.root, title="选择通用游戏AI文件夹", mustexist=False, initialdir=initial)
         if not value:
-            self.record_acceptance_case(
-                "文件夹",
-                "folder_picker_cancel",
-                "passed",
-                {
-                    "directory_unchanged": str(self.data_directory) if self.data_directory is not None else None,
-                    "popup": False,
-                },
-            )
             return
         selected = Path(value).expanduser().resolve()
+        try:
+            validate_data_directory_selection(selected, self.store, self.data_directory)
+        except RECOVERABLE_ERRORS as error:
+            self.show_error("所选目录不可用：" + str(error))
+            return
         self.pending_directory = selected
+        self.prepared_directory = None
+        self.directory_prepare_candidate = None
         self.data_dir_text.set(str(selected))
         self.progress_value.set(0.0)
-        self.status.set("正在准备数据目录……")
+        self.status.set("目录检查通过，请点击“确认”后写入")
+        self.lifecycle.set_directory_phase("prepared")
         if button is not None:
-            button.configure(text="正在准备…", state="disabled")
-        self.lifecycle.set_directory_phase("preparing")
+            button.configure(text="确认", state="normal")
         self._update_control_availability()
-        if self.directory_prepare_stop is not None:
-            self.directory_prepare_stop.set()
-        stop = threading.Event()
-        self.directory_prepare_stop = stop
-        self.directory_prepare_generation += 1
-        generation = self.directory_prepare_generation
 
-        def prepared_ok(prepared):
-            if self.closing or generation != self.directory_prepare_generation:
-                prepared.close()
-                return
-            self.directory_prepare_thread = None
-            self.directory_prepare_stop = None
-            self.prepared_directory = prepared
-            self.directory_prepare_candidate = prepared
-            self.lifecycle.set_directory_phase("prepared")
-            self.progress_value.set(100.0)
-            self.status.set("数据目录已准备好，请点击“确认”")
-            if button is not None:
-                button.configure(text="确认", state="normal")
-            self._update_control_availability()
-
-        def prepared_failed(error):
-            if generation != self.directory_prepare_generation:
-                return
-            self.directory_prepare_thread = None
-            self.directory_prepare_stop = None
-            self.prepared_directory = None
-            self.directory_prepare_candidate = None
-            self.pending_directory = None
-            self.lifecycle.set_directory_phase("ready" if self.store is not None else "failed")
-            self.progress_value.set(0.0)
-            self._restore_directory_display()
-            if button is not None:
-                button.configure(text="文件夹")
-            self._update_control_availability()
-            if not self.closing and not isinstance(error, InputStopped):
-                self.show_error("目录准备失败，当前目录未改变：" + str(error))
-
-        def worker():
-            directory_lock = None
-            prepared = None
-            try:
-                if self.store is None and same_directory(selected, Path(__file__).resolve().parent):
-                    raise RuntimeError("首次运行的main.py不能把其所在文件夹作为目标目录，请选择其他文件夹")
-                if self.data_directory is not None and same_directory(selected, self.data_directory):
-                    directory_lock = self.data_directory_lock
-                else:
-                    directory_lock = DataDirectoryLock(selected).acquire()
-                prepared = prepare_data_directory(
-                    selected,
-                    stop,
-                    lambda amount: self.ui(lambda amount=amount: self.progress_value.set(amount), "prepare_progress"),
-                    self.store,
-                    self.data_directory,
-                )
-                prepared.directory_lock = directory_lock
-                prepared.directory_lock_owned = directory_lock is not self.data_directory_lock
-                self.ui(lambda prepared=prepared: prepared_ok(prepared))
-            except RECOVERABLE_ERRORS as error:
-                if prepared is not None:
-                    try:
-                        prepared.close()
-                    except RECOVERABLE_ERRORS as close_error:
-                        record_cleanup_error("BEST_EFFORT_EXCEPTION", close_error)
-                elif directory_lock is not None and directory_lock is not self.data_directory_lock:
-                    directory_lock.close()
-                self.ui(lambda error=error: prepared_failed(error))
-
-        thread = threading.Thread(target=worker, name="UniversalGameAI-PrepareDataDirectory", daemon=False)
-        self.directory_prepare_thread = thread
-        thread.start()
 
     def _commit_prepared_directory(self, candidate):
         context = self.context
@@ -32389,7 +31716,6 @@ class AppStorageService(AppServiceBase):
         old_selection = (self.selected_game, self.selected_window, self.window_recommendation, self.storage_fault)
         if candidate.same:
             materialize_entry_script(candidate.destination)
-            materialize_selected_folder_layout(candidate.destination)
             candidate.closed = True
             candidate.store = None
             candidate.source_paused = False
@@ -32478,44 +31804,8 @@ class AppStorageService(AppServiceBase):
             candidate.directory_lock_owned = False
             self.write_audit = WritePathAudit(base)
             install_write_boundary_guard(base, self.write_audit, context)
-            self.acceptance_report = AcceptanceReport(base)
-            self.acceptance_report.set_environment(
-                host_python=sys.version,
-                host_bits=ctypes.sizeof(ctypes.c_void_p) * 8,
-                windows_build=int(sys.getwindowsversion().build) if os.name == "nt" else 0,
-                fixed_runtime_python=FIXED_RUNTIME_PYTHON_VERSION,
-            )
             target_main = base / "main.py"
             target_main_hash = sha256_file(target_main) if target_main.is_file() else ""
-            folder_evidence = {
-                "directory": str(base),
-                "main_py": str(target_main),
-                "sha256": target_main_hash,
-                "popup": False,
-                "global_input_lock": False,
-                "button_sequence": ["文件夹", "确认"],
-            }
-            for case in (
-                "folder_picker_direct",
-                "folder_no_custom_modal",
-                "folder_inline_confirm",
-                "folder_no_success_popup",
-                "no_global_input_lock",
-                "exact_user_sequence",
-            ):
-                self.record_acceptance_case("文件夹", case, "passed", folder_evidence)
-            self.record_acceptance_case(
-                "文件夹", "main_py_at_root", "passed" if target_main.is_file() else "failed", folder_evidence
-            )
-            self.record_acceptance_case(
-                "文件夹", "main_py_hash_match", "passed" if target_main_hash == main_hash else "failed", folder_evidence
-            )
-            self.record_acceptance_case(
-                "弹窗",
-                "success_status_only",
-                "passed",
-                {"event": "folder_confirmed", "popup": False, "status": "文件夹已确认"},
-            )
             self.write_audit.record(
                 "confirm_data_directory",
                 base,
@@ -32541,9 +31831,6 @@ class AppStorageService(AppServiceBase):
                 bool(vision is not None and vision.ready and ocr is not None and ocr.ready)
             )
             self.data_dir_text.set(str(base))
-            verify_selected_folder_layout(base)
-            if DEVELOPER_MODE:
-                materialize_project_layout(base)
             self._update_runtime_status()
             self._refresh_all()
             self._update_control_availability()
@@ -33022,12 +32309,6 @@ class App:
         return self.ui_service._sync_capture_options_from_profile(*args, **kwargs)
     def _capture_options_changed(self, *args, **kwargs):
         return self.ui_service._capture_options_changed(*args, **kwargs)
-    def show_main_confirmation(self, *args, **kwargs):
-        return self.ui_service.show_main_confirmation(*args, **kwargs)
-    def acknowledge_main_confirmation(self, *args, **kwargs):
-        return self.ui_service.acknowledge_main_confirmation(*args, **kwargs)
-    def _hide_main_confirmation(self, *args, **kwargs):
-        return self.ui_service._hide_main_confirmation(*args, **kwargs)
     def _toggle_advanced(self, *args, **kwargs):
         return self.ui_service._toggle_advanced(*args, **kwargs)
     def tk_exception(self, *args, **kwargs):
@@ -33240,7 +32521,6 @@ class App:
         self.data_directory = None
         self.data_directory_lock = None
         self.write_audit = None
-        self.acceptance_report = None
         self.runtime_installer = None
         self.ai_worker = None
         self.vision_runtime = None
@@ -33254,7 +32534,6 @@ class App:
         self.mode_session_id = ""
         self.lifecycle = ControlStateMachine()
         self.mode_state = MODE_IDLE
-        self.developer_mode = DEVELOPER_MODE
         self.mode_thread = None
         self.active_session = None
         self.review_process = None
@@ -33272,8 +32551,6 @@ class App:
         self.error_recent = {}
         self.result_modal = None
         self.result_modal_widget = None
-        self.main_confirm_button = None
-        self.pending_main_confirmation = None
         self.ui_lock = threading.RLock()
         self.background_lock = threading.RLock()
         self.background_generations = defaultdict(int)
@@ -33412,15 +32689,6 @@ class App:
             and not blocked
             and not directory_busy,
         }
-        if self.developer_mode:
-            mapping.update(
-                {
-                    "任务与安全": not running and runtime_ready and game_ready,
-                    "重新测试采集后端": not running and runtime_ready and window_ready,
-                    "数据清理": not running and data_ready and game_ready and not blocked,
-                    "停止": running,
-                }
-            )
         recommended = (
             "文件夹"
             if not data_ready or directory_phase == "prepared"
@@ -33454,8 +32722,6 @@ class App:
                 widget.configure(state="disabled" if running or directory_busy else "normal")
             except RECOVERABLE_ERRORS as error:
                 record_cleanup_error("BEST_EFFORT_EXCEPTION", error)
-        if self.pending_main_confirmation is not None and self.main_confirm_button is not None:
-            self.main_confirm_button.configure(state="normal" if not running else "disabled")
 
     def _forced_exit(self, reason, exit_function=os._exit):
         self.api.block_input()
@@ -33559,24 +32825,6 @@ class App:
             try:
                 result = self.api.calibrate(target, duration, self.stop_event, progress)
                 self.store.save_capture_calibration(target, result)
-                scenario = (
-                    result.get("acceptance_scenarios", {})
-                    if isinstance(result.get("acceptance_scenarios"), dict)
-                    else {}
-                )
-                for case in ("minimized", "occluded", "scaled", "recreated"):
-                    if case in scenario:
-                        self.record_acceptance_case(
-                            "采集",
-                            case,
-                            "passed" if scenario.get(case) else "failed",
-                            {
-                                "purpose_id": normalize_mode_id(purpose),
-                                "purpose_label": purpose_label,
-                                "calibration": result,
-                                "scenario": case,
-                            },
-                        )
                 return result
             except InputStopped:
                 raise
@@ -33709,256 +32957,9 @@ class App:
         if self.store is not None:
             self.store.log_error(code, error, mode=self.mode, details=details)
 
-    def record_acceptance_case(self, name, case, status, evidence=None):
-        report = self.acceptance_report
-        if report is None:
-            return False
-        try:
-            payload = evidence if isinstance(evidence, dict) else {"value": evidence}
-            payload = {
-                "authoritative": False,
-                "source": "runtime_observation",
-                "observed_status": str(status),
-                "evidence": payload,
-            }
-            report.record_case(name, case, "pending", payload)
-            return True
-        except RECOVERABLE_ERRORS as error:
-            self._log_error(
-                "ACCEPTANCE_OBSERVATION_WRITE_FAILED", error, {"name": str(name), "case": str(case), "status": str(status)}
-            )
-            return False
 
-    def _record_mode_acceptance(self, name, result, metrics=None):
-        details = dict(result.details) if isinstance(result, ModeResult) else {}
-        status = str(result.status) if isinstance(result, ModeResult) else "failed"
-        evidence = {
-            "mode": str(name),
-            "status": status,
-            "summary": str(getattr(result, "summary", "")),
-            "details": details,
-            "time": time.time(),
-        }
-        phase_case = None
-        thresholds = False
-        if metrics:
-            thresholds = bool(
-                metrics.get("lock_latency_ms") is not None
-                and metrics.get("lock_latency_ms") <= 250
-                and metrics.get("cleanup_latency_ms") is not None
-                and metrics.get("cleanup_latency_ms") <= 750
-                and metrics.get("finish_latency_ms") <= 5500
-                and not details.get("forced_processes")
-            )
-            phase_case = {MODE_STARTING: "starting", MODE_RUNNING: "running", MODE_STOPPING: "stopping"}.get(
-                str(metrics.get("phase", ""))
-            )
-            if phase_case:
-                self.record_acceptance_case("停止", phase_case, "passed" if thresholds else "failed", dict(metrics))
-            self.record_acceptance_case("停止", "latency_thresholds", "passed" if thresholds else "failed", metrics)
-        if phase_case != "stopping":
-            self.record_acceptance_case("停止", "stopping", "pending", evidence)
-        self.record_acceptance_case(
-            "停止",
-            "buttons_released",
-            "passed",
-            {"mode": str(name), "release_called": True, "forced": details.get("forced_processes", [])},
-        )
-        if str(name) == "文件":
-            runtime = details.get("runtime", {}) if isinstance(details.get("runtime"), dict) else {}
-            embedded = (
-                runtime.get("resolution_source") == "embedded"
-                and bool(runtime.get("embedded_lock_checksum"))
-                and bool(runtime.get("lock_complete", runtime_lock_matches_key(runtime.get("resolved_wheels", []), runtime.get("lock_key"))))
-            )
-            if status == "completed":
-                self.record_acceptance_case("文件完整性", "normal_complete", "passed", runtime)
-                selected_main = Path(str(runtime.get("source_path", ""))) if runtime.get("source_path") else None
-                selected_ok = bool(
-                    selected_main is not None
-                    and self.data_directory is not None
-                    and selected_main == self.data_directory / "main.py"
-                )
-                self.record_acceptance_case(
-                    "文件完整性", "integrity_checks_selected_main", "passed" if selected_ok else "failed", runtime
-                )
-                self.record_acceptance_case(
-                    "文件完整性", "locked_manifest", "passed" if embedded else "failed", runtime
-                )
-                retries = (
-                    safe_int(runtime.get("download_evidence", {}).get("retries"), 0, 0)
-                    if isinstance(runtime.get("download_evidence"), dict)
-                    else 0
-                )
-                self.record_acceptance_case(
-                    "文件完整性",
-                    "network_failure_retry",
-                    "passed" if retries > 0 else "pending",
-                    {"retries": retries, "download_evidence": runtime.get("download_evidence", {})},
-                )
-                self.record_acceptance_case(
-                    "独立运行时",
-                    "fixed_python",
-                    "passed" if tuple(runtime.get("python_abi", [])) == FIXED_RUNTIME_PYTHON_ABI else "failed",
-                    runtime,
-                )
-                self.record_acceptance_case(
-                    "独立运行时", "embedded_wheel_lock", "passed" if embedded else "failed", runtime
-                )
-                self.record_acceptance_case(
-                    "独立运行时",
-                    "host_abi_independent",
-                    "passed",
-                    {
-                        "host": list(sys.version_info[:2]),
-                        "runtime": runtime.get("python_abi"),
-                        "architecture": runtime.get("architecture"),
-                    },
-                )
-                self.record_acceptance_case(
-                    "独立运行时", "worker_process", "passed", {"installer_process_completed": True}
-                )
-            elif status == "stopped":
-                download_cache = self.data_directory / "cache" / "runtime_downloads" if self.data_directory else None
-                partials = (
-                    [str(item.relative_to(self.data_directory)) for item in download_cache.rglob("*.part")]
-                    if download_cache is not None and download_cache.exists()
-                    else []
-                )
-                staging = list(self.data_directory.glob("runtime.staging.*")) if self.data_directory else []
-                self.record_acceptance_case(
-                    "文件完整性",
-                    "escape_retry",
-                    "passed" if not staging else "failed",
-                    {
-                        "partial_files": partials[:20],
-                        "staging": list(map(str, staging)),
-                        "resume_preserved": bool(partials),
-                    },
-                )
-        elif normalize_mode_id(name) == ModeId.COLLECT.value:
-            options = CaptureOptions(
-                **{
-                    key: bool(value)
-                    for key, value in (
-                        details.get("capture_options", {}) if isinstance(details.get("capture_options"), dict) else {}
-                    ).items()
-                    if key in {"mouse", "keyboard", "gamepad", "audio"}
-                }
-            )
-            modality_counts = {
-                "mouse": safe_int(details.get("real_mouse_events"), 0, 0),
-                "keyboard": safe_int(details.get("keyboard_events"), 0, 0),
-                "gamepad": safe_int(details.get("gamepad_events"), 0, 0),
-                "audio": safe_int(details.get("audio_events"), 0, 0),
-            }
-            enabled = options.to_dict()
-            observed = all(not enabled[key] or modality_counts[key] > 0 for key in enabled)
-            passed = bool(
-                details.get("client_only")
-                and details.get("modality_mask_closed_loop")
-                and observed
-                and safe_int(details.get("outside_rejected"), 0, 0) >= 0
-            )
-            self.record_acceptance_case(
-                MODE_LABELS[ModeId.COLLECT],
-                "client_only_real_mouse",
-                "passed" if passed else "failed" if status == "completed" else "pending",
-                {**details, "enabled": enabled, "observed": modality_counts},
-            )
-            self.record_acceptance_case(
-                MODE_LABELS[ModeId.COLLECT],
-                "capture_modalities_closed_loop",
-                "passed" if passed else "failed" if status == "completed" else "pending",
-                {**details, "enabled": enabled, "observed": modality_counts},
-            )
-        elif normalize_mode_id(name) == ModeId.UPGRADE.value:
-            self.record_acceptance_case(
-                MODE_LABELS[ModeId.UPGRADE],
-                "socket_blocked",
-                "passed" if details.get("offline_network_blocked") else "failed",
-                details,
-            )
-            self.record_acceptance_case(
-                MODE_LABELS[ModeId.UPGRADE],
-                "model_optimized",
-                "passed" if details.get("model_optimized") and details.get("model_after_hash") else "failed",
-                details,
-            )
-            self.record_acceptance_case(
-                MODE_LABELS[ModeId.UPGRADE],
-                "pool_optimized",
-                "passed" if details.get("pool_optimized") and details.get("pool_after_hash") else "failed",
-                details,
-            )
-            self.record_acceptance_case(
-                MODE_LABELS[ModeId.UPGRADE],
-                "deterministic_seed",
-                (
-                    "passed"
-                    if details.get("deterministic_seed") and safe_int(details.get("sleep_seed"), 0) > 0
-                    else "failed"
-                ),
-                details,
-            )
-        elif normalize_mode_id(name) == ModeId.AI.value:
-            audit = details.get("coordinate_audit", {}) if isinstance(details.get("coordinate_audit"), dict) else {}
-            self.record_acceptance_case(
-                MODE_LABELS[ModeId.AI],
-                "all_coordinates_in_client",
-                (
-                    "passed"
-                    if safe_int(audit.get("outside"), 1) == 0 and safe_int(audit.get("sent"), 0) >= 0
-                    else "failed"
-                ),
-                audit,
-            )
-            self.record_acceptance_case(
-                MODE_LABELS[ModeId.AI],
-                "immutable_snapshot_change_stop",
-                "passed" if details.get("training_snapshot_checksum") and details.get("snapshot_guarded") else "failed",
-                details,
-            )
-        elif normalize_mode_id(name) == ModeId.NUMERIC.value:
-            for case, key in (
-                ("structured_questions_only", "structured_questions_only"),
-                ("action_question", "action_question"),
-                ("numeric_region_question", "numeric_region_question"),
-                ("ocr_confirmation", "ocr_confirmation"),
-                ("numeric_relation_question", "numeric_relation_question"),
-                ("submit_required", "submit_required"),
-            ):
-                self.record_acceptance_case(
-                    MODE_LABELS[ModeId.NUMERIC], case, "passed" if details.get(key) else "failed", details
-                )
-            self.record_acceptance_case(
-                MODE_LABELS[ModeId.NUMERIC],
-                "finish_button",
-                "passed" if details.get("finish_button") else "pending",
-                details,
-            )
-            self.record_acceptance_case(
-                MODE_LABELS[ModeId.NUMERIC], "escape", "passed" if details.get("escape_used") else "pending", details
-            )
-        if self.data_directory is not None:
-            staging = (
-                list(self.data_directory.glob("runtime.staging.*"))
-                + list(self.data_directory.glob(".ugai_prepare_*"))
-                + list(self.data_directory.glob(".ugai_migration_*"))
-            )
-            self.record_acceptance_case(
-                "错误恢复", "no_staging", "passed" if not staging else "failed", {"staging": list(map(str, staging))}
-            )
-            self.record_acceptance_case(
-                "错误恢复",
-                "no_orphan_process",
-                "passed" if not details.get("forced_processes") else "failed",
-                {"forced_processes": details.get("forced_processes", [])},
-            )
-            self.record_acceptance_case("错误恢复", "no_pressed_buttons", "passed", {"release_called": True})
-            self.record_acceptance_case(
-                "错误恢复", "input_locked", "passed", {"mode": str(name), "shutdown_complete": True}
-            )
+
+
 
 
 class ReviewProcessHost:
@@ -34084,7 +33085,6 @@ def startup_error(root, text):
 
 
 
-
 EXTENSION_SCHEMA_VERSION = 5
 VISION_ARCHITECTURE_VERSION = 3
 OCR_SEMANTIC_VERSION = 3
@@ -34156,345 +33156,6 @@ SEMANTIC_EVENT_HUB = SemanticEventHub()
 def _atomic_write(path, data):
     return durable_atomic_write(path, data)
 
-
-WORKER_ENTRY_SCHEMA_VERSION = 1
-_WORKER_SOURCE_CACHE = {}
-_WORKER_FILENAMES = frozenset({"ai_worker.py", "training_worker.py", "runtime_install_worker.py"})
-
-
-def _worker_node_defined_names(node):
-    result = set()
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        result.add(str(node.name))
-        return result
-    if isinstance(node, (ast.Import, ast.ImportFrom)):
-        for alias in node.names:
-            result.add(str(alias.asname or alias.name.split(".")[0]))
-        return result
-    if isinstance(node, ast.Assign):
-        targets = list(node.targets)
-    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
-        targets = [node.target]
-    else:
-        targets = []
-    for target in targets:
-        for item in ast.walk(target):
-            if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store):
-                result.add(str(item.id))
-    if isinstance(node, (ast.If, ast.Try, ast.With)):
-        bodies = [getattr(node, "body", []), getattr(node, "orelse", []), getattr(node, "finalbody", [])]
-        for handler in getattr(node, "handlers", []):
-            bodies.append(getattr(handler, "body", []))
-        for body in bodies:
-            for child in body:
-                result.update(_worker_node_defined_names(child))
-    return result
-
-
-def _worker_node_source(source_lines, node):
-    decorators = getattr(node, "decorator_list", ())
-    start = min([node.lineno, *[item.lineno for item in decorators]])
-    return "".join(source_lines[start - 1 : node.end_lineno]).rstrip()
-
-
-def build_minimal_worker_source(source, root_names, entry_source):
-    source_text = str(source)
-    roots = tuple(str(name) for name in root_names)
-    cache_key = (hashlib.sha256(source_text.encode("utf-8")).hexdigest(), roots, str(entry_source))
-    cached = _WORKER_SOURCE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    tree = ast.parse(source_text)
-    source_lines = source_text.splitlines(keepends=True)
-    name_nodes = defaultdict(list)
-    selected = set()
-    for index, node in enumerate(tree.body):
-        names = _worker_node_defined_names(node)
-        for name in names:
-            name_nodes[name].append(index)
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            selected.add(index)
-    pending = list(roots)
-    visited = set()
-    while pending:
-        name = pending.pop()
-        if name in visited:
-            continue
-        visited.add(name)
-        for index in name_nodes.get(name, ()):
-            if index in selected:
-                continue
-            selected.add(index)
-            node = tree.body[index]
-            for item in ast.walk(node):
-                if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load) and item.id in name_nodes:
-                    pending.append(item.id)
-    missing = [name for name in roots if name not in name_nodes]
-    if missing:
-        raise RuntimeError("工作进程入口依赖不存在：" + "、".join(missing))
-    fragments = [_worker_node_source(source_lines, tree.body[index]) for index in sorted(selected)]
-    result = "\n\n".join(fragment for fragment in fragments if fragment).rstrip() + "\n\n" + str(entry_source).strip() + "\n"
-    compile(result, "<minimal-worker>", "exec")
-    _WORKER_SOURCE_CACHE[cache_key] = result
-    return result
-
-
-def _ai_worker_entry_source():
-    return (
-        "def _worker_entry(argv=None):\n"
-        "    values=list(sys.argv[1:] if argv is None else argv)\n"
-        "    if len(values)!=5: raise SystemExit('AI工作进程参数数量无效')\n"
-        "    base,address_text,auth_text,family,protocol=values\n"
-        "    address=address_text if family=='AF_PIPE' else tuple(json.loads(address_text))\n"
-        "    return ai_worker_main(base,address,auth_text,family,protocol) or 0\n"
-        "if __name__=='__main__':\n"
-        "    raise SystemExit(_worker_entry())"
-    )
-
-
-def _runtime_worker_entry_source():
-    return (
-        "def _worker_entry(argv=None):\n"
-        "    values=list(sys.argv[1:] if argv is None else argv)\n"
-        "    if len(values)==2 and values[0]=='install': return runtime_install_worker(values[1]) or 0\n"
-        "    raise SystemExit('运行库工作进程参数无效')\n"
-        "if __name__=='__main__':\n"
-        "    raise SystemExit(_worker_entry())"
-    )
-
-
-def materialize_worker_entrypoints(base, source=None):
-    root = Path(base).resolve() / "project" / "uga" / "workers"
-    source_text = str(source) if source is not None else Path(__file__).read_text(encoding="utf-8")
-    source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
-    manifest_path = root / "manifest.json"
-    if manifest_path.is_file():
-        try:
-            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-            worker_records = existing.get("workers", {}) if isinstance(existing, dict) else {}
-            valid = (
-                safe_int(existing.get("schema_version"), 0) == WORKER_ENTRY_SCHEMA_VERSION
-                and str(existing.get("source_sha256", "")) == source_hash
-                and set(worker_records) == _WORKER_FILENAMES
-            )
-            if valid:
-                for filename, record in worker_records.items():
-                    candidate = root / filename
-                    if not candidate.is_file() or sha256_file(candidate) != str(record.get("sha256", "")):
-                        valid = False
-                        break
-            if valid:
-                return root
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            pass
-    ai_source = build_minimal_worker_source(source_text, ("ai_worker_main",), _ai_worker_entry_source())
-    runtime_source = build_minimal_worker_source(
-        source_text,
-        ("runtime_install_worker",),
-        _runtime_worker_entry_source(),
-    )
-    training_source = (
-        "import os,sys\n"
-        "os.environ['UGAI_WORKER_ROLE']='training'\n"
-        "from ai_worker import _worker_entry\n"
-        "if __name__=='__main__':\n"
-        "    raise SystemExit(_worker_entry())\n"
-    )
-    payloads = {
-        "ai_worker.py": ai_source,
-        "training_worker.py": training_source,
-        "runtime_install_worker.py": runtime_source,
-        "__init__.py": "WORKER_ENTRY_SCHEMA_VERSION=" + str(WORKER_ENTRY_SCHEMA_VERSION) + "\n",
-    }
-    for filename, content in payloads.items():
-        _atomic_write(root / filename, content)
-    manifest = {
-        "schema_version": WORKER_ENTRY_SCHEMA_VERSION,
-        "source_sha256": source_hash,
-        "workers": {
-            filename: {
-                "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-                "bytes": len(content.encode("utf-8")),
-                "lines": len(content.splitlines()),
-            }
-            for filename, content in payloads.items()
-            if filename.endswith("_worker.py")
-        },
-        "generated": time.time(),
-    }
-    _atomic_write(root / "manifest.json", json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-    return root
-
-
-def worker_entry_path(base, filename):
-    name = str(filename)
-    if name not in _WORKER_FILENAMES:
-        raise RuntimeError("未知工作进程入口：" + name)
-    root = Path(base).resolve() / "project" / "uga" / "workers"
-    path = root / name
-    if not path.is_file():
-        materialize_worker_entrypoints(base)
-    if not path.is_file():
-        raise RuntimeError("精简工作进程入口不存在：" + str(path))
-    return path
-
-
-DEVELOPMENT_MODULE_ANCHORS = (
-    ("src/bootstrap.py", None),
-    ("src/core/metrics.py", "RuntimeMetrics"),
-    ("src/representation/features.py", "visual_scene_key"),
-    ("src/policy/task_policy.py", "TaskAgentPolicy"),
-    ("src/core/contracts.py", "WindowIdentity"),
-    ("src/input/actions.py", "normalized_identifier"),
-    ("src/core/tasks.py", "TaskDefinition"),
-    ("src/reward/providers.py", "RewardProvider"),
-    ("src/input/semantic_grounding.py", "normalize_semantic_action"),
-    ("src/capture/windows.py", "CaptureProcessWorker"),
-    ("src/acceptance/report.py", "AcceptanceReport"),
-    ("src/input/windows.py", "WinBridge"),
-    ("src/modes/base.py", "ModeStateCallbacks"),
-    ("src/safety/contracts.py", "TrainingCandidateConfirmer"),
-    ("src/modes/learning.py", "LearningController"),
-    ("src/modes/sleeping.py", "ReviewController"),
-    ("src/policy/offline_rl.py", "_policy_training_cache_key"),
-    ("src/modes/review_execution.py", "ReviewExecution"),
-    ("src/modes/training.py", "TrainingController"),
-    ("src/modes/guidance.py", "GuidanceWindow"),
-    ("src/storage/database.py", "DataStore"),
-    ("src/ui/dialogs.py", "GameSelectionDialog"),
-    ("src/ui/app.py", "AppUiService"),
-    ("src/acceptance/windows.py", "ReviewProcessHost"),
-    ("src/runtime/bootstrap.py", "SemanticEventHub"),
-    ("src/runtime/install.py", "_validated_download"),
-    ("src/learning/vision.py", "OfflineVisionRuntime"),
-    ("src/acceptance/windows_runtime.py", "_acceptance_geometry_complete"),
-    ("src/perception/hybrid.py", "high_resolution_semantic_tokens"),
-    ("src/perception/encoder.py", "ObjectCentricObservationEncoder"),
-    ("src/tasks/planner.py", "HierarchicalTaskPlanner"),
-    ("src/world_model/transition.py", "train_auditable_transition_model"),
-    ("src/world_model/sequence.py", "train_latent_world_model"),
-    ("src/benchmark/generalization.py", "FixedGeneralizationBenchmark"),
-    ("src/capability/profile.py", "CapabilityProfile"),
-    ("src/tasks/induction.py", "TaskInductionEngine"),
-    ("src/learning/skills.py", "AutomaticSkillDiscovery"),
-    ("src/storage/replay.py", "ExperienceReplayPortfolio"),
-)
-
-
-def _top_level_node_name(node):
-    name = getattr(node, "name", None)
-    if name:
-        return str(name)
-    if isinstance(node, (ast.Assign, ast.AnnAssign)):
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        for target in targets:
-            if isinstance(target, ast.Name):
-                return target.id
-    return ""
-
-
-def split_development_modules(source):
-    tree = ast.parse(source)
-    lines = source.splitlines(keepends=True)
-    positions = {
-        _top_level_node_name(node): min([node.lineno, *[item.lineno for item in getattr(node, "decorator_list", [])]])
-        for node in tree.body
-        if _top_level_node_name(node)
-    }
-    starts = []
-    for relative, anchor in DEVELOPMENT_MODULE_ANCHORS:
-        line = 1 if anchor is None else positions.get(anchor)
-        if line is None:
-            raise RuntimeError("开发模块锚点不存在：" + str(anchor))
-        starts.append((relative, int(line)))
-    if [line for _, line in starts] != sorted(line for _, line in starts):
-        raise RuntimeError("开发模块锚点顺序无效")
-    guard_line = len(lines) + 1
-    for node in tree.body:
-        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
-            continue
-        left = node.test.left
-        if isinstance(left, ast.Name) and left.id == "__name__":
-            guard_line = node.lineno
-            break
-    modules = {}
-    for index, (relative, line) in enumerate(starts):
-        next_line = starts[index + 1][1] if index + 1 < len(starts) else guard_line
-        fragment = "".join(lines[line - 1 : next_line - 1])
-        if not fragment.strip():
-            raise RuntimeError("开发模块为空：" + relative)
-        compile(fragment, relative, "exec")
-        modules[relative] = fragment
-    return modules
-
-
-def _development_loader_source(order):
-    return (
-        "import runpy,sys\n"
-        "from build_single_file import build\n"
-        "def load_runtime():\n"
-        "    target=build()\n"
-        "    return runpy.run_path(str(target),run_name='ugai_dev_runtime')\n"
-        "def main(argv=None):\n"
-        "    namespace=load_runtime()\n"
-        "    return namespace['main'](argv)\n"
-        "if __name__=='__main__':\n"
-        "    raise SystemExit(main())\n"
-    )
-
-
-def _single_file_builder_source(order):
-    return (
-        "import json\n"
-        "from pathlib import Path\n"
-        "ROOT=Path(__file__).resolve().parent\n"
-        "ORDER=" + repr(list(order)) + "\n"
-        "def build(target=None):\n"
-        "    output=Path(target).resolve() if target else ROOT/'dist'/'main.py'\n"
-        "    source=''.join((ROOT/item).read_text(encoding='utf-8') for item in ORDER)\n"
-        "    source+='if __name__ == \"__main__\":\\n    raise SystemExit(main())\\n'\n"
-        "    compile(source,str(output),'exec')\n"
-        "    output.parent.mkdir(parents=True,exist_ok=True)\n"
-        "    temporary=output.with_suffix(output.suffix+'.tmp')\n"
-        "    temporary.write_text(source,encoding='utf-8',newline='\\n')\n"
-        "    temporary.replace(output)\n"
-        "    return output\n"
-        "if __name__=='__main__':\n"
-        "    print(build())\n"
-    )
-
-
-def _project_module_templates_base(source=None):
-    source_text = str(source) if source is not None else Path(__file__).read_text(encoding="utf-8")
-    modules = split_development_modules(source_text)
-    source_order = list(modules)
-    modules["src/module_order.json"] = json.dumps(source_order, ensure_ascii=False, indent=2) + "\n"
-    modules["src/__init__.py"] = "SOURCE_OF_TRUTH=True\n"
-    modules["uga/__init__.py"] = "ARCHITECTURE='source_first_single_file_build'\n"
-    modules["dev_main.py"] = _development_loader_source(source_order)
-    modules["build_single_file.py"] = _single_file_builder_source(source_order)
-    modules["main.py"] = "from dev_main import main\nif __name__=='__main__':\n    raise SystemExit(main())\n"
-    return modules
-
-
-def project_module_templates(source=None):
-    modules = _project_module_templates_base(source)
-    packages = {
-        "capture": "窗口与多后端采集、连续帧缓冲和高分辨率全局通道",
-        "perception": "共享视觉骨干、对象槽、运动编码和场景图",
-        "actions": "语义动作、技能和输入映射",
-        "tasks": "目标谓词和学习式子目标规划",
-        "policy": "目标条件离线策略集成和不确定性",
-        "world_model": "可审计转移模型和连续潜在动力学",
-        "benchmark": "固定真实泛化基准、哈希验证和模型晋升门禁",
-        "safety": "独立安全进程和短时动作租约",
-        "storage": "数据谱系、分层回放和迁移",
-        "modes": "学习、五阶段睡眠、训练和指导",
-        "ui": "八按钮界面和确认弹窗",
-    }
-    for name, description in packages.items():
-        modules["src/" + name + "/__init__.py"] = "PACKAGE_DESCRIPTION=" + repr(description) + "\n"
-    return modules
 
 
 DEMONSTRATION_CURRICULUM = {
@@ -34652,189 +33313,6 @@ def demonstration_curriculum_assessment(experiences):
     }
 
 
-def materialize_project_layout(base):
-    root = Path(base) / "project"
-    source = Path(__file__).read_text(encoding="utf-8")
-    modules = project_module_templates(source)
-    for relative, content in modules.items():
-        _atomic_write(root / relative, content)
-    _atomic_write(root / "dist/main.py", source)
-    files = sorted([*modules, "dist/main.py"])
-    manifest = {
-        "format": 4,
-        "architecture": "source_first_single_file_build",
-        "legacy_runtime": False,
-        "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
-        "module_order": json.loads(modules["src/module_order.json"]),
-        "files": files,
-        "generated": time.time(),
-    }
-    package_names = (
-        "core",
-        "hardware",
-        "capture",
-        "input",
-        "perception",
-        "policy",
-        "training",
-        "storage",
-        "ui",
-    )
-    signed_modules = {}
-    for package_name in package_names:
-        initializer = root / package_name / "__init__.py"
-        payload = (
-            "MODULE_NAME=" + repr(package_name) + "\n"
-            "MODULE_SCHEMA_VERSION=1\n"
-            "def contract():\n"
-            "    return {'module':MODULE_NAME,'schema_version':MODULE_SCHEMA_VERSION}\n"
-        )
-        _atomic_write(initializer, payload)
-        signed_modules[str(initializer.relative_to(root))] = sha256_file(initializer)
-    curriculum_path = root / "training" / "demonstration_curriculum.json"
-    _atomic_write(
-        curriculum_path,
-        json.dumps(DEMONSTRATION_CURRICULUM, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-    )
-    signed_modules[str(curriculum_path.relative_to(root))] = sha256_file(curriculum_path)
-    manifest["self_extract_layout"] = list(package_names)
-    manifest["signed_modules"] = signed_modules
-    manifest["demonstration_curriculum_checksum"] = sha256_file(curriculum_path)
-    _atomic_write(
-        root / "manifest.json", json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    )
-    contract_builder = globals().get("FixedGeneralizationBenchmark")
-    if contract_builder is not None:
-        contract_builder.materialize_contract(base)
-    return root
-
-
-def materialize_selected_folder_layout(base):
-    root = Path(base).expanduser().resolve()
-    source = Path(__file__).read_text(encoding="utf-8")
-    modules = project_module_templates(source)
-    payload = {
-        relative: content
-        for relative, content in modules.items()
-        if relative.startswith("src/")
-    }
-    package_names = (
-        "core",
-        "hardware",
-        "capture",
-        "input",
-        "perception",
-        "policy",
-        "training",
-        "storage",
-        "ui",
-    )
-    for package_name in package_names:
-        payload["project/" + package_name + "/__init__.py"] = (
-            "MODULE_NAME=" + repr(package_name) + "\n"
-            "MODULE_SCHEMA_VERSION=1\n"
-            "def contract():\n"
-            "    return {'module':MODULE_NAME,'schema_version':MODULE_SCHEMA_VERSION}\n"
-        )
-    payload["project/training/demonstration_curriculum.json"] = json.dumps(
-        DEMONSTRATION_CURRICULUM,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    payload["runtime/runtime_manifest.json"] = json.dumps(
-        {
-            "layout_version": RUNTIME_LAYOUT_VERSION,
-            "runtime_install_state": "pending_or_managed",
-            "entrypoint": "../main.py",
-            "integrity": "manifests/source_manifest.json",
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    payload["runtime.current/.layout.json"] = json.dumps(
-        {
-            "layout_version": RUNTIME_LAYOUT_VERSION,
-            "state": "pending_integrity_install",
-            "managed_atomically": True,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    payload["models/.layout.json"] = json.dumps(
-        {
-            "layout_version": RUNTIME_LAYOUT_VERSION,
-            "purpose": "signed_model_artifacts",
-            "checksum_required": True,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    payload["audit/.layout.json"] = json.dumps(
-        {
-            "layout_version": RUNTIME_LAYOUT_VERSION,
-            "purpose": "append_only_runtime_audit",
-            "recovery_events": True,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    entries = []
-    for relative, content in sorted(payload.items()):
-        target = root / relative
-        encoded = content.encode("utf-8")
-        durable_atomic_write(target, encoded, root)
-        actual = target.read_bytes()
-        expected_hash = hashlib.sha256(encoded).hexdigest()
-        if actual != encoded or hashlib.sha256(actual).hexdigest() != expected_hash:
-            raise RuntimeError("自解包文件SHA-256校验失败：" + relative)
-        entries.append({"path": relative, "size": len(encoded), "sha256": expected_hash})
-    manifest = {
-        "format": 1,
-        "layout": ["project", "runtime.current", "models", "audit", "runtime", "src", "tests", "manifests"],
-        "entrypoint": "main.py",
-        "entrypoint_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
-        "files": entries,
-        "file_count": len(entries),
-        "generated": time.time(),
-    }
-    manifest_bytes = json.dumps(
-        manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    durable_atomic_write(root / "manifests/source_manifest.json", manifest_bytes, root)
-    verify_selected_folder_layout(root)
-    return manifest
-
-
-def verify_selected_folder_layout(base):
-    root = Path(base).expanduser().resolve()
-    path = root / "manifests/source_manifest.json"
-    if not path.is_file():
-        raise RuntimeError("自解包目录缺少源文件清单")
-    manifest = json.loads(path.read_text(encoding="utf-8"))
-    entrypoint = root / str(manifest.get("entrypoint", "main.py"))
-    expected_main = str(manifest.get("entrypoint_sha256", ""))
-    if not entrypoint.is_file() or len(expected_main) != 64 or sha256_file(entrypoint) != expected_main:
-        raise RuntimeError("自解包main.py校验失败")
-    for item in manifest.get("files", []):
-        relative = str(item.get("path", ""))
-        target = root / relative
-        try:
-            target.relative_to(root)
-        except ValueError as error:
-            raise RuntimeError("自解包清单路径越界：" + relative) from error
-        if (
-            not target.is_file()
-            or target.stat().st_size != safe_int(item.get("size"), -1)
-            or sha256_file(target) != str(item.get("sha256", ""))
-        ):
-            raise RuntimeError("自解包文件SHA-256校验失败：" + relative)
-    return manifest
-
 
 def configure_data_directory(path, context=None):
     app_context = context if isinstance(context, ApplicationContext) else APP_CONTEXT
@@ -34860,7 +33338,6 @@ def configure_data_directory(path, context=None):
     os.environ["TMP"] = str(base / "temp")
     os.environ["TEMP"] = str(base / "temp")
     tempfile.tempdir = str(base / "temp")
-    materialize_worker_entrypoints(base)
     app_context.selected_directory = base
     return base
 
@@ -34890,11 +33367,15 @@ def migration_model_hashes(base):
     return result
 
 
-def database_inventory(db_path, base):
+def database_inventory(db_path, base, read_only=False):
     path = Path(db_path)
     if not path.exists():
         raise RuntimeError("迁移数据库不存在")
-    connection = sqlite3.connect(str(path), timeout=5.0)
+    if read_only:
+        uri = "file:" + urllib.parse.quote(path.resolve().as_posix(), safe="/:") + "?mode=ro&immutable=1"
+        connection = sqlite3.connect(uri, uri=True, timeout=5.0)
+    else:
+        connection = sqlite3.connect(str(path), timeout=5.0)
     connection.row_factory = sqlite3.Row
     try:
         quick = connection.execute("PRAGMA quick_check").fetchone()
@@ -35211,8 +33692,8 @@ def managed_startup_generation(base):
         if connection is not None:
             try:
                 connection.close()
-            except RECOVERABLE_ERRORS:
-                pass
+            except sqlite3.Error as error:
+                record_cleanup_error("STARTUP_GENERATION_DB_CLOSE_FAILED", error)
 
 
 def quarantine_owned_paths(base, paths, category, release_generation=None):
@@ -35257,8 +33738,8 @@ def quarantine_owned_paths(base, paths, category, release_generation=None):
     if not records:
         try:
             transaction.rmdir()
-        except RECOVERABLE_ERRORS:
-            pass
+        except OSError as error:
+            record_cleanup_error("EMPTY_QUARANTINE_REMOVE_FAILED", error)
         return {"category": str(category), "items": [], "transaction": ""}
     manifest = {
         "schema_version": 1,
@@ -35287,8 +33768,13 @@ def quarantine_owned_paths(base, paths, category, release_generation=None):
 def recover_runtime_layout(base):
     root = Path(base).resolve()
     current = root / "runtime.current"
+    rollback_root = root / "backups" / "runtime"
     rollbacks = sorted(
-        (item for item in root.glob("runtime.rollback.*") if item.is_dir()),
+        (
+            item
+            for item in rollback_root.glob("runtime.rollback.*")
+            if item.is_dir() and not item.name.startswith("runtime.rollback.retained.")
+        ),
         key=lambda item: item.stat().st_mtime,
         reverse=True,
     )
@@ -35384,8 +33870,6 @@ def existing_data_directory_status(path):
         "quarantine",
         "cache",
         "temp",
-        "logs",
-        "project",
         "audit",
         ".ugai_migration_manifest.json",
     }
@@ -35394,9 +33878,6 @@ def existing_data_directory_status(path):
         name = item.name
         if (
             name in allowed
-            or name.startswith("runtime.rollback.")
-            or name.startswith("runtime.invalid.")
-            or name.startswith("runtime.incompatible.")
             or name.startswith("recovery_")
             or name.startswith(".ugai_")
         ):
@@ -35405,7 +33886,7 @@ def existing_data_directory_status(path):
     if unknown:
         return False, "发现不属于通用游戏AI的数据：" + "、".join(sorted(unknown)[:8])
     try:
-        inventory = database_inventory(root / "universal_game_ai.db", root)
+        inventory = database_inventory(root / "universal_game_ai.db", root, True)
         if inventory.get("schema_version", 0) > DATABASE_SCHEMA_VERSION:
             return False, "数据库版本高于当前程序"
     except RECOVERABLE_ERRORS as error:
@@ -35461,7 +33942,43 @@ def materialized_entry_manifest(base):
     return value
 
 
-def prepare_data_directory(path, stop_event=None, progress=None, source_store=None, source_base=None):
+def validate_data_directory_selection(path, source_store=None, source_base=None):
+    destination = Path(path).expanduser().resolve()
+    if "\x00" in str(destination):
+        raise RuntimeError("目录路径无效")
+    if source_store is None and same_directory(destination, Path(__file__).resolve().parent):
+        raise RuntimeError("首次运行不能把main.py所在文件夹作为目标目录")
+    existing_parent = destination
+    while not existing_parent.exists() and existing_parent != existing_parent.parent:
+        existing_parent = existing_parent.parent
+    if not existing_parent.exists() or not existing_parent.is_dir():
+        raise RuntimeError("目录的上级路径不存在")
+    reject_reparse_points(existing_parent)
+    source_path = Path(source_base).expanduser().resolve() if source_base is not None else None
+    if destination.exists():
+        if not destination.is_dir():
+            raise RuntimeError("所选路径不是文件夹")
+        reject_reparse_points(destination)
+        if not same_directory(destination, source_path):
+            existing = [item for item in destination.iterdir() if item.name != ".ugai.lock"]
+            if existing:
+                valid_existing, reason = existing_data_directory_status(destination)
+                if source_store is not None or not valid_existing:
+                    raise RuntimeError("目标目录不是空目录或合法既有数据目录：" + str(reason))
+        probe_root = destination
+    else:
+        probe_root = existing_parent
+    required = required_migration_space(source_path)
+    free = int(shutil.disk_usage(probe_root).free)
+    if free < required:
+        raise RuntimeError("可用空间不足，需要约" + str(round(required / 1024 / 1024 / 1024, 2)) + "GB")
+    _filesystem_capability_check(probe_root)
+    return {"path": str(destination), "free": free, "required": required}
+
+
+def prepare_data_directory(
+    path, stop_event=None, progress=None, source_store=None, source_base=None, destination_existed=None
+):
     destination = Path(path).expanduser().resolve()
     source_path = Path(source_base).expanduser().resolve() if source_base is not None else None
     if stop_event is not None and stop_event.is_set():
@@ -35488,7 +34005,7 @@ def prepare_data_directory(path, stop_event=None, progress=None, source_store=No
             True,
             False,
         )
-    created = not destination.exists()
+    created = (not destination.exists()) if destination_existed is None else not bool(destination_existed)
     destination.mkdir(parents=True, exist_ok=True)
     for stale in (
         list(destination.glob(".ugai_migration_*"))
@@ -35552,6 +34069,7 @@ def prepare_data_directory(path, stop_event=None, progress=None, source_store=No
         else:
             source_inventory = None
         for name in (
+            "runtime.current",
             "models",
             "models/vision",
             "models/ocr",
@@ -35563,16 +34081,12 @@ def prepare_data_directory(path, stop_event=None, progress=None, source_store=No
             "cache/numba",
             "cache/matplotlib",
             "temp",
-            "logs",
             "backups",
             "quarantine",
             "audit",
         ):
             (staging / name).mkdir(parents=True, exist_ok=True)
         main_hash = materialize_entry_script(staging)
-        materialize_selected_folder_layout(staging)
-        if DEVELOPER_MODE:
-            materialize_project_layout(staging)
         if progress is not None:
             progress(70.0)
         candidate = DataStore(staging)
@@ -35883,54 +34397,6 @@ def _runtime_worker_command(command, env, label):
     if code != 0:
         raise RuntimeError(label + "失败，退出码" + str(code))
 
-
-def _runtime_resolution_lock(python, pins, env, indexes, report_path):
-    if not DEVELOPER_MODE:
-        raise RuntimeError("动态依赖解析仅允许开发模式，正式下载必须读取内嵌完整wheel锁")
-    command = [
-        str(python),
-        "-m",
-        "pip",
-        "install",
-        "--dry-run",
-        "--ignore-installed",
-        "--only-binary=:all:",
-        "--no-cache-dir",
-        "--report",
-        str(report_path),
-        "--index-url",
-        str(indexes[0]),
-    ]
-    for index_url in indexes[1:]:
-        command.extend(["--extra-index-url", str(index_url)])
-    command.extend(str(pin) for pin in pins)
-    _runtime_worker_command(command, env, "开发期生成运行库解析锁")
-    report = json.loads(Path(report_path).read_text(encoding="utf-8"))
-    entries = []
-    for item in report.get("install", []):
-        metadata = item.get("metadata", {})
-        download = item.get("download_info", {})
-        archive = download.get("archive_info", {})
-        hashes = archive.get("hashes", {})
-        url = str(download.get("url", ""))
-        sha = str(hashes.get("sha256", archive.get("hash", ""))).replace("sha256=", "")
-        filename = Path(urllib.parse.urlsplit(url).path).name
-        if not str(metadata.get("name", "")) or not str(metadata.get("version", "")) or not filename or len(sha) != 64:
-            raise RuntimeError("开发期解析报告缺少固定wheel字段")
-        entries.append(
-            {
-                "name": str(metadata["name"]),
-                "version": str(metadata["version"]),
-                "filename": filename,
-                "url": url,
-                "sha256": sha,
-                "size": 0,
-                "python_abi": "cp312",
-                "architecture": native_windows_architecture(),
-                "backend": "development",
-            }
-        )
-    return sorted(entries, key=lambda value: (value["name"].casefold(), value["filename"]))
 
 
 def _runtime_download_locked_wheels(entries, wheelhouse, env, cache_root):
@@ -36543,7 +35009,8 @@ def _runtime_install_backend_candidate(base, family, architecture, cache_root):
     entries = runtime_backend_lock_entries(architecture, family)
     if entries is None:
         raise RuntimeError("候选后端缺少完整wheel锁：" + str(family))
-    root = Path(base) / ("runtime.candidate." + uuid.uuid4().hex)
+    root = Path(base) / "temp" / ("runtime.candidate." + uuid.uuid4().hex)
+    root.parent.mkdir(parents=True, exist_ok=True)
     root.mkdir(parents=True, exist_ok=False)
     try:
         python_path, bootstrap_artifacts = _bootstrap_embedded_python(root, architecture, cache_root)
@@ -36743,7 +35210,8 @@ def runtime_install_worker(request_path):
             (item for item in candidate_records if item.get("stable")),
             key=lambda item: safe_float(item.get("score_ms"), float("inf")),
         )
-        retained_staging = base / ("runtime.retained." + uuid.uuid4().hex)
+        retained_staging = base / "temp" / ("runtime.retained." + uuid.uuid4().hex)
+        retained_staging.parent.mkdir(parents=True, exist_ok=True)
         retained_staging.mkdir(parents=True, exist_ok=False)
         retained_families = []
         for item in candidate_records:
@@ -36880,7 +35348,9 @@ def runtime_install_worker(request_path):
         )
         _runtime_emit("progress", value=94.0, message="原子切换运行库")
         current = base / "runtime.current"
-        backup = base / ("runtime.rollback." + uuid.uuid4().hex)
+        rollback_root = base / "backups" / "runtime"
+        rollback_root.mkdir(parents=True, exist_ok=True)
+        backup = rollback_root / ("runtime.rollback." + uuid.uuid4().hex)
         moved = False
         try:
             if current.exists():
@@ -36895,8 +35365,8 @@ def runtime_install_worker(request_path):
             raise
         if backup.exists():
             quarantine_owned_paths(base, [backup], "runtime_replaced_rollback")
-        retained_root = base / "runtime"
-        retained_backup = base / ("runtime.retained.rollback." + uuid.uuid4().hex)
+        retained_root = current / "retained"
+        retained_backup = rollback_root / ("runtime.rollback.retained." + uuid.uuid4().hex)
         retained_moved = False
         try:
             if retained_root.exists():
@@ -36920,7 +35390,6 @@ def runtime_install_worker(request_path):
             quarantine_owned_paths(base, [staging], "runtime_failed_staging")
         _runtime_emit("error", message=str(error), traceback=traceback.format_exc()[-6000:])
         return 1
-
 
 
 
@@ -37023,27 +35492,18 @@ class ManagedIntegrityManager:
         }
 
     def _worker_status(self):
-        root = materialize_worker_entrypoints(self.base)
-        manifest_path = root / "manifest.json"
-        value = json.loads(manifest_path.read_text(encoding="utf-8"))
-        records = value.get("workers", {}) if isinstance(value, dict) else {}
-        actual = {}
-        for name in sorted(_WORKER_FILENAMES):
-            path = root / name
-            if not path.is_file():
-                raise RuntimeError("工作进程入口恢复失败：" + name)
-            digest = sha256_file(path)
-            if digest != str(records.get(name, {}).get("sha256", "")):
-                raise RuntimeError("工作进程入口校验失败：" + name)
-            actual[name] = {"path": path.relative_to(self.base).as_posix(), "sha256": digest}
-        extras = []
-        for path in root.iterdir():
-            if path.name in set(_WORKER_FILENAMES) | {"__init__.py", "manifest.json"}:
-                continue
-            if path.name.endswith((".tmp", ".bak", ".old", ".partial")) or path.name.startswith("worker.staging."):
-                extras.append(path)
-        quarantine = quarantine_owned_paths(self.base, extras, "worker_forbidden_or_orphaned")
-        return {"schema_version": WORKER_ENTRY_SCHEMA_VERSION, "entries": actual, "quarantined": quarantine.get("items", [])}
+        target = self.base / "main.py"
+        if not target.is_file():
+            materialize_entry_script(self.base)
+        expected = sha256_file(Path(__file__).resolve())
+        actual = sha256_file(target)
+        if actual != expected:
+            materialize_entry_script(self.base)
+            actual = sha256_file(target)
+        if actual != expected:
+            raise RuntimeError("main.py完整性恢复失败")
+        return {"entrypoint": {"path": "main.py", "sha256": actual}}
+
 
     def _runtime_status(self, require_ready=False):
         try:
@@ -37171,8 +35631,8 @@ class ManagedIntegrityManager:
                     if self.store.restore_model_backup(game_id):
                         recovered_games.add(game_id)
                         repaired.append("models:" + game_id + ":complete")
-                except RECOVERABLE_ERRORS:
-                    pass
+                except RECOVERABLE_ERRORS as error:
+                    self.store.logger.write("MODEL_BACKUP_RESTORE_FAILED", error, game_id=game_id)
             unresolved = [(game_id, slot) for game_id, slot in invalid_rows if not (slot == "complete" and game_id in recovered_games)]
             if unresolved:
                 with self.store.critical_transaction():
@@ -37254,14 +35714,11 @@ class ManagedIntegrityManager:
 
     def _runtime_orphans(self):
         candidates = []
-        for pattern in (
-            "runtime.staging.*",
-            "runtime.rollback.*",
-            "runtime.invalid.*",
-            "runtime.incompatible.*",
-            "runtime.retained.rollback.*",
-        ):
-            candidates.extend(path for path in self.base.glob(pattern) if path.exists())
+        temp_root = self.base / "temp"
+        rollback_root = self.base / "backups" / "runtime"
+        for pattern in ("runtime.staging.*", "runtime.candidate.*", "runtime.retained.*"):
+            candidates.extend(path for path in temp_root.glob(pattern) if path.exists())
+        candidates.extend(path for path in rollback_root.glob("runtime.rollback.*") if path.exists())
         return quarantine_owned_paths(self.base, candidates, "forbidden_or_orphaned_runtime")
 
     def _stale_cache_orphans(self):
@@ -37331,8 +35788,6 @@ class ManagedIntegrityManager:
         if path in references:
             return True
         text = path.as_posix()
-        if text.startswith("project/uga/workers/"):
-            return path.name in set(_WORKER_FILENAMES) | {"__init__.py", "manifest.json"}
         if text == "runtime.current":
             return False
         return False
@@ -37560,7 +36015,7 @@ class RuntimeInstaller:
     def _cleanup_staging(self):
         quarantine_owned_paths(
             self.base,
-            [item for item in self.base.glob("runtime.staging.*") if item.exists()],
+            [item for item in (self.base / "temp").glob("runtime.staging.*") if item.exists()],
             "runtime_interrupted_staging",
         )
         recover_runtime_layout(self.base)
@@ -37586,7 +36041,7 @@ class RuntimeInstaller:
         )
         ensure_free_space(self.base, required_runtime_space(self.base, locked_bytes), "运行库下载与安装")
         self._cleanup_staging()
-        staging = self.base / ("runtime.staging." + uuid.uuid4().hex)
+        staging = self.base / "temp" / ("runtime.staging." + uuid.uuid4().hex)
         self.staging = staging
         request_path = self.base / "temp" / ("runtime_request_" + uuid.uuid4().hex + ".json")
         request_path.parent.mkdir(parents=True, exist_ok=True)
@@ -37609,8 +36064,7 @@ class RuntimeInstaller:
         creationflags = (0x08000000 | 0x00000200) if os.name == "nt" else 0
         env = os.environ.copy()
         env["PYTHONNOUSERSITE"] = "1"
-        runtime_worker = worker_entry_path(self.base, "runtime_install_worker.py")
-        command = [sys.executable, str(runtime_worker), "install", str(request_path)]
+        command = [sys.executable, str(self.base / "main.py"), "runtime-install-worker", str(request_path)]
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -38000,8 +36454,8 @@ class GameSpecificVisionTrainer:
         finally:
             try:
                 data.optimizer.zero_grad(set_to_none=True)
-            except RECOVERABLE_ERRORS:
-                pass
+            except (RuntimeError, AttributeError) as error:
+                record_cleanup_error("TRAINING_OPTIMIZER_RELEASE_FAILED", error)
             data.optimizer = None
             data.scaler = None
             self._release_torch_cache(data.torch)
@@ -38079,8 +36533,8 @@ class GameSpecificVisionTrainer:
             if bool(torch.cuda.is_available()):
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
-        except RECOVERABLE_ERRORS:
-            pass
+        except (RuntimeError, AttributeError) as error:
+            record_cleanup_error("TORCH_CACHE_RELEASE_FAILED", error)
 
     @staticmethod
     def _autoencoder_type(torch):
@@ -39952,7 +38406,7 @@ class AIWorkerClient:
             if self.worker_filename == "training_worker.py"
             else "ai_worker_startup.log"
         )
-        self.startup_log_path = make_data_directory(self.base, "logs") / log_name
+        self.startup_log_path = make_data_directory(self.base, Path("audit") / "worker_logs") / log_name
         self.startup_log_handle = self.startup_log_path.open("ab", buffering=0)
         self.startup_log_handle.write(
             (
@@ -40002,9 +38456,11 @@ class AIWorkerClient:
             if isinstance(actual_address, str)
             else json.dumps(list(actual_address), separators=(",", ":"))
         )
+        env["UGAI_WORKER_ROLE"] = "training" if self.worker_filename == "training_worker.py" else "ai"
         command = [
             str(python),
-            str(worker_entry_path(self.base, self.worker_filename)),
+            str(self.base / "main.py"),
+            "ai-worker",
             str(self.base),
             str(address_text),
             base64.urlsafe_b64encode(self.auth).decode("ascii"),
@@ -41341,26 +39797,6 @@ def _tk_top_level_hwnd(widget):
         return int(widget.winfo_id())
 
 
-def _acceptance_geometry_complete(report):
-    item = report.data.get("items", {}).get("多显示器与DPI", {}).get("cases", {})
-    return all(item.get(case, {}).get("status") == "passed" for case in STRICT_ACCEPTANCE_CASES["多显示器与DPI"])
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def show_acknowledge_only_startup(message):
     try:
@@ -41439,16 +39875,10 @@ class TrainingNamespace:
 
 
 
-
 class GuiNamespace:
     App = App
     load_gui_runtime = staticmethod(load_gui_runtime)
     scrollable_frame = staticmethod(scrollable_frame)
-
-
-
-
-
 
 
 
@@ -41479,7 +39909,6 @@ def _legacy_cli_arguments(argv):
 
 def build_cli_parser():
     parser = StrictArgumentParser(prog="main.py", add_help=True)
-    parser.add_argument("--developer-mode", action="store_true", help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("gui")
     ai = commands.add_parser("ai-worker")
@@ -42855,7 +41284,6 @@ def shared_multiscale_feature_maps(frame):
 
 
 def normalized_visual_embedding(shared_maps=None, objects=None, size=VISUAL_EMBEDDING_SIZE):
-    """Project real multiscale numeric visual evidence into a stable normalized vector."""
     maps = shared_maps if isinstance(shared_maps, dict) else {}
     object_values = objects if isinstance(objects, (list, tuple)) else []
     output_size = max(16, min(256, safe_int(size, VISUAL_EMBEDDING_SIZE, 16, 256)))
@@ -47465,7 +45893,7 @@ def build_anonymized_replay_bundles(experiences, model_version=""):
 
 
 def persist_replay_bundles(base, game_id, bundles):
-    root = Path(base) / "replays" / hashlib.sha256(str(game_id).encode("utf-8", "replace")).hexdigest()[:24]
+    root = Path(base) / "models" / "replays" / hashlib.sha256(str(game_id).encode("utf-8", "replace")).hexdigest()[:24]
     root.mkdir(parents=True, exist_ok=True)
     paths = []
     for bundle in bundles or []:
@@ -48764,7 +47192,7 @@ _ONLINE_ACCEPTANCE_LOCK = threading.RLock()
 
 def online_acceptance_relative_path(game_id):
     token = normalized_identifier(game_id, "game", 96)
-    return Path("manifests") / "online_acceptance" / (token + ".json")
+    return Path("audit") / "online_acceptance" / (token + ".json")
 
 
 def _online_acceptance_empty(game_id):
@@ -49394,13 +47822,6 @@ def validate_source_contracts_once(path=None):
 
 
 
-
-
-
-
-
-
-
 DEFAULT_OBSERVATION_ENCODER = ObjectCentricObservationEncoder()
 DEFAULT_TASK_PLANNER = HierarchicalTaskPlanner()
 DEFAULT_SKILL_POLICY = ReusableSkillPolicy()
@@ -49851,259 +48272,6 @@ class DXGIVideoMemoryTelemetry:
 DXGI_VIDEO_MEMORY_TELEMETRY = DXGIVideoMemoryTelemetry()
 
 
-class StrictWindowsGpuTelemetry:
-    def __init__(self):
-        self.lock = threading.RLock()
-        self.cache = {}
-
-    def _performance_counters(self, pid):
-        if os.name != "nt":
-            return {}
-        command = (
-            r"$p=@('\\GPU Engine(*)\\Utilization Percentage',"
-            r"'\\GPU Adapter Memory(*)\\Dedicated Usage',"
-            r"'\\GPU Adapter Memory(*)\\Shared Usage',"
-            r"'\\GPU Process Memory(*)\\Dedicated Usage','\\GPU Process Memory(*)\\Shared Usage');"
-            "$s=(Get-Counter -Counter $p -MaxSamples 1 -ErrorAction Stop).CounterSamples;"
-            "$s|Select-Object Path,CookedValue|ConvertTo-Json -Compress"
-        )
-        try:
-            output = subprocess.check_output(
-                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=6,
-                creationflags=0x08000000,
-                stderr=subprocess.DEVNULL,
-            ).strip()
-            rows = json.loads(output) if output else []
-            if isinstance(rows, dict):
-                rows = [rows]
-            utilization = []
-            dedicated = []
-            shared = []
-            process_dedicated = []
-            process_shared = []
-            pid_token = "pid_" + str(int(pid)) + "_"
-            for row in rows if isinstance(rows, list) else []:
-                path = str(row.get("Path", "")).casefold()
-                value = max(0.0, safe_float(row.get("CookedValue"), 0.0))
-                if "utilization percentage" in path:
-                    utilization.append(value)
-                elif "gpu process memory" in path and "dedicated usage" in path and pid_token in path:
-                    process_dedicated.append(value)
-                elif "gpu process memory" in path and "shared usage" in path and pid_token in path:
-                    process_shared.append(value)
-                elif "gpu adapter memory" in path and "dedicated usage" in path:
-                    dedicated.append(value)
-                elif "gpu adapter memory" in path and "shared usage" in path:
-                    shared.append(value)
-            return {
-                "gpu_utilization": min(100.0, sum(utilization)),
-                "dedicated_vram_used": int(max(dedicated) if dedicated else 0),
-                "shared_vram_used": int(max(shared) if shared else 0),
-                "process_dedicated_vram": int(sum(process_dedicated)),
-                "process_shared_vram": int(sum(process_shared)),
-                "performance_counter_source": True,
-            }
-        except (OSError, ValueError, TypeError, subprocess.SubprocessError, json.JSONDecodeError):
-            return {}
-
-    def _nvml(self, pid):
-        handled = RECOVERABLE_ERRORS
-        try:
-            import pynvml
-            handled = handled + (getattr(pynvml, "NVMLError", RuntimeError),)
-            pynvml.nvmlInit()
-            best = None
-            for index in range(pynvml.nvmlDeviceGetCount()):
-                handle = pynvml.nvmlDeviceGetHandleByIndex(index)
-                memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                process_bytes = 0
-                process_getters = (
-                    "nvmlDeviceGetComputeRunningProcesses_v3",
-                    "nvmlDeviceGetComputeRunningProcesses_v2",
-                    "nvmlDeviceGetComputeRunningProcesses",
-                    "nvmlDeviceGetGraphicsRunningProcesses_v3",
-                    "nvmlDeviceGetGraphicsRunningProcesses_v2",
-                    "nvmlDeviceGetGraphicsRunningProcesses",
-                )
-                for name in process_getters:
-                    getter = getattr(pynvml, name, None)
-                    if getter is None:
-                        continue
-                    try:
-                        for process in getter(handle):
-                            if safe_int(getattr(process, "pid", 0), 0) == int(pid):
-                                used = getattr(process, "usedGpuMemory", 0)
-                                if isinstance(used, int) and used > 0:
-                                    process_bytes += used
-                    except handled:
-                        pass
-                row = {
-                    "gpu_utilization": float(utilization.gpu),
-                    "total_vram": int(memory.total),
-                    "free_vram": int(memory.free),
-                    "dedicated_vram_used": int(memory.used),
-                    "process_dedicated_vram": int(process_bytes),
-                    "source": "nvml",
-                }
-                if best is None or row["process_dedicated_vram"] > best["process_dedicated_vram"]:
-                    best = row
-            return best or {}
-        except handled:
-            return {}
-        finally:
-            try:
-                pynvml.nvmlShutdown()
-            except handled:
-                pass
-
-    def _nvidia_smi(self, pid):
-        try:
-            output = subprocess.check_output(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=utilization.gpu,memory.total,memory.free,memory.used",
-                    "--format=csv,noheader,nounits",
-                ],
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=4,
-                creationflags=0x08000000 if os.name == "nt" else 0,
-                stderr=subprocess.DEVNULL,
-            ).strip()
-            values = [item.strip() for item in output.splitlines()[0].split(",")]
-            process_bytes = 0
-            try:
-                process_output = subprocess.check_output(
-                    ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=4,
-                    creationflags=0x08000000 if os.name == "nt" else 0,
-                    stderr=subprocess.DEVNULL,
-                )
-                for line in process_output.splitlines():
-                    parts = [item.strip() for item in line.split(",")]
-                    if len(parts) >= 2 and safe_int(parts[0], -1) == int(pid):
-                        process_bytes += int(float(parts[1]) * 1024 * 1024)
-            except RECOVERABLE_ERRORS:
-                pass
-            return {
-                "gpu_utilization": max(0.0, min(100.0, float(values[0]))),
-                "total_vram": int(float(values[1]) * 1024 * 1024),
-                "free_vram": int(float(values[2]) * 1024 * 1024),
-                "dedicated_vram_used": int(float(values[3]) * 1024 * 1024),
-                "process_dedicated_vram": process_bytes,
-                "source": "nvidia_smi_fallback",
-            }
-        except RECOVERABLE_ERRORS:
-            return {}
-
-    def sample(self, backend, process_pid=None, cache_seconds=2.0):
-        if os.name != "nt":
-            return {}
-        pid = safe_int(process_pid, os.getpid(), 1)
-        key = (str(backend), pid)
-        now = time.monotonic()
-        with self.lock:
-            cached = self.cache.get(key)
-            if cached is not None and now - cached[0] <= max(0.25, float(cache_seconds)):
-                return dict(cached[1])
-        family = str(backend or "").casefold()
-        counters = self._performance_counters(pid)
-        if "nvidia" in family:
-            result = self._nvml(pid) or self._nvidia_smi(pid)
-            dxgi = DXGI_VIDEO_MEMORY_TELEMETRY.sample(backend)
-            for key_name, value in dxgi.items():
-                result.setdefault(key_name, value)
-        elif "directml" in family:
-            result = DXGI_VIDEO_MEMORY_TELEMETRY.sample(backend)
-        else:
-            result = {}
-        for key_name, value in counters.items():
-            process_keys = {
-                "process_dedicated_vram",
-                "process_shared_vram",
-            }
-            if (
-                key_name in process_keys
-                or key_name not in result
-                or result.get(key_name) in {None, 0}
-            ):
-                result[key_name] = value
-        result.setdefault("source", "windows_performance_counters")
-        with self.lock:
-            self.cache[key] = (now, dict(result))
-        return result
-
-
-WINDOWS_GPU_TELEMETRY = StrictWindowsGpuTelemetry()
-
-
-@dataclass(frozen=True, slots=True)
-class StrictHardwareSnapshot:
-    cpu_percent: float
-    process_cpu_percent: float
-    available_ram: int
-    process_rss: int
-    gpu_backend: str
-    gpu_utilization: float | None
-    free_vram: int | None
-    capture_p95_ms: float
-    queue_ratio: float
-    queue_oldest_ms: float
-    disk_write_p95_ms: float
-    end_to_end_p95_ms: float = 0.0
-    end_to_end_p99_ms: float = 0.0
-    dedicated_vram_used: int | None = None
-    shared_vram_used: int | None = None
-    gpu_queue_wait_p95_ms: float = 0.0
-    cpu_to_gpu_copy_p95_ms: float = 0.0
-    device_removed_count: int = 0
-    device_reset_count: int = 0
-    gpu_oom_count: int = 0
-    device_removed_delta: int = 0
-    device_reset_delta: int = 0
-    gpu_oom_delta: int = 0
-    last_accelerator_fault_monotonic: float | None = None
-    accelerator_fault_age_seconds: float | None = None
-    accelerator_self_test_passed: bool = False
-    backend_blacklisted: bool = False
-    available_ram_known: bool = False
-    free_vram_known: bool = False
-    total_vram: int | None = None
-    tested_peak_vram: int | None = None
-    total_ram: int = 0
-    total_commit: int = 0
-    available_commit: int = 0
-    process_private_bytes: int = 0
-    commit_pressure: float = 0.0
-    pagefile_pressure: float = 0.0
-    vram_budget: int | None = None
-    vram_current_usage: int | None = None
-    vram_available_for_reservation: int | None = None
-    vram_current_reservation: int | None = None
-    shared_vram_budget: int | None = None
-    shared_vram_current_usage: int | None = None
-    process_dedicated_vram: int | None = None
-    process_shared_vram: int | None = None
-    telemetry_source: str = ""
-    probe_bytes: int | None = None
-    probe_passed: bool = False
-    effective_ram_red_bytes: int = 0
-    effective_ram_yellow_bytes: int = 0
-    effective_vram_red_bytes: int = 0
-    effective_vram_yellow_bytes: int = 0
-
-
-HardwareSnapshot = StrictHardwareSnapshot
-
 
 def _strict_memory_values():
     if os.name == "nt":
@@ -50153,8 +48321,8 @@ def _strict_memory_values():
                 "commit_pressure": 1.0 - available_commit / max(1, total_commit),
                 "pagefile_pressure": int(counters.PrivateUsage) / max(1, total_commit),
             }
-        except RECOVERABLE_ERRORS:
-            pass
+        except (OSError, ValueError) as error:
+            record_cleanup_error("WINDOWS_MEMORY_TELEMETRY_FAILED", error)
     available, rss = ResourceGovernor._memory_values()
     return {
         "available_ram": int(available), "total_ram": 0, "process_rss": int(rss),
@@ -50249,7 +48417,7 @@ def _strict_governor_sample_once(self):
                 self.benchmark_profile.get("vram_test_passed", False),
             )
         )
-    provisional = StrictHardwareSnapshot(
+    provisional = HardwareSnapshot(
         cpu_percent=round(cpu, 3), process_cpu_percent=round(process_cpu, 3),
         available_ram=int(memory["available_ram"]), process_rss=int(memory["process_rss"]),
         gpu_backend=str(backend), gpu_utilization=gpu.get("gpu_utilization"), free_vram=gpu.get("free_vram"),
@@ -50309,7 +48477,7 @@ def _strict_governor_sample_once(self):
             "effective_vram_yellow_bytes": limits["vram_yellow"],
         }
     )
-    snapshot = StrictHardwareSnapshot(**values)
+    snapshot = HardwareSnapshot(**values)
     with self.lock:
         self.history.append(snapshot)
         self._last_snapshot = snapshot
@@ -50519,7 +48687,7 @@ RESOURCE_GOVERNOR.applied_backend = ""
 RESOURCE_GOVERNOR.applied_model_tier = "Tiny"
 RESOURCE_GOVERNOR.red_since = None
 RESOURCE_GOVERNOR._strict_plan_digest = hashlib.sha256(canonical_bytes(RESOURCE_GOVERNOR.plans.to_dict())).hexdigest()
-RESOURCE_GOVERNOR._last_snapshot = StrictHardwareSnapshot(
+RESOURCE_GOVERNOR._last_snapshot = HardwareSnapshot(
     cpu_percent=0.0, process_cpu_percent=0.0, available_ram=0, process_rss=0,
     gpu_backend="windows-x64-cpu", gpu_utilization=None, free_vram=None,
     capture_p95_ms=0.0, queue_ratio=0.0, queue_oldest_ms=0.0, disk_write_p95_ms=0.0,
@@ -50665,7 +48833,6 @@ def _strict_frame_geometry_ready(self):
         if self.on_geometry:
             self.on_geometry(self.target, calibration)
         return False
-
 
 
 
@@ -50928,8 +49095,8 @@ def _strict_migrate_worker(self, envelope):
         if old_worker is not None and old_worker is not worker:
             try:
                 old_worker.quiesce()
-            except RECOVERABLE_ERRORS:
-                pass
+            except RECOVERABLE_ERRORS as error:
+                self.store.log_error("OLD_AI_WORKER_QUIESCE_FAILED", error, mode=self.mode)
             old_worker.close(2.0)
         new_snapshot = RESOURCE_GOVERNOR.sample_once()
         RUNTIME_EVENT_LOGGER.emit(
@@ -51059,8 +49226,8 @@ def _strict_update_runtime_status(self):
         if "；验收：" in text:
             text = text.split("；验收：", 1)[0]
         self.model_text.set(text + suffix)
-    except RECOVERABLE_ERRORS:
-        pass
+    except RECOVERABLE_ERRORS as error:
+        record_cleanup_error("MODEL_STATUS_REFRESH_FAILED", error)
     return result
 
 
@@ -51082,11 +49249,6 @@ def _strict_portfolio_build(cls, experiences, limit=MAX_TRAINING_SAMPLES):
         if leaks:
             manifest["split_status"] = "failed"
     return result
-
-
-
-
-
 
 
 
@@ -51164,9 +49326,8 @@ def run_gui():
 def main(argv=None):
     multiprocessing.freeze_support()
     try:
+        validate_source_contracts_once()
         arguments = parse_cli(argv)
-        if bool(getattr(arguments, "developer_mode", False)):
-            validate_source_contracts_once()
         result = dispatch_cli(arguments)
         if result is not None:
             return int(result)
