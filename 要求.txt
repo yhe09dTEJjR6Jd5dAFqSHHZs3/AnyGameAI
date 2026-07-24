@@ -39,12 +39,12 @@ main.py中不得包含任何与程序实际运行无关的内容，包括但不�
 与自身比较：
 now越大越好；
 now越小越好；
-当now-before>0时：now-before越大越好；
-当now-before>0时：now-before越小越好；
-当before-now>0时：before-now越大越好；
-当before-now>0时：before-now越小越好；
-当|now-before|≠0时：|now-before|越大越好；
-当|now-before|≠0时：|now-before|越小越好；
+当now>before时：now-before越大越好；
+当now>before时：now-before越小越好；
+当before>now时：before-now越大越好；
+当before>now时：before-now越小越好；
+当now≠before时：|now-before|越大越好；
+当now≠before时：|now-before|越小越好；
 
 与固定值比较：
 |a-b|越大越好；
