@@ -61,7 +61,7 @@ COARSE_LEN = COARSE_W * COARSE_H * FEATURE_CHANNELS
 SQUARED_DIFF = tuple((value * value for value in range(-255, 256)))
 FEATURE_ALGORITHM_VERSION = 4
 ACTION_ALGORITHM_VERSION = 6
-DATABASE_SCHEMA_VERSION = 17
+DATABASE_SCHEMA_VERSION = 18
 MODEL_SCHEMA_VERSION = 5
 POLICY_MODEL_SCHEMA_VERSION = 7
 DEFAULT_POLICY_SCORE_WEIGHTS = {'bc': 60.0, 'q': 45.0, 'success': 35.0, 'risk': 45.0, 'ood': 55.0}
@@ -13645,7 +13645,7 @@ class DataStoreLifecycleMixin:
         self.db.execute('CREATE TABLE IF NOT EXISTS games(id TEXT PRIMARY KEY,name TEXT NOT NULL COLLATE NOCASE UNIQUE,created REAL NOT NULL,needs_review INTEGER NOT NULL DEFAULT 0,last_review REAL)')
         self.db.execute("CREATE TABLE IF NOT EXISTS game_assets(game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,relative_path TEXT NOT NULL,asset_type TEXT NOT NULL,sha256 TEXT NOT NULL DEFAULT '',created REAL NOT NULL,PRIMARY KEY(game_id,relative_path))")
         self.db.execute('CREATE INDEX IF NOT EXISTS idx_game_assets_path ON game_assets(relative_path,game_id)')
-        self.db.execute("CREATE TABLE IF NOT EXISTS game_deletion_transactions(transaction_id TEXT PRIMARY KEY,state TEXT NOT NULL CHECK(state IN ('prepared','database_committed','files_purged','compacted')),game_ids TEXT NOT NULL,selected_game TEXT,root_relative TEXT NOT NULL,asset_count INTEGER NOT NULL,created REAL NOT NULL,updated REAL NOT NULL,last_error TEXT NOT NULL DEFAULT '')")
+        self.db.execute("CREATE TABLE IF NOT EXISTS game_deletion_transactions(transaction_id TEXT PRIMARY KEY,state TEXT NOT NULL CHECK(state IN ('prepared','database_committed','references_scrubbed','files_purged','compacted')),game_ids TEXT NOT NULL,selected_game TEXT,root_relative TEXT NOT NULL,asset_count INTEGER NOT NULL,created REAL NOT NULL,updated REAL NOT NULL,last_error TEXT NOT NULL DEFAULT '')")
         self.db.execute('CREATE INDEX IF NOT EXISTS idx_game_deletion_transactions_state ON game_deletion_transactions(state,updated)')
         self.db.execute("CREATE TABLE IF NOT EXISTS learning_sessions(game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,session_id TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('staging','valid','invalid')),started REAL NOT NULL,finished REAL,invalid_reason TEXT NOT NULL DEFAULT '',PRIMARY KEY(game_id,session_id))")
         self.db.execute('CREATE INDEX IF NOT EXISTS idx_learning_sessions_game_status ON learning_sessions(game_id,status,started)')
@@ -13847,9 +13847,19 @@ class DataStoreLifecycleMixin:
                         self.db.execute('ALTER TABLE corrupt_rows_v16 RENAME TO corrupt_rows')
                         version = 16
                     elif version == 16:
-                        self.db.execute("CREATE TABLE IF NOT EXISTS game_deletion_transactions(transaction_id TEXT PRIMARY KEY,state TEXT NOT NULL CHECK(state IN ('prepared','database_committed','files_purged','compacted')),game_ids TEXT NOT NULL,selected_game TEXT,root_relative TEXT NOT NULL,asset_count INTEGER NOT NULL,created REAL NOT NULL,updated REAL NOT NULL,last_error TEXT NOT NULL DEFAULT '')")
+                        self.db.execute("CREATE TABLE IF NOT EXISTS game_deletion_transactions(transaction_id TEXT PRIMARY KEY,state TEXT NOT NULL CHECK(state IN ('prepared','database_committed','references_scrubbed','files_purged','compacted')),game_ids TEXT NOT NULL,selected_game TEXT,root_relative TEXT NOT NULL,asset_count INTEGER NOT NULL,created REAL NOT NULL,updated REAL NOT NULL,last_error TEXT NOT NULL DEFAULT '')")
                         self.db.execute('CREATE INDEX IF NOT EXISTS idx_game_deletion_transactions_state ON game_deletion_transactions(state,updated)')
                         version = 17
+                    elif version == 17:
+                        self.db.execute('DROP INDEX IF EXISTS idx_game_deletion_transactions_state')
+                        self.db.execute('DROP TABLE IF EXISTS game_deletion_transactions_v18')
+                        self.db.execute("CREATE TABLE game_deletion_transactions_v18(transaction_id TEXT PRIMARY KEY,state TEXT NOT NULL CHECK(state IN ('prepared','database_committed','references_scrubbed','files_purged','compacted')),game_ids TEXT NOT NULL,selected_game TEXT,root_relative TEXT NOT NULL,asset_count INTEGER NOT NULL,created REAL NOT NULL,updated REAL NOT NULL,last_error TEXT NOT NULL DEFAULT '')")
+                        if self._table_exists('game_deletion_transactions'):
+                            self.db.execute('INSERT OR IGNORE INTO game_deletion_transactions_v18(transaction_id,state,game_ids,selected_game,root_relative,asset_count,created,updated,last_error) SELECT transaction_id,state,game_ids,selected_game,root_relative,asset_count,created,updated,last_error FROM game_deletion_transactions')
+                            self.db.execute('DROP TABLE game_deletion_transactions')
+                        self.db.execute('ALTER TABLE game_deletion_transactions_v18 RENAME TO game_deletion_transactions')
+                        self.db.execute('CREATE INDEX IF NOT EXISTS idx_game_deletion_transactions_state ON game_deletion_transactions(state,updated)')
+                        version = 18
                     else:
                         raise RuntimeError('没有从数据库版本' + str(version) + '开始的迁移路径')
                     self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)", (str(version),))
@@ -14297,13 +14307,222 @@ class DataStoreGameTaskMixin:
                 rows.extend(((str(row['game_id']), row['payload']) for row in iter_rows(self.db.execute('SELECT game_id,payload FROM ' + table), 64)))
         return [(game_id, self._decode_model_asset_document(payload)) for game_id, payload in rows]
 
-    def _game_deletion_descriptor(self, game_ids):
+    def _game_deletion_descriptor(self, game_ids, game_names=None):
         game_ids = {str(value) for value in game_ids if str(value)}
+        names = {str(value).strip() for value in (game_names or []) if str(value).strip()}
         tokens = {}
+        strong_tokens = set()
         for game_id in game_ids:
             digest = hashlib.sha256(game_id.encode('utf-8', 'replace')).hexdigest()
-            tokens[game_id] = {game_id.casefold(), digest.casefold(), digest[:24].casefold(), digest[:16].casefold()}
-        return {'game_ids': game_ids, 'tokens': tokens}
+            current = {game_id.casefold(), digest.casefold(), digest[:24].casefold(), digest[:16].casefold()}
+            tokens[game_id] = current
+            strong_tokens.update(current)
+        return {'game_ids': game_ids, 'tokens': tokens, 'strong_tokens': strong_tokens, 'game_names': names}
+
+    @staticmethod
+    def _game_reference_text_tokens(descriptor):
+        value = descriptor if isinstance(descriptor, dict) else {}
+        strong = sorted({str(item).casefold() for item in value.get('strong_tokens', set()) if str(item)}, key=len, reverse=True)
+        names = sorted({str(item).strip().casefold() for item in value.get('game_names', set()) if str(item).strip()}, key=len, reverse=True)
+        return strong, names
+
+    def _text_contains_game_reference(self, text, descriptor):
+        lowered = str(text).casefold()
+        strong, names = self._game_reference_text_tokens(descriptor)
+        if any(token in lowered for token in strong):
+            return True
+        for name in names:
+            if len(name) >= 2 and name in lowered:
+                return True
+            quoted = json.dumps(name, ensure_ascii=False).casefold()
+            if quoted in lowered:
+                return True
+        return False
+
+    def _value_contains_game_reference(self, value, descriptor):
+        if isinstance(value, dict):
+            return any(self._value_contains_game_reference(key, descriptor) or self._value_contains_game_reference(child, descriptor) for key, child in value.items())
+        if isinstance(value, (list, tuple, set)):
+            return any(self._value_contains_game_reference(child, descriptor) for child in value)
+        if isinstance(value, (str, int, float)):
+            return self._text_contains_game_reference(value, descriptor)
+        return False
+
+    def _scrub_json_value(self, value, descriptor):
+        removed = object()
+        strong, names = self._game_reference_text_tokens(descriptor)
+
+        def scrub(item):
+            if isinstance(item, dict):
+                identity_values = []
+                for key in ('game_id', 'gameId', 'game', 'game_name', 'gameName'):
+                    if key in item:
+                        identity_values.append(item.get(key))
+                if any(self._text_contains_game_reference(candidate, descriptor) for candidate in identity_values):
+                    return removed
+                result = {}
+                for key, child in item.items():
+                    cleaned = scrub(child)
+                    if cleaned is not removed:
+                        result[key] = cleaned
+                return result
+            if isinstance(item, list):
+                result = []
+                for child in item:
+                    cleaned = scrub(child)
+                    if cleaned is not removed:
+                        result.append(cleaned)
+                return result
+            if isinstance(item, tuple):
+                return scrub(list(item))
+            if isinstance(item, str):
+                cleaned = item
+                for token in strong:
+                    cleaned = re.sub(re.escape(token), '', cleaned, flags=re.IGNORECASE)
+                for name in names:
+                    cleaned = re.sub(re.escape(name), '', cleaned, flags=re.IGNORECASE)
+                return cleaned
+            return item
+        return scrub(value), removed
+
+    def _managed_text_files(self):
+        suffixes = {'.json', '.jsonl', '.log', '.txt', '.csv'}
+        roots = [self.base / name for name in ('audit', 'backups', 'cache', 'models', 'games', 'quarantine')]
+        candidates = []
+        for root in roots:
+            if not root.exists():
+                continue
+            for candidate in root.rglob('*'):
+                if not candidate.is_file() or candidate.suffix.casefold() not in suffixes:
+                    continue
+                try:
+                    relative = candidate.relative_to(self.base).as_posix().casefold()
+                except ValueError:
+                    continue
+                if relative.startswith('quarantine/game_trash/') or relative.startswith('audit/game_deletion_reports/'):
+                    continue
+                candidates.append(candidate)
+        for candidate in self.base.iterdir():
+            if candidate.is_file() and candidate.suffix.casefold() in suffixes:
+                candidates.append(candidate)
+        return sorted(set(candidates), key=lambda item: str(item).casefold())
+
+    def _scrub_shared_game_references(self, descriptor):
+        report = {'files_scanned': 0, 'files_rewritten': 0, 'records_removed': 0, 'strings_scrubbed': 0}
+        for path in self._managed_text_files():
+            report['files_scanned'] += 1
+            try:
+                raw = path.read_text(encoding='utf-8')
+            except (OSError, UnicodeError):
+                continue
+            if not self._text_contains_game_reference(raw, descriptor):
+                continue
+            suffix = path.suffix.casefold()
+            changed = False
+            records_removed = 0
+            strings_scrubbed = 0
+            if suffix == '.jsonl':
+                kept = []
+                for line in raw.splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        payload = None
+                    if (payload is not None and self._value_contains_game_reference(payload, descriptor)) or (payload is None and self._text_contains_game_reference(line, descriptor)):
+                        records_removed += 1
+                        changed = True
+                        continue
+                    kept.append(line)
+                cleaned_text = ''.join((line + '\n' for line in kept))
+            elif suffix == '.json':
+                try:
+                    payload = json.loads(raw)
+                    cleaned, removed = self._scrub_json_value(payload, descriptor)
+                    if cleaned is removed:
+                        cleaned = {}
+                        records_removed = 1
+                    cleaned_text = json.dumps(cleaned, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+                    changed = cleaned_text != raw
+                    if changed and not records_removed:
+                        strings_scrubbed = 1
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    lines = raw.splitlines()
+                    kept = [line for line in lines if not self._text_contains_game_reference(line, descriptor)]
+                    records_removed = max(0, len(lines) - len(kept))
+                    cleaned_text = ''.join((line + '\n' for line in kept))
+                    changed = cleaned_text != raw
+            else:
+                lines = raw.splitlines()
+                kept = [line for line in lines if not self._text_contains_game_reference(line, descriptor)]
+                records_removed = max(0, len(lines) - len(kept))
+                cleaned_text = ''.join((line + '\n' for line in kept))
+                changed = cleaned_text != raw
+            if changed:
+                durable_atomic_write(path, cleaned_text.encode('utf-8'), self.base)
+                report['files_rewritten'] += 1
+                report['records_removed'] += records_removed
+                report['strings_scrubbed'] += strings_scrubbed
+        return report
+
+    def _database_game_reference_counts(self, game_ids):
+        targets = tuple(sorted({str(value) for value in game_ids if str(value)}))
+        counts = {}
+        if not targets:
+            return counts
+        placeholders = ','.join(('?' for _ in targets))
+        with self.lock:
+            tables = [str(row[0]) for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            for table in tables:
+                if not re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', table):
+                    continue
+                columns = {str(row[1]) for row in self.db.execute('PRAGMA table_info(' + table + ')')}
+                if 'game_id' not in columns:
+                    continue
+                count = safe_int(self.db.execute('SELECT COUNT(*) FROM ' + table + ' WHERE game_id IN (' + placeholders + ')', targets).fetchone()[0], 0)
+                if count:
+                    counts[table] = count
+        return counts
+
+    def _scan_database_content_references(self, descriptor):
+        strong, names = self._game_reference_text_tokens(descriptor)
+        tokens = strong + names
+        findings = {}
+        if not tokens:
+            return findings
+        with self.lock:
+            tables = [str(row[0]) for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            for table in tables:
+                if table in {'game_deletion_transactions', 'sqlite_sequence'} or not re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', table):
+                    continue
+                columns = [(str(row[1]), str(row[2]).upper()) for row in self.db.execute('PRAGMA table_info(' + table + ')')]
+                for column, declared_type in columns:
+                    if not re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', column) or not any(kind in declared_type for kind in ('TEXT', 'CHAR', 'CLOB', 'JSON')):
+                        continue
+                    total = 0
+                    for token in tokens:
+                        total += safe_int(self.db.execute('SELECT COUNT(*) FROM ' + table + ' WHERE instr(lower(CAST(' + column + ' AS TEXT)),?)>0', (token,)).fetchone()[0], 0)
+                    if total:
+                        findings[table + '.' + column] = total
+        return findings
+
+    def _scan_managed_file_references(self, descriptor):
+        findings = []
+        for path in self._managed_text_files():
+            try:
+                raw = path.read_text(encoding='utf-8')
+            except (OSError, UnicodeError):
+                continue
+            if self._text_contains_game_reference(raw, descriptor):
+                findings.append(path.relative_to(self.base).as_posix())
+        return findings
+
+    def _write_game_deletion_report(self, transaction_id, payload):
+        report = {'schema_version': 1, 'transaction_id': str(transaction_id), 'created': time.time(), 'database_rows_deleted': safe_int(payload.get('database_rows_deleted'), 0, 0), 'files_deleted': safe_int(payload.get('files_deleted'), 0, 0), 'shared_files_scanned': safe_int(payload.get('shared_files_scanned'), 0, 0), 'shared_files_rewritten': safe_int(payload.get('shared_files_rewritten'), 0, 0), 'shared_records_removed': safe_int(payload.get('shared_records_removed'), 0, 0), 'residual_database_references': safe_int(payload.get('residual_database_references'), 0, 0), 'residual_file_references': safe_int(payload.get('residual_file_references'), 0, 0), 'complete': bool(payload.get('complete'))}
+        path = self.base / 'audit' / 'game_deletion_reports' / (str(transaction_id) + '.json')
+        durable_atomic_write(path, json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8'), self.base)
+        return path.relative_to(self.base).as_posix()
 
     def _safe_asset_path(self, relative):
         path = Path(str(relative))
@@ -14435,7 +14654,7 @@ class DataStoreGameTaskMixin:
         root = Path(root)
         if not root.exists():
             return False
-        payload = {'transaction_id': str(staged.get('transaction_id', root.name)), 'state': str(state), 'created': safe_float(staged.get('created'), time.time()), 'updated': time.time(), 'game_ids': sorted({str(value) for value in staged.get('game_ids', []) if str(value)}), 'selected_game': staged.get('selected_game'), 'root_relative': root.relative_to(self.base).as_posix(), 'moved_count': safe_int(staged.get('asset_count', len(staged.get('moved', []))), 0, 0), 'last_error': str(last_error)[:4000]}
+        payload = {'transaction_id': str(staged.get('transaction_id', root.name)), 'state': str(state), 'created': safe_float(staged.get('created'), time.time()), 'updated': time.time(), 'game_ids': sorted({str(value) for value in staged.get('game_ids', []) if str(value)}), 'game_names': sorted({str(value).strip() for value in staged.get('game_names', []) if str(value).strip()}), 'selected_game': staged.get('selected_game'), 'root_relative': root.relative_to(self.base).as_posix(), 'moved_count': safe_int(staged.get('asset_count', len(staged.get('moved', []))), 0, 0), 'last_error': str(last_error)[:4000]}
         durable_atomic_write(root / 'manifest.json', json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8'), self.base)
         return True
 
@@ -14489,14 +14708,28 @@ class DataStoreGameTaskMixin:
             game_ids = json.loads(value.get('game_ids') or '[]')
         except (json.JSONDecodeError, TypeError, ValueError):
             game_ids = []
-        return {'transaction_id': transaction_id, 'root': root, 'moved': moved, 'game_ids': sorted({str(item) for item in game_ids if str(item)}), 'selected_game': value.get('selected_game'), 'asset_count': safe_int(value.get('asset_count'), len(moved), 0), 'created': safe_float(value.get('created'), time.time()), 'state': str(value.get('state', 'prepared'))}
+        game_names = value.get('game_names', [])
+        if isinstance(game_names, str):
+            try:
+                game_names = json.loads(game_names)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                game_names = []
+        manifest_path = root / 'manifest.json'
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+                if isinstance(manifest.get('game_names'), list):
+                    game_names = manifest['game_names']
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                pass
+        return {'transaction_id': transaction_id, 'root': root, 'moved': moved, 'game_ids': sorted({str(item) for item in game_ids if str(item)}), 'game_names': sorted({str(item).strip() for item in game_names if str(item).strip()}), 'selected_game': value.get('selected_game'), 'asset_count': safe_int(value.get('asset_count'), len(moved), 0), 'created': safe_float(value.get('created'), time.time()), 'state': str(value.get('state', 'prepared'))}
 
     def _stage_game_assets(self, descriptor, selected_game=None):
         transaction_id = uuid.uuid4().hex
         transaction_root = self.base / 'quarantine' / 'game_trash' / transaction_id
         files_root = transaction_root / 'files'
         moved = []
-        staged = {'transaction_id': transaction_id, 'root': transaction_root, 'moved': moved, 'game_ids': sorted({str(value) for value in descriptor.get('game_ids', set()) if str(value)}), 'selected_game': None if selected_game in {None, ''} else str(selected_game), 'created': time.time(), 'asset_count': 0}
+        staged = {'transaction_id': transaction_id, 'root': transaction_root, 'moved': moved, 'game_ids': sorted({str(value) for value in descriptor.get('game_ids', set()) if str(value)}), 'game_names': sorted({str(value).strip() for value in descriptor.get('game_names', set()) if str(value).strip()}), 'selected_game': None if selected_game in {None, ''} else str(selected_game), 'created': time.time(), 'asset_count': 0}
         try:
             for source in self._collect_game_asset_paths(descriptor):
                 relative = source.relative_to(self.base)
@@ -14574,7 +14807,7 @@ class DataStoreGameTaskMixin:
         return True
 
     def recover_game_trash_transactions(self):
-        result = {'restored': 0, 'purged': 0, 'compacted': 0, 'failed': 0}
+        result = {'restored': 0, 'scrubbed': 0, 'purged': 0, 'compacted': 0, 'failed': 0}
         with self.lock:
             records = [dict(row) for row in self.db.execute('SELECT * FROM game_deletion_transactions ORDER BY created,transaction_id')]
         active_ids = {str(record.get('transaction_id', '')) for record in records}
@@ -14584,6 +14817,7 @@ class DataStoreGameTaskMixin:
             state = str(record.get('state', 'prepared'))
             try:
                 game_ids = staged['game_ids']
+                descriptor = self._game_deletion_descriptor(game_ids, staged.get('game_names', []))
                 remaining = 0
                 if game_ids:
                     placeholders = ','.join(('?' for _ in game_ids))
@@ -14598,6 +14832,15 @@ class DataStoreGameTaskMixin:
                     self._set_game_deletion_transaction_state(transaction_id, 'database_committed')
                     state = 'database_committed'
                 if state == 'database_committed':
+                    self._scrub_shared_game_references(descriptor)
+                    residual_database = self._scan_database_content_references(descriptor)
+                    residual_files = self._scan_managed_file_references(descriptor)
+                    if residual_database or residual_files:
+                        raise StorageError('恢复删除事务后仍存在残留引用：' + json.dumps({'database': residual_database, 'files': residual_files[:32]}, ensure_ascii=False, sort_keys=True))
+                    self._set_game_deletion_transaction_state(transaction_id, 'references_scrubbed')
+                    state = 'references_scrubbed'
+                    result['scrubbed'] += 1
+                if state == 'references_scrubbed':
                     self._purge_staged_game_assets(staged)
                     self._set_game_deletion_transaction_state(transaction_id, 'files_purged')
                     state = 'files_purged'
@@ -14624,10 +14867,11 @@ class DataStoreGameTaskMixin:
                     manifest = json.loads(manifest_path.read_text(encoding='utf-8')) if manifest_path.is_file() else {}
                 except (OSError, json.JSONDecodeError, TypeError, ValueError):
                     manifest = {}
-                record = {'transaction_id': transaction_root.name, 'root_relative': transaction_root.relative_to(self.base).as_posix(), 'game_ids': json.dumps(manifest.get('game_ids', []), ensure_ascii=False, separators=(',', ':')), 'selected_game': manifest.get('selected_game'), 'asset_count': safe_int(manifest.get('moved_count'), 0, 0), 'created': safe_float(manifest.get('created'), time.time()), 'state': str(manifest.get('state', 'prepared'))}
+                record = {'transaction_id': transaction_root.name, 'root_relative': transaction_root.relative_to(self.base).as_posix(), 'game_ids': json.dumps(manifest.get('game_ids', []), ensure_ascii=False, separators=(',', ':')), 'game_names': manifest.get('game_names', []), 'selected_game': manifest.get('selected_game'), 'asset_count': safe_int(manifest.get('moved_count'), 0, 0), 'created': safe_float(manifest.get('created'), time.time()), 'state': str(manifest.get('state', 'prepared'))}
                 staged = self._game_deletion_staged_payload(record)
                 try:
                     game_ids = staged['game_ids']
+                    descriptor = self._game_deletion_descriptor(game_ids, staged.get('game_names', []))
                     remaining = 0
                     if game_ids:
                         placeholders = ','.join(('?' for _ in game_ids))
@@ -14637,8 +14881,16 @@ class DataStoreGameTaskMixin:
                         self._restore_staged_game_assets(staged)
                         result['restored'] += 1
                     else:
+                        self._scrub_shared_game_references(descriptor)
+                        residual_database = self._scan_database_content_references(descriptor)
+                        residual_files = self._scan_managed_file_references(descriptor)
+                        if residual_database or residual_files:
+                            raise StorageError('恢复孤立删除事务后仍存在残留引用：' + json.dumps({'database': residual_database, 'files': residual_files[:32]}, ensure_ascii=False, sort_keys=True))
+                        result['scrubbed'] += 1
                         self._purge_staged_game_assets(staged)
                         result['purged'] += 1
+                        self._secure_compact_after_deletion()
+                        result['compacted'] += 1
                 except RECOVERABLE_ERRORS as error:
                     result['failed'] += 1
                     self.logger.write('ORPHAN_GAME_DELETION_RECOVERY_FAILED', error, details={'transaction_id': transaction_root.name})
@@ -14705,9 +14957,13 @@ class DataStoreGameTaskMixin:
         if selected_id is not None and selected_id not in keep:
             raise RuntimeError('所选游戏不存在')
         with self.lock:
-            existing = {str(row[0]) for row in self.db.execute('SELECT id FROM games')}
+            existing_rows = [dict(row) for row in self.db.execute('SELECT id,name FROM games')]
+        existing = {str(row.get('id')) for row in existing_rows}
         deleting = existing - keep
-        descriptor = self._game_deletion_descriptor(deleting)
+        deleted_names = {str(row.get('name', '')).strip() for row in existing_rows if str(row.get('id')) in deleting and str(row.get('name', '')).strip()}
+        descriptor = self._game_deletion_descriptor(deleting, deleted_names)
+        database_reference_counts = self._database_game_reference_counts(deleting) if deleting else {}
+        database_rows_deleted = len(deleting) + sum(database_reference_counts.values())
         with self.pending_lock:
             self.blocked_game_ids.update(deleting)
             removed_pending = [item for item in self.pending_samples if item.get('gid') in deleting]
@@ -14723,6 +14979,10 @@ class DataStoreGameTaskMixin:
         cleanup_pending = False
         cleanup_error = ''
         cleanup_state = 'compacted' if deleting else 'not_required'
+        scrub_report = {'files_scanned': 0, 'files_rewritten': 0, 'records_removed': 0, 'strings_scrubbed': 0}
+        residual_database = {}
+        residual_files = []
+        deletion_report_path = ''
         try:
             self.sample_write_barrier()
             staged = self._stage_game_assets(descriptor, selected_id) if deleting else {'moved': [], 'root': None, 'transaction_id': '', 'asset_count': 0}
@@ -14755,9 +15015,13 @@ class DataStoreGameTaskMixin:
                 except RECOVERABLE_ERRORS as error:
                     self.logger.write('GAME_DELETION_COMMIT_STATE_REFRESH_FAILED', error, details={'transaction_id': staged['transaction_id']})
                 try:
-                    self._purge_staged_game_assets(staged)
-                    self._set_game_deletion_transaction_state(staged['transaction_id'], 'files_purged')
-                    cleanup_state = 'files_purged'
+                    scrub_report = self._scrub_shared_game_references(descriptor)
+                    residual_database = self._scan_database_content_references(descriptor)
+                    residual_files = self._scan_managed_file_references(descriptor)
+                    if residual_database or residual_files:
+                        raise StorageError('删除游戏后仍存在残留引用：' + json.dumps({'database': residual_database, 'files': residual_files[:32]}, ensure_ascii=False, sort_keys=True))
+                    self._set_game_deletion_transaction_state(staged['transaction_id'], 'references_scrubbed')
+                    cleanup_state = 'references_scrubbed'
                 except RECOVERABLE_ERRORS as error:
                     cleanup_pending = True
                     cleanup_error = str(error)
@@ -14765,12 +15029,27 @@ class DataStoreGameTaskMixin:
                     try:
                         self._set_game_deletion_transaction_state(staged['transaction_id'], cleanup_state, error)
                     except RECOVERABLE_ERRORS as state_error:
-                        self.logger.write('GAME_DELETION_PURGE_STATE_FAILED', state_error, details={'transaction_id': staged['transaction_id']})
-                    self.logger.write('GAME_DELETION_PURGE_DEFERRED', error, details={'transaction_id': staged['transaction_id']})
+                        self.logger.write('GAME_DELETION_SCRUB_STATE_FAILED', state_error, details={'transaction_id': staged['transaction_id']})
+                    self.logger.write('GAME_DELETION_SCRUB_DEFERRED', error, details={'transaction_id': staged['transaction_id']})
+                if not cleanup_pending:
+                    try:
+                        self._purge_staged_game_assets(staged)
+                        self._set_game_deletion_transaction_state(staged['transaction_id'], 'files_purged')
+                        cleanup_state = 'files_purged'
+                    except RECOVERABLE_ERRORS as error:
+                        cleanup_pending = True
+                        cleanup_error = str(error)
+                        cleanup_state = 'references_scrubbed'
+                        try:
+                            self._set_game_deletion_transaction_state(staged['transaction_id'], cleanup_state, error)
+                        except RECOVERABLE_ERRORS as state_error:
+                            self.logger.write('GAME_DELETION_PURGE_STATE_FAILED', state_error, details={'transaction_id': staged['transaction_id']})
+                        self.logger.write('GAME_DELETION_PURGE_DEFERRED', error, details={'transaction_id': staged['transaction_id']})
                 if not cleanup_pending:
                     try:
                         self._secure_compact_after_deletion()
                         self._set_game_deletion_transaction_state(staged['transaction_id'], 'compacted')
+                        deletion_report_path = self._write_game_deletion_report(staged['transaction_id'], {'database_rows_deleted': database_rows_deleted, 'files_deleted': safe_int(staged.get('asset_count', len(staged.get('moved', []))), 0, 0), 'shared_files_scanned': scrub_report.get('files_scanned', 0), 'shared_files_rewritten': scrub_report.get('files_rewritten', 0), 'shared_records_removed': scrub_report.get('records_removed', 0), 'residual_database_references': 0, 'residual_file_references': 0, 'complete': True})
                         self._forget_game_deletion_transaction(staged['transaction_id'])
                         cleanup_state = 'compacted'
                     except RECOVERABLE_ERRORS as error:
@@ -14782,6 +15061,11 @@ class DataStoreGameTaskMixin:
                         except RECOVERABLE_ERRORS as state_error:
                             self.logger.write('GAME_DELETION_COMPACT_STATE_FAILED', state_error, details={'transaction_id': staged['transaction_id']})
                         self.logger.write('GAME_DELETION_COMPACTION_DEFERRED', error, details={'transaction_id': staged['transaction_id']})
+                if cleanup_pending:
+                    try:
+                        deletion_report_path = self._write_game_deletion_report(staged['transaction_id'], {'database_rows_deleted': database_rows_deleted, 'files_deleted': safe_int(staged.get('asset_count', len(staged.get('moved', []))), 0, 0) if cleanup_state in {'files_purged', 'compacted'} else 0, 'shared_files_scanned': scrub_report.get('files_scanned', 0), 'shared_files_rewritten': scrub_report.get('files_rewritten', 0), 'shared_records_removed': scrub_report.get('records_removed', 0), 'residual_database_references': sum(residual_database.values()), 'residual_file_references': len(residual_files), 'complete': False})
+                    except RECOVERABLE_ERRORS as report_error:
+                        self.logger.write('GAME_DELETION_REPORT_FAILED', report_error, details={'transaction_id': staged['transaction_id']})
             for item in cleaned:
                 game_root = self.base / 'games' / item['id']
                 game_root.mkdir(parents=True, exist_ok=True)
@@ -14790,7 +15074,7 @@ class DataStoreGameTaskMixin:
             for gid in deleting:
                 self.model_cache.pop(gid, None)
                 self._invalidate_sample_caches(gid)
-            return {'deleted_games': sorted(deleting), 'discarded_pending_samples': len(removed_pending), 'deleted_asset_count': safe_int(staged.get('asset_count', len(staged.get('moved', []))), 0, 0) if staged else 0, 'trash_removed': not bool(staged and staged.get('root') and Path(staged['root']).exists()), 'selected_game': selected_id, 'cleanup_pending': cleanup_pending, 'cleanup_state': cleanup_state, 'cleanup_error': cleanup_error, 'transaction_id': staged.get('transaction_id', '') if cleanup_pending and staged else ''}
+            return {'deleted_games': sorted(deleting), 'discarded_pending_samples': len(removed_pending), 'database_rows_deleted': database_rows_deleted, 'deleted_asset_count': safe_int(staged.get('asset_count', len(staged.get('moved', []))), 0, 0) if staged else 0, 'shared_files_scanned': safe_int(scrub_report.get('files_scanned'), 0, 0), 'shared_files_rewritten': safe_int(scrub_report.get('files_rewritten'), 0, 0), 'shared_records_removed': safe_int(scrub_report.get('records_removed'), 0, 0), 'residual_database_references': sum(residual_database.values()), 'residual_file_references': len(residual_files), 'deletion_report': deletion_report_path, 'trash_removed': not bool(staged and staged.get('root') and Path(staged['root']).exists()), 'selected_game': selected_id, 'cleanup_pending': cleanup_pending, 'cleanup_state': cleanup_state, 'cleanup_error': cleanup_error, 'transaction_id': staged.get('transaction_id', '') if cleanup_pending and staged else ''}
         finally:
             with self.pending_lock:
                 self.blocked_game_ids.difference_update(deleting)
@@ -16353,8 +16637,20 @@ class DataStoreOCRVisionMixin:
         priority = safe_int(existing.get('priority'), 0) if existing else max((safe_int(item.get('priority'), -1) for item in current_regions), default=-1) + 1
         now = time.time()
         relation_config = normalize_relation_config(value.get('relation_config', {}))
-        relation = normalize_numeric_preference(value.get('goal_relation', relation_config.get('preference', DEFAULT_NUMERIC_PREFERENCE)))
+        raw_relation = str(value.get('goal_relation', relation_config.get('preference', DEFAULT_NUMERIC_PREFERENCE)) or '')
+        relation = NUMERIC_LEGACY_PREFERENCE_MAP.get(raw_relation, raw_relation)
+        if relation not in NUMERIC_PREFERENCE_LABELS:
+            raise ValueError('不支持的数字偏好类型')
         relation_config['preference'] = relation
+        relation_config['reward_scale'] = _numeric_reward_scale(relation_config)
+        if relation in NUMERIC_FIXED_VALUE_RELATIONS and not finite_number(relation_config.get('fixed_value')):
+            raise ValueError('与固定值比较时必须配置有效固定值')
+        if relation in NUMERIC_COMPARISON_RELATIONS:
+            compare_id = str(relation_config.get('compare_region_id', ''))
+            valid_ids = {str(item.get('id', '')) for item in current_regions}
+            valid_ids.add(region_id)
+            if not compare_id or compare_id == region_id or compare_id not in valid_ids:
+                raise ValueError('跨区域数字偏好必须引用另一个有效区域')
         row = {'id': region_id, 'game_id': str(gid), 'created': created, 'updated': now, 'priority': priority, 'region_norm': norm, 'region_type': str(value.get('region_type', 'uncertain')), 'number_format': str(value.get('number_format', 'auto')), 'goal_relation': relation, 'relation_config': relation_config, 'target_min': safe_float(value.get('target_min')) if finite_number(value.get('target_min')) else None, 'target_max': safe_float(value.get('target_max')) if finite_number(value.get('target_max')) else None, 'special_value': safe_float(value.get('special_value')) if finite_number(value.get('special_value')) else None, 'special_meaning': str(value.get('special_meaning', 'uncertain')), 'reset_meaning': str(value.get('reset_meaning', 'uncertain')), 'unit': str(value.get('unit', '')), 'enabled': 1, 'last_text': str(value.get('recognized_text', value.get('last_text', '')))[:256], 'last_value': safe_float(value.get('last_value')) if finite_number(value.get('last_value')) else None, 'last_confidence': safe_float(value.get('confidence', 0.0), 0.0, 0.0, 1.0), 'stable_frames': safe_int(value.get('stable_frames', 0), 0, 0, 1000)}
         checksum = hashlib.sha256(canonical_bytes(ocr_region_checksum_payload(row))).hexdigest()
         with self.lock, self.db:
@@ -16389,8 +16685,14 @@ class DataStoreOCRVisionMixin:
                 raise ValueError('OCR区域必须位于确认内容区域内')
             existing = existing_rows.get(region_id, {})
             config = normalize_relation_config(value.get('relation_config', {}))
-            relation = normalize_numeric_preference(value.get('goal_relation', config.get('preference', DEFAULT_NUMERIC_PREFERENCE)))
+            raw_relation = str(value.get('goal_relation', config.get('preference', DEFAULT_NUMERIC_PREFERENCE)) or '')
+            relation = NUMERIC_LEGACY_PREFERENCE_MAP.get(raw_relation, raw_relation)
+            if relation not in NUMERIC_PREFERENCE_LABELS:
+                raise ValueError('不支持的数字偏好类型')
             config['preference'] = relation
+            config['reward_scale'] = _numeric_reward_scale(config)
+            if relation in NUMERIC_FIXED_VALUE_RELATIONS and not finite_number(config.get('fixed_value')):
+                raise ValueError('与固定值比较时必须配置有效固定值')
             compare_id = str(config.get('compare_region_id', ''))
             row = {'id': region_id, 'game_id': game_id, 'created': safe_float(existing.get('created'), safe_float(value.get('created'), now)), 'updated': now, 'priority': index, 'region_norm': norm, 'region_type': str(value.get('region_type', 'number')), 'number_format': str(value.get('number_format', 'auto')), 'goal_relation': relation, 'relation_config': config, 'target_min': safe_float(value.get('target_min')) if finite_number(value.get('target_min')) else None, 'target_max': safe_float(value.get('target_max')) if finite_number(value.get('target_max')) else None, 'special_value': safe_float(value.get('special_value')) if finite_number(value.get('special_value')) else None, 'special_meaning': str(value.get('special_meaning', 'uncertain')), 'reset_meaning': str(value.get('reset_meaning', 'uncertain')), 'unit': str(value.get('unit', '')), 'enabled': 1 if value.get('enabled', True) else 0, 'last_text': str(value.get('recognized_text', value.get('last_text', existing.get('last_text', ''))))[:256], 'last_value': safe_float(value.get('last_value')) if finite_number(value.get('last_value')) else existing.get('last_value'), 'last_confidence': safe_float(value.get('confidence', value.get('last_confidence', existing.get('last_confidence', 0.0))), 0.0, 0.0, 1.0), 'stable_frames': safe_int(value.get('stable_frames', existing.get('stable_frames', 0)), 0, 0, 1000), 'compare_region_id': compare_id}
             normalized.append(row)
@@ -16855,10 +17157,19 @@ class GameSelectionDialog:
             app._refresh_all()
             deleted = len(result.get('deleted_games', [])) if isinstance(result, dict) else 0
             assets = safe_int(result.get('deleted_asset_count'), 0) if isinstance(result, dict) else 0
-            if chosen is None:
-                app.status.set('已删除全部游戏及相关数据' + ('；已清理' + str(assets) + '项磁盘资产' if assets else '') + '；请新建游戏')
+            database_rows = safe_int(result.get('database_rows_deleted'), 0) if isinstance(result, dict) else 0
+            shared_records = safe_int(result.get('shared_records_removed'), 0) if isinstance(result, dict) else 0
+            report_path = str(result.get('deletion_report', '')) if isinstance(result, dict) else ''
+            cleanup_pending = bool(result.get('cleanup_pending')) if isinstance(result, dict) else False
+            residual_count = safe_int(result.get('residual_database_references'), 0) + safe_int(result.get('residual_file_references'), 0) if isinstance(result, dict) else 0
+            deletion_summary = ('；已删除数据库关联行' + str(database_rows) + '条' if deleted else '') + ('；已清理磁盘资产' + str(assets) + '项' if assets else '') + ('；已清理共享记录' + str(shared_records) + '条' if shared_records else '') + ('；删除报告：' + report_path if report_path else '')
+            if cleanup_pending or residual_count:
+                app.show_error('游戏记录已删除，但彻底清理尚未完成。残留引用数：' + str(residual_count) + ('；' + str(result.get('cleanup_error', '')) if isinstance(result, dict) and result.get('cleanup_error') else '') + ('；报告：' + report_path if report_path else ''))
+                app.status.set('游戏删除清理未完成' + deletion_summary)
+            elif chosen is None:
+                app.status.set('已删除全部游戏及相关文件和数据' + deletion_summary + '；残留引用数：0；请新建游戏')
             else:
-                app.status.set('已提交游戏列表并选择：' + chosen['name'] + ('；已删除' + str(deleted) + '个游戏及其全部数据' if deleted else '') + ('；已清理' + str(assets) + '项磁盘资产' if assets else ''))
+                app.status.set('已提交游戏列表并选择：' + chosen['name'] + ('；已删除' + str(deleted) + '个游戏及其全部相关文件和数据' if deleted else '') + deletion_summary + ('；残留引用数：0' if deleted else ''))
             app.close_dialog(win, state)
         tools = ttk.Frame(frame)
         tools.pack(fill='x', pady=10)
@@ -17119,6 +17430,9 @@ NUMERIC_PREDICTION_MAX_AGE_MS = 3000.0
 NUMERIC_PREDICTION_VELOCITY_HORIZON_MS = 900.0
 NUMERIC_NEURAL_MIN_HISTORY = 6
 NUMERIC_NEURAL_MAX_HISTORY = 96
+NUMERIC_REWARD_DEFAULT_SCALE = 1.0
+NUMERIC_REWARD_MIN_SCALE = 1e-06
+NUMERIC_CONDITION_FAILED_DEFAULT_REWARD = 0.0
 
 @dataclass(frozen=True, slots=True)
 class NumericValue:
@@ -17291,51 +17605,55 @@ class NumericPredictionState:
 
     def predict(self, timestamp, consensus_value=None, consensus_confidence=0.0):
         now = max(0.0, safe_float(timestamp, time.monotonic()))
+        maximum_age = max(0.001, NUMERIC_PREDICTION_MAX_AGE_MS / 1000.0)
         visual_confidence = safe_float(consensus_confidence, 0.0, 0.0, 1.0)
         neural = self.forecaster.predict(now)
-        detail = 'visual_numeric_prior'
-        confidence_value = 0.01
-        value = 0.0
+        candidates = []
         if neural.get('available') and finite_number(neural.get('value')):
-            value = safe_float(neural.get('value'))
-            confidence_value = max(0.01, safe_float(neural.get('confidence'), 0.0, 0.0, 1.0))
-            detail = 'online_neural_temporal_ensemble'
-            if finite_number(consensus_value):
-                visual_value = safe_float(consensus_value)
-                scale = max(1.0, abs(safe_float(neural.get('scale'), 1.0)), abs(value) * 0.01)
-                disagreement = abs(visual_value - value) / scale
-                visual_weight = min(0.45, max(0.04, visual_confidence * 0.45)) * math.exp(-0.35 * min(8.0, disagreement))
-                value = value * (1.0 - visual_weight) + visual_value * visual_weight
-                confidence_value = max(0.01, min(0.96, confidence_value * math.exp(-0.12 * disagreement) + visual_confidence * 0.12 * math.exp(-disagreement)))
-                detail = 'neural_temporal_visual_fusion'
-        elif finite_number(consensus_value):
-            value = safe_float(consensus_value)
-            confidence_value = max(0.01, min(0.7, visual_confidence * 0.7))
-            detail = 'visual_numeric_model_fallback'
-        elif finite_number(self.last_observed_value):
-            age = max(0.0, now - self.last_observed_time) if self.last_observed_time > 0.0 else 0.0
-            horizon = min(age, max(0.25, NUMERIC_PREDICTION_MAX_AGE_MS / 1000.0))
-            value = safe_float(self.last_observed_value) + safe_float(self.trend_or_velocity, 0.0) * horizon
-            confidence_value = max(0.01, min(0.65, safe_float(self.last_observation_confidence, 0.0, 0.0, 1.0) * math.exp(-age / 2.4) * 0.65))
-            detail = 'temporal_visual_state_fallback'
-        elif finite_number(self.predicted_value):
-            value = safe_float(self.predicted_value)
-            confidence_value = max(0.01, min(0.4, safe_float(self.prediction_confidence, 0.0, 0.0, 1.0) * 0.75))
-            detail = 'previous_visual_prediction_fallback'
-        if not finite_number(value):
-            value = 0.0
-            confidence_value = 0.01
-            detail = 'visual_numeric_prior'
-        self.predicted_value = value
+            neural_confidence = safe_float(neural.get('confidence'), 0.0, 0.0, 1.0)
+            if neural_confidence >= NUMERIC_PREDICTION_MIN_CONFIDENCE:
+                candidates.append({'value': safe_float(neural.get('value')), 'confidence': neural_confidence, 'source': 'online_neural_temporal_ensemble', 'evidence': 'neural_history'})
+        if finite_number(consensus_value) and visual_confidence >= 0.7:
+            model_confidence = min(0.9, visual_confidence * 0.85)
+            if model_confidence >= NUMERIC_PREDICTION_MIN_CONFIDENCE:
+                candidates.append({'value': safe_float(consensus_value), 'confidence': model_confidence, 'source': 'visual_numeric_model_consensus', 'evidence': 'visual_consensus'})
+        observation_age = max(0.0, now - self.last_observed_time) if self.last_observed_time > 0.0 else math.inf
+        if self.trusted_observations >= 2 and finite_number(self.last_observed_value) and observation_age <= maximum_age:
+            history_confidence = safe_float(self.last_observation_confidence, 0.0, 0.0, 1.0) * math.exp(-observation_age / 2.4) * 0.82
+            if history_confidence >= NUMERIC_PREDICTION_MIN_CONFIDENCE:
+                horizon = min(observation_age, NUMERIC_PREDICTION_VELOCITY_HORIZON_MS / 1000.0)
+                history_value = safe_float(self.last_observed_value) + safe_float(self.trend_or_velocity, 0.0) * horizon
+                if finite_number(history_value):
+                    candidates.append({'value': history_value, 'confidence': history_confidence, 'source': 'trusted_history_trend', 'evidence': 'trusted_observation_history'})
+        if not candidates:
+            unavailable = self._unavailable('insufficient_prediction_evidence', now)
+            unavailable.update({'reason': 'insufficient_prediction_evidence', 'prediction_age_ms': 0.0 if not finite_number(observation_age) else observation_age * 1000.0, 'minimum_prediction_confidence': NUMERIC_PREDICTION_MIN_CONFIDENCE, 'maximum_prediction_age_ms': NUMERIC_PREDICTION_MAX_AGE_MS, 'neural_history_size': safe_int(neural.get('history_size'), len(self.forecaster.history)), 'neural_updates': safe_int(neural.get('updates'), self.forecaster.updates)})
+            return unavailable
+        candidates.sort(key=lambda item: (safe_float(item.get('confidence'), 0.0), item.get('source') == 'online_neural_temporal_ensemble'), reverse=True)
+        selected = dict(candidates[0])
+        neural_candidate = next((item for item in candidates if item.get('source') == 'online_neural_temporal_ensemble'), None)
+        visual_candidate = next((item for item in candidates if item.get('source') == 'visual_numeric_model_consensus'), None)
+        if neural_candidate is not None and visual_candidate is not None:
+            scale = max(NUMERIC_REWARD_MIN_SCALE, abs(safe_float(neural.get('scale'), 1.0)))
+            disagreement = abs(safe_float(neural_candidate['value']) - safe_float(visual_candidate['value'])) / scale
+            if disagreement <= 4.0:
+                neural_weight = safe_float(neural_candidate['confidence'], 0.0, 0.0, 1.0)
+                visual_weight = safe_float(visual_candidate['confidence'], 0.0, 0.0, 1.0) * math.exp(-0.35 * disagreement)
+                total_weight = neural_weight + visual_weight
+                if total_weight > 0.0:
+                    selected = {'value': (safe_float(neural_candidate['value']) * neural_weight + safe_float(visual_candidate['value']) * visual_weight) / total_weight, 'confidence': min(0.96, max(neural_candidate['confidence'], visual_candidate['confidence']) * math.exp(-0.08 * disagreement)), 'source': 'neural_temporal_visual_fusion', 'evidence': 'neural_history+visual_consensus'}
+        value = selected.get('value')
+        confidence_value = safe_float(selected.get('confidence'), 0.0, 0.0, 1.0)
+        if not finite_number(value) or confidence_value < NUMERIC_PREDICTION_MIN_CONFIDENCE:
+            unavailable = self._unavailable('prediction_below_reliability_threshold', now)
+            unavailable.update({'reason': 'prediction_below_reliability_threshold', 'minimum_prediction_confidence': NUMERIC_PREDICTION_MIN_CONFIDENCE, 'maximum_prediction_age_ms': NUMERIC_PREDICTION_MAX_AGE_MS})
+            return unavailable
+        self.predicted_value = safe_float(value)
         self.prediction_confidence = confidence_value
-        self.prediction_source = detail
+        self.prediction_source = str(selected.get('source', 'reliable_prediction'))
         self.last_prediction_time = now
-        snapshot = NumericValue(value, 'predicted', confidence_value, True).to_snapshot(detail, now, None, self.last_observed_value, self.last_observed_time, self.trend_or_velocity)
-        snapshot['prediction_fallback'] = detail != 'online_neural_temporal_ensemble'
-        snapshot['neural_history_size'] = safe_int(neural.get('history_size'), len(self.forecaster.history))
-        snapshot['neural_updates'] = safe_int(neural.get('updates'), self.forecaster.updates)
-        snapshot['neural_ensemble_disagreement'] = safe_float(neural.get('ensemble_disagreement'), 0.0)
-        snapshot['neural_normalized_error'] = safe_float(neural.get('normalized_error'), 0.0)
+        snapshot = NumericValue(self.predicted_value, 'predicted', confidence_value, True).to_snapshot(self.prediction_source, now, None, self.last_observed_value, self.last_observed_time, self.trend_or_velocity)
+        snapshot.update({'prediction_fallback': self.prediction_source != 'online_neural_temporal_ensemble', 'prediction_evidence': str(selected.get('evidence', '')), 'minimum_prediction_confidence': NUMERIC_PREDICTION_MIN_CONFIDENCE, 'maximum_prediction_age_ms': NUMERIC_PREDICTION_MAX_AGE_MS, 'neural_history_size': safe_int(neural.get('history_size'), len(self.forecaster.history)), 'neural_updates': safe_int(neural.get('updates'), self.forecaster.updates), 'neural_ensemble_disagreement': safe_float(neural.get('ensemble_disagreement'), 0.0), 'neural_normalized_error': safe_float(neural.get('normalized_error'), 0.0)})
         return snapshot
 
 def normalize_numeric_preference(value):
@@ -17370,100 +17688,131 @@ def numeric_values_equal(first, second):
     b = numeric_decimal_value(second)
     return a is not None and b is not None and (a == b)
 
-def _numeric_scale(*values):
-    finite = [abs(safe_float(value)) for value in values if finite_number(value)]
-    return max([1.0, *finite])
+def _numeric_reward_scale(config):
+    value = config if isinstance(config, dict) else {}
+    configured = value.get('reward_scale')
+    if finite_number(configured) and abs(safe_float(configured)) >= NUMERIC_REWARD_MIN_SCALE:
+        return abs(safe_float(configured))
+    history = value.get('metric_delta_history')
+    deltas = [safe_float(item) for item in history or [] if finite_number(item)] if isinstance(history, (list, tuple)) else []
+    if len(deltas) >= 5:
+        center = statistics.median(deltas)
+        deviations = [abs(item - center) for item in deltas]
+        mad = statistics.median(deviations)
+        robust = 1.4826 * mad
+        if robust < NUMERIC_REWARD_MIN_SCALE:
+            robust = statistics.median([abs(item) for item in deltas if abs(item) >= NUMERIC_REWARD_MIN_SCALE] or [NUMERIC_REWARD_DEFAULT_SCALE])
+        return max(NUMERIC_REWARD_MIN_SCALE, robust)
+    return NUMERIC_REWARD_DEFAULT_SCALE
 
-def _bounded_utility(value, scale, higher_is_better=True):
-    if not finite_number(value):
-        return None
-    normalized = math.tanh(safe_float(value) / max(1e-09, safe_float(scale, 1.0)))
-    return normalized if higher_is_better else -normalized
-
-def _utility_difference(before_metric, now_metric, higher_is_better=True, scale=None):
+def _metric_delta_reward(before_metric, now_metric, higher_is_better=True, scale=NUMERIC_REWARD_DEFAULT_SCALE):
     if not finite_number(before_metric) or not finite_number(now_metric):
-        return {'valid': False, 'observation_valid': False, 'preference_applicable': False, 'reward': 0.0, 'status': 'invalid_metric'}
-    selected_scale = _numeric_scale(before_metric, now_metric) if scale is None else max(1e-09, safe_float(scale, 1.0))
-    before_utility = _bounded_utility(before_metric, selected_scale, higher_is_better)
-    now_utility = _bounded_utility(now_metric, selected_scale, higher_is_better)
-    reward = max(-1.0, min(1.0, safe_float(now_utility) - safe_float(before_utility)))
-    return {'valid': True, 'observation_valid': True, 'preference_applicable': True, 'reward': reward, 'status': 'utility_delta', 'before_metric': safe_float(before_metric), 'now_metric': safe_float(now_metric), 'before_utility': safe_float(before_utility), 'now_utility': safe_float(now_utility), 'scale': selected_scale}
+        return {'valid': False, 'observation_valid': False, 'configuration_valid': True, 'preference_applicable': False, 'reward': 0.0, 'status': 'invalid_metric'}
+    selected_scale = max(NUMERIC_REWARD_MIN_SCALE, abs(safe_float(scale, NUMERIC_REWARD_DEFAULT_SCALE)))
+    before_decimal = Decimal(str(before_metric))
+    now_decimal = Decimal(str(now_metric))
+    preference_delta_decimal = now_decimal - before_decimal
+    if not higher_is_better:
+        preference_delta_decimal = -preference_delta_decimal
+    try:
+        normalized = float(preference_delta_decimal / Decimal(str(selected_scale)))
+        reward = math.tanh(normalized)
+    except (OverflowError, InvalidOperation, ValueError):
+        reward = 1.0 if preference_delta_decimal > 0 else -1.0 if preference_delta_decimal < 0 else 0.0
+    metric_delta = safe_float(now_metric) - safe_float(before_metric)
+    return {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': True, 'reward': max(-1.0, min(1.0, reward)), 'status': 'metric_delta', 'before_metric': safe_float(before_metric), 'now_metric': safe_float(now_metric), 'metric_delta': metric_delta if finite_number(metric_delta) else None, 'preference_delta': str(preference_delta_decimal), 'scale': selected_scale}
 
 def evaluate_numeric_preference_detailed(region, old_value, new_value, before_snapshot, now_snapshot):
+    config = normalize_relation_config(region.get('relation_config', {}))
+    raw_relation = str(config.get('preference', region.get('goal_relation', DEFAULT_NUMERIC_PREFERENCE)) or '')
+    relation_token = NUMERIC_LEGACY_PREFERENCE_MAP.get(raw_relation, raw_relation)
+    relation = relation_token if relation_token in NUMERIC_PREFERENCE_LABELS else raw_relation
+    reward_scale = _numeric_reward_scale(config)
+
+    def observation_unavailable(status):
+        return {'valid': False, 'observation_valid': False, 'configuration_valid': True, 'preference_applicable': False, 'reward': 0.0, 'status': status, 'preference': relation, 'scale': reward_scale}
+
+    def condition_failed(status):
+        configured_reward = safe_float(config.get('condition_failed_reward', NUMERIC_CONDITION_FAILED_DEFAULT_REWARD), NUMERIC_CONDITION_FAILED_DEFAULT_REWARD, -1.0, 1.0)
+        return {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': False, 'reward': configured_reward, 'status': status, 'preference': relation, 'scale': reward_scale}
+
+    def configuration_error(status):
+        return {'valid': False, 'observation_valid': True, 'configuration_valid': False, 'preference_applicable': False, 'reward': 0.0, 'status': status, 'preference': relation, 'scale': reward_scale}
+
+    if relation_token not in NUMERIC_PREFERENCE_LABELS:
+        return configuration_error('unsupported_preference')
     old = numeric_snapshot_value(old_value)
     new = numeric_snapshot_value(new_value)
     old_decimal = numeric_decimal_value(old_value)
     new_decimal = numeric_decimal_value(new_value)
-    if old is None or new is None or old_decimal is None or (new_decimal is None):
-        return {'valid': False, 'observation_valid': False, 'preference_applicable': False, 'reward': 0.0, 'status': 'invalid_snapshot'}
-    config = normalize_relation_config(region.get('relation_config', {}))
-    relation = normalize_numeric_preference(config.get('preference', region.get('goal_relation', DEFAULT_NUMERIC_PREFERENCE)))
+    if old is None or new is None or old_decimal is None or new_decimal is None:
+        return observation_unavailable('invalid_snapshot')
+    relation = relation_token
     delta_decimal = new_decimal - old_decimal
     delta = float(delta_decimal)
-    scale = _numeric_scale(old, new)
-    result = {'valid': True, 'observation_valid': True, 'preference_applicable': True, 'reward': 0.0, 'status': 'neutral', 'preference': relation}
-
-    def not_applicable(status):
-        return {'valid': True, 'observation_valid': True, 'preference_applicable': False, 'reward': -1.0, 'status': status, 'preference': relation}
+    result = {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': True, 'reward': 0.0, 'status': 'neutral', 'preference': relation, 'scale': reward_scale}
     if relation == NumericPreference.NOW_HIGHER.value:
-        result.update(_utility_difference(old, new, True, scale))
+        result.update(_metric_delta_reward(old, new, True, reward_scale))
         return result
     if relation == NumericPreference.NOW_LOWER.value:
-        result.update(_utility_difference(old, new, False, scale))
+        result.update(_metric_delta_reward(old, new, False, reward_scale))
         return result
     if relation in {NumericPreference.POSITIVE_DELTA_HIGHER.value, NumericPreference.POSITIVE_DELTA_LOWER.value}:
         if delta_decimal <= 0:
-            return not_applicable('positive_delta_condition_failed')
-        result.update(_utility_difference(0.0, delta, relation == NumericPreference.POSITIVE_DELTA_HIGHER.value, scale))
+            return condition_failed('positive_delta_condition_failed')
+        result.update(_metric_delta_reward(0.0, delta, relation == NumericPreference.POSITIVE_DELTA_HIGHER.value, reward_scale))
         result['status'] = 'positive_delta'
         return result
     if relation in {NumericPreference.NEGATIVE_DELTA_HIGHER.value, NumericPreference.NEGATIVE_DELTA_LOWER.value}:
         decrease_decimal = old_decimal - new_decimal
         if decrease_decimal <= 0:
-            return not_applicable('negative_delta_condition_failed')
+            return condition_failed('negative_delta_condition_failed')
         decrease = float(decrease_decimal)
-        result.update(_utility_difference(0.0, decrease, relation == NumericPreference.NEGATIVE_DELTA_HIGHER.value, scale))
+        result.update(_metric_delta_reward(0.0, decrease, relation == NumericPreference.NEGATIVE_DELTA_HIGHER.value, reward_scale))
         result['status'] = 'negative_delta'
         return result
     if relation in {NumericPreference.ABS_DELTA_HIGHER.value, NumericPreference.ABS_DELTA_LOWER.value}:
         magnitude_decimal = abs(delta_decimal)
         if magnitude_decimal == 0:
-            return not_applicable('absolute_delta_condition_failed')
+            return condition_failed('absolute_delta_condition_failed')
         magnitude = float(magnitude_decimal)
-        result.update(_utility_difference(0.0, magnitude, relation == NumericPreference.ABS_DELTA_HIGHER.value, scale))
+        result.update(_metric_delta_reward(0.0, magnitude, relation == NumericPreference.ABS_DELTA_HIGHER.value, reward_scale))
         result['status'] = 'absolute_delta'
         return result
     if relation in NUMERIC_FIXED_VALUE_RELATIONS:
         fixed_value = config.get('fixed_value')
         if not finite_number(fixed_value):
-            return not_applicable('fixed_value_missing')
+            return configuration_error('fixed_value_missing')
         fixed = safe_float(fixed_value)
-        result.update(_utility_difference(abs(old - fixed), abs(new - fixed), relation == NumericPreference.FIXED_DISTANCE_HIGHER.value, _numeric_scale(old, new, fixed)))
+        result.update(_metric_delta_reward(abs(old - fixed), abs(new - fixed), relation == NumericPreference.FIXED_DISTANCE_HIGHER.value, reward_scale))
         result['status'] = 'fixed_distance'
         return result
     if relation in NUMERIC_COMPARISON_RELATIONS:
         target_id = str(config.get('compare_region_id', ''))
+        if not target_id or target_id == str(region.get('id', '')):
+            return configuration_error('comparison_region_not_configured')
         old_target = numeric_snapshot_value(before_snapshot.get(target_id))
         new_target = numeric_snapshot_value(now_snapshot.get(target_id))
-        if not target_id or old_target is None or new_target is None:
-            return not_applicable('comparison_region_unavailable')
+        if old_target is None or new_target is None:
+            return observation_unavailable('comparison_region_unavailable')
         before_metric = old - old_target
         now_metric = new - new_target
         if relation in {NumericPreference.REGION_ABS_DIFF_HIGHER.value, NumericPreference.REGION_ABS_DIFF_LOWER.value}:
             before_metric = abs(before_metric)
             now_metric = abs(now_metric)
-        result.update(_utility_difference(before_metric, now_metric, relation in {NumericPreference.REGION_DIFF_HIGHER.value, NumericPreference.REGION_ABS_DIFF_HIGHER.value}, _numeric_scale(old, new, old_target, new_target)))
+        result.update(_metric_delta_reward(before_metric, now_metric, relation in {NumericPreference.REGION_DIFF_HIGHER.value, NumericPreference.REGION_ABS_DIFF_HIGHER.value}, reward_scale))
         result['status'] = 'region_comparison'
         result['compare_region_id'] = target_id
         return result
-    return not_applicable('unsupported_preference')
+    return configuration_error('unsupported_preference')
 
 def ensure_numeric_prediction_snapshot(value, fallback=None):
     if numeric_snapshot_value(value) is not None:
         return value
-    fallback_number = numeric_snapshot_value(fallback)
-    number = fallback_number if fallback_number is not None else 0.0
-    return {'value': number, 'numeric_value': number, 'source': 'predicted', 'predicted': True, 'valid': True, 'available': True, 'confidence': 0.01, 'prediction_source': 'priority_comparison_visual_prior', 'prediction_fallback': True}
+    reason = 'insufficient_prediction_evidence'
+    if isinstance(value, dict) and value.get('reason'):
+        reason = str(value.get('reason'))
+    return {'value': None, 'numeric_value': None, 'source': 'unavailable', 'predicted': False, 'valid': False, 'available': False, 'confidence': 0.0, 'prediction_source': reason, 'prediction_fallback': False, 'reason': reason}
 
 def select_numeric_priority_difference(regions, before, now):
     before_snapshot = dict(before) if isinstance(before, dict) else {}
@@ -17471,25 +17820,25 @@ def select_numeric_priority_difference(regions, before, now):
     ordered = sorted((dict(region) for region in regions or [] if isinstance(region, dict) and region.get('enabled', True)), key=lambda region: (safe_int(region.get('priority'), 0), safe_float(region.get('created'), 0.0), str(region.get('id', ''))))
     for region in ordered:
         region_id = str(region.get('id', ''))
-        old_value = before_snapshot.get(region_id)
-        new_value = now_snapshot.get(region_id)
-        old_value = ensure_numeric_prediction_snapshot(old_value, new_value)
-        new_value = ensure_numeric_prediction_snapshot(new_value, old_value)
+        old_value = ensure_numeric_prediction_snapshot(before_snapshot.get(region_id))
+        new_value = ensure_numeric_prediction_snapshot(now_snapshot.get(region_id))
         before_snapshot[region_id] = old_value
         now_snapshot[region_id] = new_value
         old_number = numeric_snapshot_value(old_value)
         new_number = numeric_snapshot_value(new_value)
+        if old_number is None or new_number is None:
+            return {'status': 'priority_region_unavailable', 'region': region, 'region_id': region_id, 'priority': safe_int(region.get('priority'), 0), 'old_value': old_value, 'new_value': new_value, 'before': old_number, 'now': new_number, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': False, 'observation_valid': False, 'preference_applicable': False}
         if numeric_values_equal(old_value, new_value):
             continue
-        return {'status': 'difference_selected', 'region': region, 'region_id': region_id, 'priority': safe_int(region.get('priority'), 0), 'old_value': old_value, 'new_value': new_value, 'before': old_number, 'now': new_number, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot}
-    return {'status': 'all_equal', 'region': None, 'region_id': '', 'priority': None, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot}
+        return {'status': 'difference_selected', 'region': region, 'region_id': region_id, 'priority': safe_int(region.get('priority'), 0), 'old_value': old_value, 'new_value': new_value, 'before': old_number, 'now': new_number, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': True, 'observation_valid': True, 'preference_applicable': True}
+    return {'status': 'all_equal', 'region': None, 'region_id': '', 'priority': None, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': True, 'observation_valid': True, 'preference_applicable': False}
 
 def compare_numeric_snapshots_detailed(regions, before, now):
     selected = select_numeric_priority_difference(regions, before, now)
     if selected.get('status') != 'difference_selected':
-        return {'reward': 0.0, 'winning_region_id': '', 'status': str(selected.get('status', 'all_equal')), 'priority': selected.get('priority'), 'valid': True, 'observation_valid': True, 'preference_applicable': False}
+        return {'reward': 0.0, 'winning_region_id': '', 'status': str(selected.get('status', 'all_equal')), 'priority': selected.get('priority'), 'valid': bool(selected.get('valid', True)), 'observation_valid': bool(selected.get('observation_valid', True)), 'configuration_valid': True, 'preference_applicable': False, 'used_prediction': False}
     evaluation = evaluate_numeric_preference_detailed(selected['region'], selected['old_value'], selected['new_value'], selected['before_snapshot'], selected['now_snapshot'])
-    return {'reward': max(-1.0, min(1.0, safe_float(evaluation.get('reward'), 0.0))), 'winning_region_id': selected['region_id'], 'status': str(evaluation.get('status', 'utility_delta')), 'priority': selected['priority'], 'before': selected['before'], 'now': selected['now'], 'preference': str(evaluation.get('preference', '')), 'valid': bool(evaluation.get('valid')), 'observation_valid': bool(evaluation.get('observation_valid')), 'preference_applicable': bool(evaluation.get('preference_applicable')), 'used_prediction': bool(isinstance(selected.get('old_value'), dict) and selected['old_value'].get('predicted') or (isinstance(selected.get('new_value'), dict) and selected['new_value'].get('predicted'))), 'utility': evaluation}
+    return {'reward': max(-1.0, min(1.0, safe_float(evaluation.get('reward'), 0.0))), 'winning_region_id': selected['region_id'], 'status': str(evaluation.get('status', 'metric_delta')), 'priority': selected['priority'], 'before': selected['before'], 'now': selected['now'], 'preference': str(evaluation.get('preference', '')), 'valid': bool(evaluation.get('valid')), 'observation_valid': bool(evaluation.get('observation_valid')), 'configuration_valid': bool(evaluation.get('configuration_valid', True)), 'preference_applicable': bool(evaluation.get('preference_applicable')), 'used_prediction': bool(isinstance(selected.get('old_value'), dict) and selected['old_value'].get('predicted') or isinstance(selected.get('new_value'), dict) and selected['new_value'].get('predicted')), 'utility': evaluation}
 
 def reorder_numeric_regions(regions, source_index, target_index):
     values = list(regions or [])
@@ -17814,6 +18163,7 @@ class NumericRegionEditor:
         preference = normalize_numeric_preference(config.get('preference') or value.get('goal_relation') or DEFAULT_NUMERIC_PREFERENCE)
         config['preference'] = preference
         config['compare_region_id'] = str(config.get('compare_region_id', ''))
+        config['reward_scale'] = _numeric_reward_scale(config)
         value.update({'id': region_id, 'game_id': str(self.game['id']), 'priority': safe_int(value.get('priority'), len(getattr(self, 'regions', ())), 0), 'region_norm': _clamp_region_norm(value.get('region_norm')), 'region_type': 'number', 'number_format': str(value.get('number_format', 'auto')), 'goal_relation': preference, 'relation_config': config, 'enabled': 1})
         return value
 
@@ -17852,6 +18202,7 @@ class NumericRegionEditor:
         self.preference_var = tk.StringVar(value=NUMERIC_PREFERENCE_LABELS[DEFAULT_NUMERIC_PREFERENCE])
         self.compare_var = tk.StringVar()
         self.fixed_value_var = tk.StringVar()
+        self.reward_scale_var = tk.StringVar(value=str(NUMERIC_REWARD_DEFAULT_SCALE))
         self.opacity_var = tk.DoubleVar(value=50.0)
         self.color_text = tk.StringVar(value=NUMERIC_OVERLAY_DEFAULT_COLOR)
         ttk.Label(form, text='名称').grid(row=0, column=0, sticky='w')
@@ -17875,6 +18226,10 @@ class NumericRegionEditor:
         ttk.Label(form, text='透明度').grid(row=1, column=4, sticky='w', pady=(8, 0))
         self.opacity_scale = tk.Scale(form, from_=0, to=100, resolution=1, orient='horizontal', variable=self.opacity_var, showvalue=True, command=lambda value: self.apply_form(live=True), length=230)
         self.opacity_scale.grid(row=1, column=5, sticky='ew', padx=(6, 0), pady=(8, 0))
+        ttk.Label(form, text='奖励尺度').grid(row=2, column=0, sticky='w', pady=(8, 0))
+        self.reward_scale_entry = ttk.Entry(form, textvariable=self.reward_scale_var, width=22)
+        self.reward_scale_entry.grid(row=2, column=1, sticky='ew', padx=(6, 12), pady=(8, 0))
+        ttk.Label(form, text='改善量达到该值时奖励约为±0.76；必须大于0').grid(row=2, column=2, columnspan=3, sticky='w', pady=(8, 0))
         ttk.Button(form, text='应用编辑', command=self.apply_form).grid(row=2, column=5, sticky='e', pady=(8, 0))
         for column in (1, 3, 5):
             form.columnconfigure(column, weight=1)
@@ -17917,6 +18272,7 @@ class NumericRegionEditor:
             self.preference_var.set(NUMERIC_PREFERENCE_LABELS[DEFAULT_NUMERIC_PREFERENCE])
             self.compare_var.set('')
             self.fixed_value_var.set('')
+            self.reward_scale_var.set(str(NUMERIC_REWARD_DEFAULT_SCALE))
             self.color_text.set(NUMERIC_OVERLAY_DEFAULT_COLOR)
             self.opacity_var.set(50.0)
             self.compare_box.configure(values=(), state='disabled')
@@ -17926,6 +18282,7 @@ class NumericRegionEditor:
         relation = str(config.get('preference', region.get('goal_relation', DEFAULT_NUMERIC_PREFERENCE)))
         self.preference_var.set(NUMERIC_PREFERENCE_LABELS.get(relation, NUMERIC_PREFERENCE_LABELS[DEFAULT_NUMERIC_PREFERENCE]))
         self.fixed_value_var.set(str(config.get('fixed_value')) if finite_number(config.get('fixed_value')) else '')
+        self.reward_scale_var.set(str(_numeric_reward_scale(config)))
         self.color_text.set(_valid_overlay_color(config.get('overlay_color')))
         self.opacity_var.set(safe_float(config.get('overlay_opacity', NUMERIC_OVERLAY_DEFAULT_OPACITY), 0.5, 0.0, 1.0) * 100.0)
         options = []
@@ -18087,7 +18444,7 @@ class NumericRegionEditor:
     def new_region(self):
         index = len(self.regions) + 1
         offset = min(0.24, (index - 1) * 0.025)
-        region = self._normalize_region({'id': uuid.uuid4().hex, 'region_norm': [0.35 + offset, 0.42 + offset, 0.3, 0.16], 'priority': len(self.regions), 'goal_relation': DEFAULT_NUMERIC_PREFERENCE, 'relation_config': {'display_name': '数字区域' + str(index), 'overlay_color': NUMERIC_OVERLAY_DEFAULT_COLOR, 'overlay_opacity': NUMERIC_OVERLAY_DEFAULT_OPACITY, 'preference': DEFAULT_NUMERIC_PREFERENCE, 'compare_region_id': ''}})
+        region = self._normalize_region({'id': uuid.uuid4().hex, 'region_norm': [0.35 + offset, 0.42 + offset, 0.3, 0.16], 'priority': len(self.regions), 'goal_relation': DEFAULT_NUMERIC_PREFERENCE, 'relation_config': {'display_name': '数字区域' + str(index), 'overlay_color': NUMERIC_OVERLAY_DEFAULT_COLOR, 'overlay_opacity': NUMERIC_OVERLAY_DEFAULT_OPACITY, 'preference': DEFAULT_NUMERIC_PREFERENCE, 'compare_region_id': '', 'reward_scale': NUMERIC_REWARD_DEFAULT_SCALE}})
         self.regions.append(region)
         self.selected_id = region['id']
         self._refresh_tracking_template(region)
@@ -18160,6 +18517,10 @@ class NumericRegionEditor:
                 raise ValueError('与固定值比较时必须输入有效固定值')
         else:
             config.pop('fixed_value', None)
+        if finite_number(self.reward_scale_var.get()) and safe_float(self.reward_scale_var.get()) > 0.0:
+            config['reward_scale'] = max(NUMERIC_REWARD_MIN_SCALE, safe_float(self.reward_scale_var.get()))
+        elif not live:
+            raise ValueError('奖励尺度必须是大于0的数字')
         region['goal_relation'] = relation
         region['relation_config'] = config
         if not live:
@@ -18176,6 +18537,9 @@ class NumericRegionEditor:
             config['preference'] = relation
             if relation in NUMERIC_FIXED_VALUE_RELATIONS and (not finite_number(config.get('fixed_value'))):
                 raise ValueError(self.display_name(region) + ' 必须设置有效固定值')
+            if not finite_number(config.get('reward_scale')) or safe_float(config.get('reward_scale')) <= 0.0:
+                raise ValueError(self.display_name(region) + ' 的奖励尺度必须大于0')
+            config['reward_scale'] = max(NUMERIC_REWARD_MIN_SCALE, safe_float(config.get('reward_scale')))
             if relation in NUMERIC_COMPARISON_RELATIONS:
                 target_id = str(config.get('compare_region_id', ''))
                 if not target_id or target_id == str(region.get('id', '')) or target_id not in ids:
@@ -18397,7 +18761,7 @@ class AppUiService(AppServiceBase):
                 self.root.update_idletasks()
             except RECOVERABLE_ERRORS:
                 break
-            interruptible_wait(self.host.stop_event, 0.03)
+            interruptible_wait(self.stop_event, 0.03)
         previous_grab = None
         try:
             previous_grab = self.root.grab_current()
@@ -27453,7 +27817,7 @@ def detect_semantic_targets(frame, maximum=32, version='object_centric_v2'):
 class StructuredTemporalMemory:
 
     def __init__(self, maximum=STRUCTURED_MEMORY_LENGTH):
-        plan = RESOURCE_GOVERNOR.current_plan()
+        plan = RESOURCE_GOVERNOR.plans.ai
         self.maximum = max(32, min(128, int(max(maximum, plan.temporal_context_length))))
         self.lock = threading.RLock()
         self.memories = {}
@@ -31842,8 +32206,8 @@ def run_gui():
 def main(argv=None):
     multiprocessing.freeze_support()
     try:
-        validate_source_contracts_once()
         arguments = parse_cli(argv)
+        validate_source_contracts_once()
         result = dispatch_cli(arguments)
         if result is not None:
             return int(result)
