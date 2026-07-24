@@ -41,8 +41,8 @@ now越大越好；
 now越小越好；
 当now>before时：now-before越大越好；
 当now>before时：now-before越小越好；
-当before>now时：before-now越大越好；
-当before>now时：before-now越小越好；
+当now<before时：before-now越大越好；
+当now<before时：before-now越小越好；
 当now≠before时：|now-before|越大越好；
 当now≠before时：|now-before|越小越好；
 
