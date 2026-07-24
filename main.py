@@ -21,7 +21,6 @@ import gc
 import re
 import unicodedata
 import platform
-from typing import Protocol, runtime_checkable
 import tempfile
 import shutil
 import subprocess
@@ -29,6 +28,7 @@ import urllib.request
 import urllib.parse
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
 from collections import deque, Counter, defaultdict, OrderedDict
@@ -68,7 +68,7 @@ COARSE_LEN = COARSE_W * COARSE_H * FEATURE_CHANNELS
 SQUARED_DIFF = tuple(value * value for value in range(-255, 256))
 FEATURE_ALGORITHM_VERSION = 4
 ACTION_ALGORITHM_VERSION = 6
-DATABASE_SCHEMA_VERSION = 15
+DATABASE_SCHEMA_VERSION = 16
 MODEL_SCHEMA_VERSION = 5
 POLICY_MODEL_SCHEMA_VERSION = 7
 DEFAULT_POLICY_SCORE_WEIGHTS = {"bc": 60.0, "q": 45.0, "success": 35.0, "risk": 45.0, "ood": 55.0}
@@ -182,7 +182,7 @@ MODE_STARTING = "STARTING"
 MODE_RUNNING = "RUNNING"
 MODE_STOPPING = "STOPPING"
 MODE_STATES = {MODE_IDLE, MODE_STARTING, MODE_RUNNING, MODE_STOPPING}
-AI_WORKER_PROTOCOL_VERSION = 6
+AI_WORKER_PROTOCOL_VERSION = 7
 RUNTIME_INSTALL_PROTOCOL_VERSION = 2
 REVIEW_PROCESS_PROTOCOL_VERSION = 2
 
@@ -203,8 +203,6 @@ class StorageError(AppError):
     pass
 
 
-class RuntimeInstallError(AppError):
-    pass
 
 
 class ModelValidationError(AppError):
@@ -738,27 +736,6 @@ class CapturedFrame:
         }
 
 
-class UserMessageCatalog:
-    @staticmethod
-    def data_summary(game_name, stats, prototype_count):
-        return (
-            f"游戏：{game_name}\n"
-            f"有效样本：{safe_int(stats.get('valid'), 0)}\n"
-            f"异常行：{safe_int(stats.get('invalid'), 0)}\n"
-            f"数据大小：{safe_float(stats.get('bytes'), 0.0) / 1024:.1f} KB\n"
-            f"模型原型：{safe_int(prototype_count, 0)}"
-        )
-
-    @staticmethod
-    def compaction(result):
-        return (
-            "数据整理完成：按动作种类、按钮、规范动作与视觉多样性保留"
-            f"{safe_int(result.get('kept'), 0)}，移除{safe_int(result.get('removed'), 0)}"
-        )
-
-    @staticmethod
-    def backup_created(path):
-        return f"数据库、WAL与SHM恢复备份已保存到：{path}"
 
 
 MODE_LABELS = {ModeId.COLLECT: "人", ModeId.UPGRADE: "升级", ModeId.AI: "AI", ModeId.NUMERIC: "数"}
@@ -1366,9 +1343,12 @@ class WindowsGpuTelemetry:
             return {}
 
     def _nvml(self, pid):
+        pynvml = None
         handled = RECOVERABLE_ERRORS
         try:
-            import pynvml
+            import pynvml as pynvml_module
+
+            pynvml = pynvml_module
             handled = handled + (getattr(pynvml, "NVMLError", RuntimeError),)
             pynvml.nvmlInit()
             best = None
@@ -1411,10 +1391,11 @@ class WindowsGpuTelemetry:
         except handled:
             return {}
         finally:
-            try:
-                pynvml.nvmlShutdown()
-            except handled:
-                pass
+            if pynvml is not None:
+                try:
+                    pynvml.nvmlShutdown()
+                except handled:
+                    pass
 
     def _nvidia_smi(self, pid):
         try:
@@ -2709,24 +2690,6 @@ def _hardware_health_path(base):
     return Path(base) / "audit" / "hardware_profile_health.json"
 
 
-def mark_hardware_rebenchmark_required(base, reason):
-    path = _hardware_health_path(base)
-    try:
-        value = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        value = {}
-    reasons = [str(item) for item in value.get("reasons", []) if str(item)]
-    reasons.append(str(reason))
-    value.update(
-        {
-            "schema_version": 1,
-            "rebenchmark_required": True,
-            "reasons": list(dict.fromkeys(reasons))[-16:],
-            "updated": time.time(),
-        }
-    )
-    _atomic_json_write(path, value)
-    return True
 
 
 def update_hardware_profile_health(base, latency_ms=None, gpu_oom=False, driver_reset=False, manual=False):
@@ -5005,36 +4968,6 @@ class StrictInputIsolation:
         return not self.tripped() and self.stop_event is not None and not self.stop_event.is_set()
 
 
-class PreviewCoordinateMapper:
-    canvas_width = ASK_CANVAS_W
-    canvas_height = ASK_CANVAS_H
-    preview_width = ASK_PREVIEW_W
-    preview_height = ASK_PREVIEW_H
-    offset_x = ASK_PREVIEW_X
-    offset_y = ASK_PREVIEW_Y
-
-    @classmethod
-    def to_normalized(cls, x, y):
-        px = float(x)
-        py = float(y)
-        if (
-            px < cls.offset_x
-            or py < cls.offset_y
-            or px > cls.offset_x + cls.preview_width - 1
-            or py > cls.offset_y + cls.preview_height - 1
-        ):
-            return None
-        return [
-            (px - cls.offset_x) / max(1, cls.preview_width - 1),
-            (py - cls.offset_y) / max(1, cls.preview_height - 1),
-        ]
-
-    @classmethod
-    def to_canvas(cls, point):
-        return [
-            cls.offset_x + max(0.0, min(1.0, float(point[0]))) * (cls.preview_width - 1),
-            cls.offset_y + max(0.0, min(1.0, float(point[1]))) * (cls.preview_height - 1),
-        ]
 
 
 class ManagedShutdownResource:
@@ -5258,41 +5191,6 @@ def fit_window(widget, desired_width, desired_height, minimum_width=480, minimum
     return width, height
 
 
-def scrollable_frame(window, padding=0, horizontal=False):
-    shell = ttk.Frame(window)
-    shell.pack(fill="both", expand=True)
-    canvas = tk.Canvas(shell, highlightthickness=0, borderwidth=0)
-    vertical = ttk.Scrollbar(shell, orient="vertical", command=canvas.yview)
-    horizontal_bar = ttk.Scrollbar(shell, orient="horizontal", command=canvas.xview) if horizontal else None
-    canvas.configure(yscrollcommand=vertical.set)
-    if horizontal_bar is not None:
-        canvas.configure(xscrollcommand=horizontal_bar.set)
-    canvas.grid(row=0, column=0, sticky="nsew")
-    vertical.grid(row=0, column=1, sticky="ns")
-    if horizontal_bar is not None:
-        horizontal_bar.grid(row=1, column=0, sticky="ew")
-    shell.rowconfigure(0, weight=1)
-    shell.columnconfigure(0, weight=1)
-    inner = ttk.Frame(canvas, padding=padding)
-    item = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-    def update_region(event=None):
-        canvas.configure(scrollregion=canvas.bbox("all"))
-
-    def update_width(event):
-        if horizontal_bar is None:
-            canvas.itemconfigure(item, width=max(1, event.width))
-
-    inner.bind("<Configure>", update_region)
-    canvas.bind("<Configure>", update_width)
-
-    def wheel(event):
-        if event.delta:
-            canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-
-    canvas.bind("<MouseWheel>", wheel)
-    inner._ugai_canvas = canvas
-    return inner
 
 
 def hamming_distance_hex(first, second):
@@ -5720,23 +5618,6 @@ def path_length(path):
     return total
 
 
-def direction_changes(path):
-    if len(path) < 3:
-        return 0
-    changes = 0
-    previous = None
-    for a, b in zip(path, path[1:]):
-        dx = float(b[0]) - float(a[0])
-        dy = float(b[1]) - float(a[1])
-        if abs(dx) + abs(dy) < 0.002:
-            continue
-        angle = math.atan2(dy, dx)
-        if previous is not None:
-            delta = abs((angle - previous + math.pi) % (2 * math.pi) - math.pi)
-            if delta > math.radians(35):
-                changes += 1
-        previous = angle
-    return changes
 
 
 def resample_path(path, count=16):
@@ -6274,29 +6155,14 @@ class ObservationState:
         }
 
 
-@runtime_checkable
-class ObservationEncoderProtocol(Protocol):
-    def encode(self, frame, history=None, task=None): ...
 
 
-@runtime_checkable
-class TaskPlannerProtocol(Protocol):
-    def propose_subgoal(self, state, task): ...
 
 
-@runtime_checkable
-class CandidatePolicyProtocol(Protocol):
-    def rank(self, observation, goal, memory, candidates): ...
 
 
-@runtime_checkable
-class WorldModelProtocol(Protocol):
-    def predict(self, state, skill, horizon=5): ...
 
 
-@runtime_checkable
-class SafetyShieldProtocol(Protocol):
-    def authorize(self, proposed_action, context): ...
 class ObservationEncoder:
     def encode(self, frame, history=None, task=None):
         raise NotImplementedError
@@ -6552,47 +6418,6 @@ class TaskPlanner:
         raise NotImplementedError
 
 
-class RuleBasedTaskPlanner(TaskPlanner):
-    def propose_subgoal(self, state, task):
-        observation = state if isinstance(state, ObservationState) else None
-        definition = task if isinstance(task, TaskDefinition) else TaskDefinition.from_mapping(task or {})
-        internal = observation.internal_state if observation is not None else {}
-        classes = {slot.object_class for slot in observation.objects} if observation is not None else set()
-        if str(internal.get("terminal")) == "failure" or safe_int(internal.get("failure_count", 0), 0) > 0:
-            return Subgoal(
-                "recover_after_failure",
-                "等待结算并恢复到可操作的新回合",
-                {"terminal_not": "failure"},
-                ("wait_for_state", "restart_round", "navigate_back"),
-                100,
-                0.9,
-            )
-        if classes.intersection({"cancel_button", "close_button"}):
-            return Subgoal(
-                "close_blocking_popup",
-                "关闭遮挡当前任务的弹窗",
-                {"object_absent": "cancel_button"},
-                ("close_popup", "click_semantic_target"),
-                90,
-                0.8,
-            )
-        if classes.intersection({"start_button", "restart_button"}):
-            return Subgoal(
-                "enter_or_restart_level",
-                "进入或重新开始当前关卡",
-                {"object_absent": "start_button"},
-                ("start_or_continue", "restart_round"),
-                80,
-                0.75,
-            )
-        return Subgoal(
-            "advance_goal",
-            definition.goal or "推进当前任务",
-            {},
-            ("click_semantic_target", "drag_object_to_target", "scroll_until_target", "wait_for_state"),
-            50,
-            0.55,
-        )
 
 
 class SkillPolicy:
@@ -8486,24 +8311,6 @@ def sample_state_distance(first, second):
     return visual * (1.0 + 0.12 * objects + 0.08 * task_gap)
 
 
-def runtime_feature_distance(feature, prototype):
-    if not feature_valid(feature) or not isinstance(prototype, dict):
-        return float("inf")
-    first = memoryview(feature_bytes(feature))
-    second = prototype.get("feature_view")
-    if not isinstance(second, memoryview) or len(second) != FEATURE_LEN:
-        if not feature_valid(prototype.get("f")):
-            return float("inf")
-        second = memoryview(feature_bytes(prototype["f"]))
-    offsets = prototype.get("channel_offsets", (0, PIXELS, PIXELS * 2, PIXELS * 3, PIXELS * 4))
-    weights = FEATURE_DISTANCE_WEIGHTS
-    total = 0.0
-    for offset, weight in zip(offsets, weights):
-        value = 0
-        for index in range(int(offset), int(offset) + PIXELS):
-            value += SQUARED_DIFF[int(first[index]) - int(second[index]) + 255]
-        total += weight * value / PIXELS
-    return total
 
 
 def upgrade_feature(feature, version):
@@ -8609,8 +8416,6 @@ def runtime_site_packages(base, family=None):
     return runtime_tree_path(base, family) / "python" / "Lib" / "site-packages"
 
 
-def runtime_manifest_path(base, family=None):
-    return runtime_tree_path(base, family) / "runtime_manifest.json"
 
 
 def write_runtime_active_state(base, selected_family, reason="selection"):
@@ -9907,17 +9712,6 @@ def make_data_directory(base, path):
     return target
 
 
-def open_data_file(base, path, mode="r", *args, **kwargs):
-    target = data_path(base, path)
-    if any(value in str(mode) for value in "wax+"):
-        target.parent.mkdir(parents=True, exist_ok=True)
-    stream = target.open(mode, *args, **kwargs)
-    try:
-        verify_stream_within_root(stream, base)
-    except RECOVERABLE_ERRORS:
-        stream.close()
-        raise
-    return stream
 
 
 def _flush_stream_to_disk(stream):
@@ -10021,25 +9815,8 @@ def atomic_write_text(base, path, data, encoding="utf-8"):
     return atomic_write_bytes(base, path, str(data).encode(encoding))
 
 
-def replace_data_path(base, source, destination):
-    first = data_path(base, source)
-    second = data_path(base, destination)
-    second.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(first, second)
-    return second
 
 
-def remove_data_path(base, path, missing_ok=True):
-    target = data_path(base, path)
-    try:
-        if target.is_dir():
-            shutil.rmtree(target)
-        else:
-            target.unlink()
-    except FileNotFoundError:
-        if not missing_ok:
-            raise
-    return target
 
 
 
@@ -13772,13 +13549,6 @@ class ModeSession:
 
 
 
-def _valid_norm_rect(value):
-    if not isinstance(value, (list, tuple)) or len(value) < 4:
-        return None
-    norm = [round(max(0.0, min(1.0, safe_float(item))), 8) for item in value[:4]]
-    if norm[2] <= 0.0 or norm[3] <= 0.0 or norm[0] + norm[2] > 1.000001 or norm[1] + norm[3] > 1.000001:
-        return None
-    return norm
 
 
 
@@ -20669,8 +20439,6 @@ class RecoveryRepository:
         return self.store.restore_model_backup(gid)
 
 
-class RecoveryService(RecoveryRepository):
-    pass
 
 
 class MigrationService:
@@ -20681,55 +20449,10 @@ class MigrationService:
         return self.store._migrate_legacy()
 
 
-@dataclass
-class WindowDialogState:
-    windows: list = field(default_factory=list)
-    selected: object = None
-    preview: object = None
-    generation: int = 0
-    closed: bool = False
-    errors: list = field(default_factory=list)
-
-    def as_dict(self):
-        return {
-            "windows": self.windows,
-            "selected": self.selected,
-            "preview": self.preview,
-            "generation": self.generation,
-            "closed": self.closed,
-            "errors": self.errors,
-        }
 
 
-class WindowPreviewService:
-    def __init__(self, api):
-        self.api = api
-
-    def capture(self, target):
-        validate_packet("window_identity", target)
-        return self.api.capture_frame(target, False) if hasattr(self.api, "capture_frame") else None
 
 
-class WindowRuleValidator:
-    def validate(self, identity, title_mode="none", title_value=""):
-        value = validate_packet("window_identity", identity)
-        mode = str(title_mode)
-        if mode not in TITLE_RULE_MODES:
-            raise ValueError("窗口标题规则无效")
-        title = str(value.get("title", ""))
-        expected = str(title_value)
-        valid = (
-            mode == "none"
-            or mode == "contains"
-            and expected in title
-            or mode == "prefix"
-            and title.startswith(expected)
-            or mode == "exact"
-            and title == expected
-        )
-        if not valid:
-            raise ValueError("窗口标题不符合规则")
-        return value
 
 
 class DataStoreLifecycleMixin:
@@ -20856,6 +20579,15 @@ class DataStoreLifecycleMixin:
             "CREATE TABLE IF NOT EXISTS games(id TEXT PRIMARY KEY,name TEXT NOT NULL COLLATE NOCASE UNIQUE,created REAL NOT NULL,needs_review INTEGER NOT NULL DEFAULT 0,last_review REAL)"
         )
         self.db.execute(
+            "CREATE TABLE IF NOT EXISTS game_assets("
+            "game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,"
+            "relative_path TEXT NOT NULL,asset_type TEXT NOT NULL,sha256 TEXT NOT NULL DEFAULT '',"
+            "created REAL NOT NULL,PRIMARY KEY(game_id,relative_path))"
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_game_assets_path ON game_assets(relative_path,game_id)"
+        )
+        self.db.execute(
             "CREATE TABLE IF NOT EXISTS learning_sessions("
             "game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,"
             "session_id TEXT NOT NULL,status TEXT NOT NULL "
@@ -20942,7 +20674,7 @@ class DataStoreLifecycleMixin:
             "CREATE INDEX IF NOT EXISTS idx_game_tasks_game_enabled ON game_tasks(game_id,enabled,updated DESC)"
         )
         self.db.execute(
-            "CREATE TABLE IF NOT EXISTS corrupt_rows(id INTEGER PRIMARY KEY AUTOINCREMENT,source_table TEXT NOT NULL,source_id INTEGER NOT NULL,game_id TEXT NOT NULL,created REAL NOT NULL,reason TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(source_table,source_id))"
+            "CREATE TABLE IF NOT EXISTS corrupt_rows(id INTEGER PRIMARY KEY AUTOINCREMENT,source_table TEXT NOT NULL,source_id INTEGER NOT NULL,game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,created REAL NOT NULL,reason TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(source_table,source_id))"
         )
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_capture_calibrations_saved ON capture_calibrations(saved DESC)")
         self.db.execute(
@@ -21069,7 +20801,7 @@ class DataStoreLifecycleMixin:
                             "CREATE TABLE IF NOT EXISTS game_profiles(game_id TEXT PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,updated REAL NOT NULL,payload TEXT NOT NULL,checksum TEXT NOT NULL)"
                         )
                         self.db.execute(
-                            "CREATE TABLE IF NOT EXISTS corrupt_rows(id INTEGER PRIMARY KEY AUTOINCREMENT,source_table TEXT NOT NULL,source_id INTEGER NOT NULL,game_id TEXT NOT NULL,created REAL NOT NULL,reason TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(source_table,source_id))"
+                            "CREATE TABLE IF NOT EXISTS corrupt_rows(id INTEGER PRIMARY KEY AUTOINCREMENT,source_table TEXT NOT NULL,source_id INTEGER NOT NULL,game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,created REAL NOT NULL,reason TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(source_table,source_id))"
                         )
                         version = 6
                     elif version == 6:
@@ -21255,6 +20987,25 @@ class DataStoreLifecycleMixin:
                             "CREATE INDEX IF NOT EXISTS idx_ocr_regions_game_enabled ON ocr_regions(game_id,enabled,priority ASC,created ASC)"
                         )
                         version = 15
+                    elif version == 15:
+                        self._create_latest_schema()
+                        self.db.execute("DROP TABLE IF EXISTS corrupt_rows_v16")
+                        self.db.execute(
+                            "CREATE TABLE corrupt_rows_v16(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                            "source_table TEXT NOT NULL,source_id INTEGER NOT NULL,"
+                            "game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,"
+                            "created REAL NOT NULL,reason TEXT NOT NULL,payload TEXT NOT NULL,"
+                            "UNIQUE(source_table,source_id))"
+                        )
+                        if self._table_exists("corrupt_rows"):
+                            self.db.execute(
+                                "INSERT OR IGNORE INTO corrupt_rows_v16(id,source_table,source_id,game_id,created,reason,payload) "
+                                "SELECT c.id,c.source_table,c.source_id,c.game_id,c.created,c.reason,c.payload "
+                                "FROM corrupt_rows c JOIN games g ON g.id=c.game_id"
+                            )
+                            self.db.execute("DROP TABLE corrupt_rows")
+                        self.db.execute("ALTER TABLE corrupt_rows_v16 RENAME TO corrupt_rows")
+                        version = 16
                     else:
                         raise RuntimeError("没有从数据库版本" + str(version) + "开始的迁移路径")
                     self.db.execute(
@@ -21992,77 +21743,19 @@ class DataStoreGameTaskMixin:
         return [(game_id, self._decode_model_asset_document(payload)) for game_id, payload in rows]
 
     def _game_deletion_descriptor(self, game_ids):
-        deleting = {str(value) for value in game_ids if str(value)}
-        if not deleting:
-            return {"game_ids": set(), "names": set(), "region_ids": set(), "opaque_tokens": set(), "path_tokens": set()}
-        placeholders = ",".join("?" for _ in deleting)
-        with self.lock:
-            game_rows = list(
-                iter_rows(
-                    self.db.execute(
-                        "SELECT id,name FROM games WHERE id IN (" + placeholders + ")",
-                        tuple(sorted(deleting)),
-                    ),
-                    128,
-                )
-            )
-            region_ids = {
-                str(row[0])
-                for row in self.db.execute(
-                    "SELECT id FROM ocr_regions WHERE game_id IN (" + placeholders + ")",
-                    tuple(sorted(deleting)),
-                )
-            } if self._table_exists("ocr_regions") else set()
-        names = {str(row["name"]) for row in game_rows if str(row["name"])}
-        opaque = set(deleting) | region_ids
-        path_tokens = set()
-        for game_id in deleting:
+        game_ids = {str(value) for value in game_ids if str(value)}
+        tokens = {}
+        for game_id in game_ids:
             digest = hashlib.sha256(game_id.encode("utf-8", "replace")).hexdigest()
-            opaque.update({digest, digest[:16], digest[:24], digest[:32]})
-            path_tokens.update({game_id, digest, digest[:16], digest[:24], digest[:32]})
-            normalized = normalized_identifier(game_id, "game", 96)
-            if len(normalized) >= 8:
-                opaque.add(normalized)
-                path_tokens.add(normalized)
-        path_tokens.update(names)
-        path_tokens.update(region_ids)
-        return {
-            "game_ids": deleting,
-            "names": names,
-            "region_ids": region_ids,
-            "opaque_tokens": {str(value).casefold() for value in opaque if len(str(value)) >= 8},
-            "path_tokens": {str(value).casefold() for value in path_tokens if str(value)},
-        }
-
-    def _game_asset_tokens(self, descriptor):
-        value = descriptor if isinstance(descriptor, dict) else self._game_deletion_descriptor(descriptor)
-        return set(value.get("path_tokens", set()))
-
-    @staticmethod
-    def _payload_contains_deletion_token(payload, descriptor):
-        if payload is None:
-            return False
-        text = str(payload)
-        folded = text.casefold()
-        if any(token in folded for token in descriptor.get("opaque_tokens", ())):
-            return True
-        stripped = folded.strip().strip("\"'")
-        for name in descriptor.get("names", ()):
-            token = str(name).casefold()
-            if not token:
-                continue
-            if stripped == token:
-                return True
-            quoted = json.dumps(str(name), ensure_ascii=False).casefold()
-            if quoted in folded:
-                return True
-            if re.search(r"(?<![\w])" + re.escape(token) + r"(?![\w])", folded, re.UNICODE):
-                return True
-        return False
+            tokens[game_id] = {game_id.casefold(), digest.casefold(), digest[:24].casefold(), digest[:16].casefold()}
+        return {"game_ids": game_ids, "tokens": tokens}
 
     def _safe_asset_path(self, relative):
+        path = Path(str(relative))
+        if path.is_absolute() or not path.parts or ".." in path.parts:
+            raise RuntimeError("游戏资产路径无效")
         base = self.base.resolve()
-        candidate = (base / Path(relative)).resolve()
+        candidate = (base / path).resolve()
         if not candidate.is_relative_to(base) or candidate == base:
             raise RuntimeError("游戏资产路径超出用户确认目录")
         if candidate in {self.db_path.resolve(), (self.base / ".ugai.lock").resolve()}:
@@ -22070,244 +21763,127 @@ class DataStoreGameTaskMixin:
         reject_reparse_points(base, candidate)
         return candidate
 
-    def _managed_payload_roots(self):
-        roots = []
-        for name in ("backups", "quarantine", "audit", "models", "cache", "temp"):
-            candidate = self.base / name
-            if candidate.exists():
-                roots.append(candidate)
-        roots.extend(path for path in self.base.glob("recovery_*") if path.exists())
-        return roots
-
-    def _backup_contains_deleted_game(self, path, descriptor):
-        candidate = Path(path)
-        if candidate.suffix.casefold() not in {".db", ".sqlite", ".sqlite3"}:
-            return False
-        try:
-            connection = sqlite3.connect(
-                "file:" + urllib.parse.quote(candidate.resolve().as_posix(), safe="/:") + "?mode=ro",
-                uri=True,
-                timeout=1.0,
-            )
+    def _register_game_asset_record(self, game_id, relative_path, asset_type, checksum=""):
+        relative = Path(str(relative_path))
+        candidate = self._safe_asset_path(relative)
+        normalized = candidate.relative_to(self.base.resolve()).as_posix()
+        digest = str(checksum or "")
+        if candidate.is_file() and not digest:
             try:
-                tables = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                if "games" in tables:
-                    for game_id, name in connection.execute("SELECT id,name FROM games"):
-                        if str(game_id) in descriptor.get("game_ids", set()) or str(name) in descriptor.get("names", set()):
-                            return True
-                for table in ("config_backups", "corrupt_rows"):
-                    if table not in tables:
-                        continue
-                    columns = [str(row[1]) for row in connection.execute("PRAGMA table_info(" + table + ")")]
-                    text_columns = [name for name in columns if name in {"payload", "reason", "game_id"}]
-                    if not text_columns:
-                        continue
-                    for row in connection.execute("SELECT " + ",".join(text_columns) + " FROM " + table):
-                        if any(self._payload_contains_deletion_token(value, descriptor) for value in row):
-                            return True
-            finally:
-                connection.close()
-        except RECOVERABLE_ERRORS:
-            return False
-        return False
-
-    @staticmethod
-    def _managed_game_asset_relative_path(relative):
-        path = Path(relative)
-        if path.is_absolute() or not path.parts or ".." in path.parts:
-            return False
-        first = path.parts[0].casefold()
-        if first in {"models", "cache", "temp", "audit", "backups", "quarantine"}:
-            return True
-        if first.startswith("recovery_"):
-            return True
-        return False
-
-    @staticmethod
-    def _decode_asset_reference_value(value):
-        candidates = []
-        if isinstance(value, str):
-            candidates.append(value)
-        elif isinstance(value, (bytes, bytearray, memoryview)):
-            raw = bytes(value)
-            try:
-                candidates.append(raw.decode("utf-8"))
-            except UnicodeDecodeError:
-                pass
-            try:
-                candidates.append(bounded_decompress(raw, 64 * 1024 * 1024).decode("utf-8"))
-            except (ValueError, zlib.error, UnicodeError, MemoryError) as error:
-                record_cleanup_error("ASSET_REFERENCE_DECODE_FAILED", error)
-        for text in candidates:
-            try:
-                parsed = json.loads(text)
+                digest = sha256_file(candidate, MODEL_MAX_BYTES)
             except RECOVERABLE_ERRORS:
-                continue
-            if isinstance(parsed, (dict, list, tuple)):
-                return parsed
-        return None
+                digest = ""
+        self.db.execute(
+            "INSERT INTO game_assets(game_id,relative_path,asset_type,sha256,created) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(game_id,relative_path) DO UPDATE SET asset_type=excluded.asset_type,"
+            "sha256=excluded.sha256,created=excluded.created",
+            (str(game_id), normalized, str(asset_type or "managed"), digest, time.time()),
+        )
+        return normalized
 
-    def _database_asset_reference_graph(self, descriptor):
-        deleting = set(descriptor.get("game_ids", set()))
-        target = set()
-        retained = set()
-        tables = [
-            str(row[0])
-            for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-            if str(row[0]) not in {"models", "model_backups"}
-        ]
-        for table in tables:
-            columns = list(self.db.execute("PRAGMA table_info(" + table + ")"))
-            column_names = [str(row[1]) for row in columns]
-            value_columns = [
-                str(row[1])
-                for row in columns
-                if any(token in str(row[2]).upper() for token in ("TEXT", "CHAR", "CLOB", "BLOB"))
-            ]
-            if not value_columns:
+    def register_game_asset(self, game_id, relative_path, asset_type="managed", checksum=""):
+        game_token = str(game_id)
+        with self.lock, self.db:
+            if not self.db.execute("SELECT 1 FROM games WHERE id=?", (game_token,)).fetchone():
+                raise StorageError("游戏不存在，无法登记资产")
+            return self._register_game_asset_record(game_token, relative_path, asset_type, checksum)
+
+    def _synchronize_game_asset_registry(self, game_ids):
+        targets = {str(value) for value in game_ids if str(value)}
+        if not targets:
+            return 0
+        exact = defaultdict(dict)
+        documents = self._model_asset_documents()
+        for game_id, document in documents:
+            if game_id not in targets or not isinstance(document, dict):
                 continue
-            selected = (["game_id"] if "game_id" in column_names else []) + value_columns
-            selected = list(dict.fromkeys(selected))
-            try:
-                cursor = self.db.execute("SELECT " + ",".join(selected) + " FROM " + table)
-            except sqlite3.Error:
-                continue
-            for row in cursor:
-                row_target = "game_id" in row.keys() and str(row["game_id"]) in deleting
-                if not row_target:
-                    row_target = any(self._payload_contains_deletion_token(row[column], descriptor) for column in value_columns)
-                paths = set()
-                for column in value_columns:
-                    parsed = self._decode_asset_reference_value(row[column])
-                    if parsed is not None:
-                        paths.update(self._collect_relative_paths_from_value(parsed))
-                    elif any(token in column.casefold() for token in ("path", "file", "attachment", "replay")):
-                        paths.update(self._collect_relative_paths_from_value({column: row[column]}))
-                paths = {path for path in paths if self._managed_game_asset_relative_path(path)}
-                if row_target:
-                    target.update(paths)
-                else:
-                    retained.update(paths)
-        return target - retained
+            tensor = document.get("tensor_bundle") if isinstance(document.get("tensor_bundle"), dict) else {}
+            relative = str(tensor.get("relative_path", ""))
+            if relative:
+                exact[game_id][relative] = ("model_tensor", str(tensor.get("sha256", "")))
+        placeholders = ",".join("?" for _ in targets)
+        with self.lock:
+            if self._table_exists("vision_models"):
+                for row in self.db.execute(
+                    "SELECT game_id,relative_path,checksum FROM vision_models WHERE game_id IN (" + placeholders + ")",
+                    tuple(sorted(targets)),
+                ):
+                    relative = str(row["relative_path"] or "")
+                    if relative:
+                        exact[str(row["game_id"])][relative] = ("vision_model", str(row["checksum"] or ""))
+                        exact[str(row["game_id"])][relative + ".json"] = ("vision_model_metadata", "")
+        for game_id in targets:
+            digest = hashlib.sha256(game_id.encode("utf-8", "replace")).hexdigest()
+            exact[game_id][(Path("games") / game_id).as_posix()] = ("game_root", "")
+            exact[game_id][(Path("models") / "replays" / digest[:24]).as_posix()] = ("replay_bundle", "")
+            exact[game_id][online_acceptance_relative_path(game_id).as_posix()] = ("online_acceptance", "")
+            exact[game_id][(Path("models") / "vision" / "adapters" / "games" / (digest + ".json")).as_posix()] = ("vision_adapter", "")
+            exact[game_id][(Path("models") / "task_graph" / (digest[:16] + ".json")).as_posix()] = ("task_graph", "")
+            exact[game_id][(Path("audit") / "corrective_learning" / ("pending_" + digest[:16] + ".json")).as_posix()] = ("corrective_pending", "")
+            exact[game_id][(Path("audit") / "corrective_learning" / ("history_" + digest[:16] + ".jsonl")).as_posix()] = ("corrective_history", "")
+            for tier in ("tiny", "base", "large"):
+                for suffix in (".safetensors", ".builtin.json"):
+                    relative = (Path("models") / "vision" / (digest + "." + tier + suffix)).as_posix()
+                    exact[game_id][relative] = ("vision_model", "")
+                    exact[game_id][relative + ".json"] = ("vision_model_metadata", "")
+        registered = 0
+        with self.lock, self.db:
+            for game_id, paths in exact.items():
+                if not self.db.execute("SELECT 1 FROM games WHERE id=?", (game_id,)).fetchone():
+                    continue
+                for relative, (asset_type, checksum) in paths.items():
+                    try:
+                        candidate = self._safe_asset_path(relative)
+                    except RECOVERABLE_ERRORS as error:
+                        self.logger.write("GAME_ASSET_PATH_REJECTED", error, game_id=game_id, details={"path": relative})
+                        continue
+                    if candidate.exists():
+                        self._register_game_asset_record(game_id, relative, asset_type, checksum)
+                        registered += 1
+        return registered
 
     def _collect_game_asset_paths(self, descriptor):
-        value = descriptor if isinstance(descriptor, dict) else self._game_deletion_descriptor(descriptor)
-        deleting = set(value.get("game_ids", set()))
-        tokens = self._game_asset_tokens(value)
-        documents = self._model_asset_documents()
-        other_tensor_paths = set()
-        target_tensor_paths = set()
-        paths = set(self._database_asset_reference_graph(value))
-        for game_id, document in documents:
-            document_paths = self._collect_relative_paths_from_value(document)
-            tensor = document.get("tensor_bundle") if isinstance(document.get("tensor_bundle"), dict) else {}
-            tensor_path = str(tensor.get("relative_path", ""))
-            if tensor_path:
-                normalized_tensor = Path(tensor_path)
-                if game_id in deleting:
-                    target_tensor_paths.add(normalized_tensor)
-                else:
-                    other_tensor_paths.add(normalized_tensor)
-            if game_id in deleting:
-                paths.update(document_paths)
+        deleting = set((descriptor if isinstance(descriptor, dict) else self._game_deletion_descriptor(descriptor)).get("game_ids", set()))
+        if not deleting:
+            return []
+        self._synchronize_game_asset_registry(deleting)
+        placeholders = ",".join("?" for _ in deleting)
         with self.lock:
-            if self._table_exists("vision_models") and deleting:
-                placeholders = ",".join("?" for _ in deleting)
-                for row in iter_rows(
-                    self.db.execute(
-                        "SELECT game_id,relative_path FROM vision_models WHERE game_id IN (" + placeholders + ")",
-                        tuple(sorted(deleting)),
-                    ),
-                    64,
-                ):
-                    relative = Path(str(row["relative_path"]))
-                    paths.add(relative)
-                    paths.add(Path(str(relative) + ".json"))
-            for table, column in (
-                ("game_profiles", "payload"),
-                ("game_tasks", "payload"),
-                ("ocr_regions", "relation_config"),
-                ("ocr_observations", "semantic_event"),
-            ):
-                if not deleting or not self._table_exists(table):
-                    continue
-                placeholders = ",".join("?" for _ in deleting)
-                query = "SELECT game_id," + column + " AS payload FROM " + table + " WHERE game_id IN (" + placeholders + ")"
-                for row in iter_rows(self.db.execute(query, tuple(sorted(deleting))), 128):
-                    try:
-                        parsed = json.loads(str(row["payload"]))
-                    except RECOVERABLE_ERRORS:
-                        continue
-                    paths.update(self._collect_relative_paths_from_value(parsed))
-        paths.difference_update(other_tensor_paths)
-        paths.update(target_tensor_paths - other_tensor_paths)
-        for game_id in deleting:
-            digest = hashlib.sha256(game_id.encode("utf-8", "replace")).hexdigest()
-            paths.add(Path("models") / "replays" / digest[:24])
-            paths.add(online_acceptance_relative_path(game_id))
-            paths.add(Path("models") / "vision" / "adapters" / "games" / (digest + ".json"))
-            paths.add(Path("models") / "task_graph" / (digest[:16] + ".json"))
-            paths.add(Path("audit") / "corrective_learning" / ("pending_" + digest[:16] + ".json"))
-            paths.add(Path("audit") / "corrective_learning" / ("history_" + digest[:16] + ".jsonl"))
-            vision_root = self.base / "models" / "vision"
-            if vision_root.is_dir():
-                for candidate in vision_root.glob(digest + ".*"):
-                    try:
-                        paths.add(candidate.relative_to(self.base))
-                    except ValueError:
-                        pass
-        for managed_root in self._managed_payload_roots():
-            if managed_root.is_file():
-                candidates = [managed_root]
-            else:
-                candidates = [managed_root]
-                candidates.extend(path for path in managed_root.rglob("*") if not is_reparse_point(path))
-            for candidate in candidates:
-                try:
-                    relative = candidate.relative_to(self.base)
-                except ValueError:
-                    continue
-                folded_path = relative.as_posix().casefold()
-                if any(token in folded_path for token in tokens):
-                    paths.add(relative)
-                    continue
-                if candidate.is_dir():
-                    continue
-                if self._backup_contains_deleted_game(candidate, value):
-                    recovery_root = next(
-                        (
-                            parent
-                            for parent in candidate.parents
-                            if parent.parent == self.base and parent.name.startswith("recovery_")
-                        ),
-                        None,
-                    )
-                    paths.add((recovery_root or candidate).relative_to(self.base))
-                    continue
-                try:
-                    size = candidate.stat().st_size
-                    if size <= 64 * 1024 * 1024:
-                        raw = candidate.read_bytes()
-                        text = raw.decode("utf-8", "ignore")
-                        if self._payload_contains_deletion_token(text, value):
-                            paths.add(relative)
-                except RECOVERABLE_ERRORS:
-                    continue
+            rows = list(
+                self.db.execute(
+                    "SELECT game_id,relative_path FROM game_assets WHERE game_id IN (" + placeholders + ") ORDER BY relative_path",
+                    tuple(sorted(deleting)),
+                )
+            )
+            retained = {
+                str(row[0])
+                for row in self.db.execute(
+                    "SELECT DISTINCT relative_path FROM game_assets WHERE game_id NOT IN (" + placeholders + ")",
+                    tuple(sorted(deleting)),
+                )
+            }
         resolved = []
-        for relative in paths:
-            if not self._managed_game_asset_relative_path(relative):
+        for row in rows:
+            relative = str(row["relative_path"])
+            if relative in retained:
                 continue
-            try:
-                candidate = self._safe_asset_path(relative)
-            except RECOVERABLE_ERRORS as error:
-                self.logger.write("GAME_ASSET_PATH_REJECTED", error, details={"path": str(relative)})
-                continue
+            candidate = self._safe_asset_path(relative)
             if candidate.exists():
                 resolved.append(candidate)
-                if candidate.suffix.casefold() == ".safetensors":
-                    metadata = Path(str(candidate) + ".json")
-                    if metadata.exists():
-                        resolved.append(metadata)
+        tokens = set().union(*(descriptor.get("tokens", {}).get(game_id, set()) for game_id in deleting))
+        managed_roots = [self.base / name for name in ("games", "models", "cache", "backups", "audit", "quarantine")]
+        for root in managed_roots:
+            if not root.exists():
+                continue
+            for candidate in root.rglob("*"):
+                try:
+                    relative_text = candidate.relative_to(self.base).as_posix().casefold()
+                except ValueError:
+                    continue
+                if relative_text.startswith("quarantine/game_trash/"):
+                    continue
+                if any(token and token in relative_text for token in tokens):
+                    resolved.append(candidate)
         unique = sorted(set(resolved), key=lambda item: (len(item.parts), str(item).casefold()))
         collapsed = []
         for candidate in unique:
@@ -22331,8 +21907,8 @@ class DataStoreGameTaskMixin:
             manifest = {
                 "transaction_id": transaction_id,
                 "created": time.time(),
-                "token_digest": hashlib.sha256(
-                    canonical_bytes(sorted(descriptor.get("opaque_tokens", set())))
+                "game_id_digest": hashlib.sha256(
+                    canonical_bytes(sorted(descriptor.get("game_ids", set())))
                 ).hexdigest(),
                 "moved_count": len(moved),
             }
@@ -22436,39 +22012,32 @@ class DataStoreGameTaskMixin:
             self.logger.write("EMPTY_GAME_TRASH_REMOVE_FAILED", error)
         return result
 
-    def _delete_database_payload_references(self, descriptor):
-        tables = [
-            str(row[0])
-            for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-            if str(row[0]) not in {"games"}
-        ]
-        deleted_rows = 0
+    def _assert_no_database_game_references(self, game_ids):
+        remaining = {}
+        targets = tuple(sorted({str(value) for value in game_ids if str(value)}))
+        if not targets:
+            return True
+        placeholders = ",".join("?" for _ in targets)
+        tables = [str(row[0]) for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
         for table in tables:
-            columns = list(self.db.execute("PRAGMA table_info(" + table + ")"))
-            text_columns = [
-                str(row[1])
-                for row in columns
-                if any(token in str(row[2]).upper() for token in ("TEXT", "CHAR", "CLOB"))
-            ]
-            if not text_columns:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
                 continue
-            try:
-                rows = list(self.db.execute("SELECT rowid AS _ugai_rowid_,* FROM " + table))
-            except sqlite3.Error:
+            columns = {str(row[1]) for row in self.db.execute("PRAGMA table_info(" + table + ")")}
+            if "game_id" not in columns:
                 continue
-            for row in rows:
-                if table == "meta" and str(row["key"]) in {
-                    "schema_version",
-                    "legacy_migrated",
-                    "legacy_cleanup_pending",
-                    "legacy_invalid_rows",
-                    "integrity_startup_generation",
-                }:
-                    continue
-                if any(self._payload_contains_deletion_token(row[column], descriptor) for column in text_columns):
-                    self.db.execute("DELETE FROM " + table + " WHERE rowid=?", (safe_int(row["_ugai_rowid_"], 0),))
-                    deleted_rows += 1
-        return deleted_rows
+            count = safe_int(
+                self.db.execute(
+                    "SELECT COUNT(*) FROM " + table + " WHERE game_id IN (" + placeholders + ")",
+                    targets,
+                ).fetchone()[0],
+                0,
+            )
+            if count:
+                remaining[table] = count
+        if remaining:
+            raise StorageError("删除游戏后数据库仍存在关联数据：" + json.dumps(remaining, ensure_ascii=False, sort_keys=True))
+        return True
+
 
     def _secure_compact_after_deletion(self):
         with self.lock:
@@ -22540,7 +22109,6 @@ class DataStoreGameTaskMixin:
                     self._notify_writer_error(None)
             self.writer_condition.notify_all()
         staged = None
-        deleted_references = 0
         try:
             self.sample_write_barrier()
             staged = self._stage_game_assets(descriptor) if deleting else {"moved": [], "root": None, "transaction_id": ""}
@@ -22548,8 +22116,7 @@ class DataStoreGameTaskMixin:
                 with self.critical_transaction():
                     for gid in deleting:
                         self.db.execute("DELETE FROM games WHERE id=?", (gid,))
-                    if deleting:
-                        deleted_references = self._delete_database_payload_references(descriptor)
+                    self._assert_no_database_game_references(deleting)
                     for item in cleaned:
                         self.db.execute(
                             "INSERT INTO games(id,name,created,needs_review,last_review) VALUES(?,?,?,?,?) "
@@ -22562,8 +22129,8 @@ class DataStoreGameTaskMixin:
                     else:
                         self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('selected_game',?)", (selected_id,))
                     snapshot = json.dumps(self._config_snapshot(), ensure_ascii=False, separators=(",", ":"))
-                    if deleting and self._payload_contains_deletion_token(snapshot, descriptor):
-                        raise StorageError("删除后的配置快照仍包含目标游戏")
+                    if deleting:
+                        self.db.execute("DELETE FROM config_backups")
                     self.db.execute("INSERT INTO config_backups(created,payload) VALUES(?,?)", (time.time(), snapshot))
                     self.db.execute(
                         "DELETE FROM config_backups WHERE id NOT IN (SELECT id FROM config_backups ORDER BY id DESC LIMIT 5)"
@@ -22573,6 +22140,11 @@ class DataStoreGameTaskMixin:
                     self._restore_staged_game_assets(staged)
                 raise
             self._purge_staged_game_assets(staged)
+            for item in cleaned:
+                game_root = self.base / "games" / item["id"]
+                game_root.mkdir(parents=True, exist_ok=True)
+                with self.lock, self.db:
+                    self._register_game_asset_record(item["id"], game_root.relative_to(self.base), "game_root")
             if deleting:
                 self._secure_compact_after_deletion()
             for gid in deleting:
@@ -22582,7 +22154,6 @@ class DataStoreGameTaskMixin:
                 "deleted_games": sorted(deleting),
                 "discarded_pending_samples": len(removed_pending),
                 "deleted_asset_count": len(staged.get("moved", [])) if staged else 0,
-                "deleted_reference_rows": deleted_references,
                 "trash_removed": True,
                 "selected_game": selected_id,
             }
@@ -24469,31 +24040,7 @@ class DataStoreSampleMixin:
             ordered.remove(best)
         return selected
 
-    def compact_samples(self, gid, keep=None, sleep_commit=False):
-        if not sleep_commit:
-            raise RuntimeError("破坏性经验池压缩只允许在睡眠提交阶段执行")
-        plan = self.plan_experience_pool_optimization(gid, None, keep)
-        result = self.apply_experience_pool_optimization(plan)
-        return {
-            "kept": safe_int(result.get("after", {}).get("valid"), 0, 0),
-            "removed": safe_int(result.get("deleted"), 0, 0),
-            "invalid": safe_int(result.get("after", {}).get("invalid"), 0, 0),
-            "staging": safe_int(result.get("after", {}).get("staging"), 0, 0),
-            "before_hash": str(result.get("before", {}).get("summary_hash", "")),
-            "after_hash": str(result.get("after", {}).get("summary_hash", "")),
-        }
 
-    def clear_game_data(self, gid):
-        self.sample_write_barrier()
-        with self.lock, self.db:
-            self.db.execute("DELETE FROM samples WHERE game_id=?", (gid,))
-            self.db.execute("DELETE FROM learning_sessions WHERE game_id=?", (gid,))
-            self.db.execute("DELETE FROM models WHERE game_id=?", (gid,))
-            self.db.execute("DELETE FROM model_backups WHERE game_id=?", (gid,))
-            self.db.execute("DELETE FROM rejections WHERE game_id=?", (gid,))
-            self.db.execute("UPDATE games SET needs_review=0,last_review=NULL WHERE id=?", (gid,))
-        self.model_cache.pop(gid, None)
-        self._invalidate_sample_caches(gid)
 
 
 MODEL_TENSOR_REFERENCE_KEY = "__safetensors_tensor__"
@@ -25031,6 +24578,8 @@ class DataStoreWindowModelMixin:
             raise RuntimeError("模型完整schema校验失败")
         payload = self._pack_model(item)
         checksum = hashlib.sha256(payload).hexdigest()
+        asset_document = self._decode_model_asset_document(payload)
+        tensor_descriptor = asset_document.get("tensor_bundle") if isinstance(asset_document.get("tensor_bundle"), dict) else {}
         slot = "complete" if complete else "partial"
         validation = json.dumps(item.get("validation", {}), ensure_ascii=False, separators=(",", ":"))
         with self.critical_transaction():
@@ -25069,6 +24618,14 @@ class DataStoreWindowModelMixin:
                     checksum,
                 ),
             )
+            tensor_relative_path = str(tensor_descriptor.get("relative_path", ""))
+            if tensor_relative_path:
+                self._register_game_asset_record(
+                    gid,
+                    tensor_relative_path,
+                    "model_tensor",
+                    str(tensor_descriptor.get("sha256", "")),
+                )
             if complete:
                 self.db.execute("DELETE FROM models WHERE game_id=? AND slot='partial'", (gid,))
                 self.db.execute(
@@ -25322,7 +24879,7 @@ class DataStoreOCRVisionMixin:
         now = time.time()
         relation_config = normalize_relation_config(value.get("relation_config", {}))
         relation = normalize_numeric_preference(
-            value.get("goal_relation", relation_config.get("preference", NumericPreference.KEEP_SAME.value))
+            value.get("goal_relation", relation_config.get("preference", DEFAULT_NUMERIC_PREFERENCE))
         )
         relation_config["preference"] = relation
         row = {
@@ -25425,7 +24982,7 @@ class DataStoreOCRVisionMixin:
             existing = existing_rows.get(region_id, {})
             config = normalize_relation_config(value.get("relation_config", {}))
             relation = normalize_numeric_preference(
-                value.get("goal_relation", config.get("preference", NumericPreference.KEEP_SAME.value))
+                value.get("goal_relation", config.get("preference", DEFAULT_NUMERIC_PREFERENCE))
             )
             config["preference"] = relation
             compare_id = str(config.get("compare_region_id", ""))
@@ -25646,19 +25203,26 @@ class DataStoreOCRVisionMixin:
         value = dict(manifest) if isinstance(manifest, dict) else {}
         metadata = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         with self.lock, self.db:
+            relative_path = str(value.get("relative_path", ""))
+            checksum = str(value.get("checksum", ""))
             self.db.execute(
                 "INSERT OR REPLACE INTO vision_models(game_id,architecture_version,updated,relative_path,checksum,trained_steps,device,metadata) VALUES(?,?,?,?,?,?,?,?)",
                 (
                     str(gid),
                     safe_int(value.get("architecture_version"), 0),
                     time.time(),
-                    str(value.get("relative_path", "")),
-                    str(value.get("checksum", "")),
+                    relative_path,
+                    checksum,
                     safe_int(value.get("trained_steps"), 0),
                     str(value.get("device", "")),
                     metadata,
                 ),
             )
+            if relative_path:
+                self._register_game_asset_record(gid, relative_path, "vision_model", checksum)
+                metadata_path = relative_path + ".json"
+                if self._safe_asset_path(metadata_path).exists():
+                    self._register_game_asset_record(gid, metadata_path, "vision_model_metadata", "")
         return True
 
     def reencode_samples(self, gid, runtime, stop_event=None, progress=None):
@@ -25985,6 +25549,7 @@ class DataStore(
                 (str(self.startup_generation),),
             )
         self.recover_game_trash_transactions()
+        self._synchronize_game_asset_registry(item["id"] for item in self.games())
         mode = str(self.db.execute("PRAGMA journal_mode").fetchone()[0]).lower()
         if mode != "wal":
             raise RuntimeError("文件系统不支持SQLite WAL，实际模式为" + mode)
@@ -26351,410 +25916,9 @@ class WindowSelectionDialog:
         return WindowSelectionController(self.app).open()
 
 
-class TaskSettingsDialog:
-    def __init__(self, app):
-        self.app = app
-
-    def open(self):
-        app = self.app
-        try:
-            game = app.require_game()
-            if app.mode_state != MODE_IDLE:
-                raise RuntimeError("请先停止当前模式")
-        except RECOVERABLE_ERRORS as error:
-            app.show_error(str(error))
-            return
-        profile = app.store.load_game_profile(game["id"])
-        task_rows = app.store.list_tasks(game["id"], True)
-        tasks = {
-            str(item.get("task_id")): dict(item) for item in task_rows if isinstance(item, dict) and item.get("task_id")
-        }
-        default_task_id = normalized_identifier(profile.get("default_task_id"), "default", 96)
-        if default_task_id not in tasks:
-            tasks[default_task_id] = app.store.default_task_definition(game["id"], profile).to_dict()
-        active_profile = task_profile_overlay(profile, tasks[default_task_id])
-        deleted_task_ids = set()
-        win = tk.Toplevel(app.root)
-        state = {"closed": False, "task_id": default_task_id}
-        win.title("任务目标与安全边界")
-        fit_window(win, 760, 700, 520, 400)
-        frame = ttk.Frame(win, padding=16)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(
-            frame,
-            text="该系统是按游戏配置的任务型模仿智能体，不保证适用于所有游戏。未进入白名单的动作永远不会自动执行。",
-            wraplength=710,
-        ).pack(anchor="w", fill="x", pady=(0, 10))
-        task_frame = ttk.LabelFrame(frame, text="游戏下的任务", padding=10)
-        task_frame.pack(fill="x", pady=(0, 10))
-        task_choice = tk.StringVar(value=default_task_id)
-        task_box = ttk.Combobox(task_frame, textvariable=task_choice, state="readonly", values=sorted(tasks), width=24)
-        task_box.grid(row=0, column=0, sticky="w", padx=(0, 8))
-        task_name = tk.StringVar(value=str(tasks[default_task_id].get("name", default_task_id)))
-        ttk.Label(task_frame, text="任务名称").grid(row=0, column=1, sticky="e")
-        ttk.Entry(task_frame, textvariable=task_name, width=24).grid(row=0, column=2, sticky="we", padx=(6, 8))
-        new_task_button = ttk.Button(task_frame, text="新建任务")
-        new_task_button.grid(row=0, column=3, padx=(0, 6))
-        delete_task_button = ttk.Button(task_frame, text="删除任务")
-        delete_task_button.grid(row=0, column=4)
-        task_frame.columnconfigure(2, weight=1)
-        ttk.Label(frame, text="任务目标或奖励说明").pack(anchor="w")
-        goal = tk.Text(frame, height=4, wrap="word")
-        goal.pack(fill="x", pady=(4, 10))
-        goal.insert("1.0", str(active_profile.get("goal", "")))
-        allowed_frame = ttk.LabelFrame(frame, text="自动动作白名单", padding=10)
-        allowed_frame.pack(fill="x")
-        families = [
-            ("等待", "no_op"),
-            ("左键单击", "click|left"),
-            ("左键双击", "double_click|left"),
-            ("左键长按", "long_press|left"),
-            ("左键拖动", "drag|left"),
-            ("右键单击", "click|right"),
-            ("中键单击", "click|middle"),
-            ("移动", "move"),
-            ("悬停", "hover"),
-            ("向上滚轮", "scroll_v|1"),
-            ("向下滚轮", "scroll_v|-1"),
-            ("横向正滚轮", "scroll_h|1"),
-            ("横向负滚轮", "scroll_h|-1"),
-        ]
-        variables = {
-            family: tk.BooleanVar(value=family in set(active_profile.get("allowed_families", [])))
-            for _, family in families
-        }
-        for index, (label, family) in enumerate(families):
-            ttk.Checkbutton(allowed_frame, text=label, variable=variables[family]).grid(
-                row=index // 3, column=index % 3, sticky="w", padx=6, pady=3
-            )
-        safety = ttk.LabelFrame(frame, text="失败停机与回滚", padding=10)
-        safety.pack(fill="x", pady=(10, 0))
-        ttk.Label(safety, text="连续失败或动作后无变化达到").grid(row=0, column=0, sticky="w")
-        max_failures = tk.IntVar(value=safe_int(profile.get("max_consecutive_failures", 3), 3, 1, 20))
-        ttk.Spinbox(safety, from_=1, to=20, textvariable=max_failures, width=6).grid(row=0, column=1, sticky="w")
-        ttk.Label(safety, text="次后自动停机").grid(row=0, column=2, sticky="w")
-        exploration = tk.BooleanVar(value=bool(profile.get("exploration_enabled", False)))
-        ttk.Checkbutton(safety, text="不确定时允许安全探索（仅等待，不产生鼠标输入）", variable=exploration).grid(
-            row=1, column=0, columnspan=3, sticky="w", pady=(6, 0)
-        )
-        capability_level = tk.IntVar(value=safe_int(profile.get("capability_level", 0), 0, 0, 4))
-        keyboard_enabled = tk.BooleanVar(value=bool(profile.get("keyboard_enabled", False)))
-        sound_enabled = tk.BooleanVar(value=bool(profile.get("sound_enabled", False)))
-        gamepad_enabled = tk.BooleanVar(value=bool(profile.get("gamepad_enabled", False)))
-        game_type = tk.StringVar(value=str(profile.get("game_type", "ui_game")))
-        required_modalities = tk.StringVar(
-            value=",".join(str(value) for value in profile.get("required_input_modalities", ["mouse", "vision"]))
-        )
-        minimum_fps = tk.DoubleVar(value=safe_float(profile.get("minimum_frame_rate", 8.0), 8.0, 1.0, 240.0))
-        maximum_action_hz = tk.DoubleVar(
-            value=safe_float(profile.get("maximum_action_frequency", 4.0), 4.0, 0.1, 120.0)
-        )
-        required_action_hz = tk.DoubleVar(
-            value=safe_float(profile.get("required_action_frequency", 1.0), 1.0, 0.0, 120.0)
-        )
-        continuous_control = tk.BooleanVar(value=bool(profile.get("continuous_control_required", False)))
-        ttk.Label(
-            safety,
-            text="能力层级：0仅鼠标；1加OCR；2加语义键盘；3加声音事件；4加手柄与连续控制。高层能力必须同时勾选对应授权。",
-            wraplength=610,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Spinbox(safety, from_=0, to=4, textvariable=capability_level, width=6).grid(
-            row=2, column=2, sticky="w", pady=(6, 0)
-        )
-        ttk.Checkbutton(safety, text="启用语义键盘数据与动作权限", variable=keyboard_enabled).grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=(6, 0)
-        )
-        ttk.Checkbutton(safety, text="启用声音事件数据（不保存原始音频）", variable=sound_enabled).grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(6, 0)
-        )
-        ttk.Checkbutton(safety, text="启用语义手柄数据与动作权限", variable=gamepad_enabled).grid(
-            row=5, column=0, columnspan=3, sticky="w", pady=(6, 0)
-        )
-        ttk.Label(safety, text="游戏类型").grid(row=6, column=0, sticky="e", pady=(6, 0))
-        ttk.Entry(safety, textvariable=game_type, width=24).grid(row=6, column=1, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Label(safety, text="必需模态（逗号分隔）").grid(row=7, column=0, sticky="e", pady=(4, 0))
-        ttk.Entry(safety, textvariable=required_modalities, width=36).grid(
-            row=7, column=1, columnspan=2, sticky="w", pady=(4, 0)
-        )
-        ttk.Label(safety, text="最低帧率").grid(row=8, column=0, sticky="e", pady=(4, 0))
-        ttk.Spinbox(safety, from_=1, to=240, increment=1, textvariable=minimum_fps, width=8).grid(
-            row=8, column=1, sticky="w", pady=(4, 0)
-        )
-        ttk.Label(safety, text="允许最大动作Hz").grid(row=8, column=1, sticky="e", pady=(4, 0))
-        ttk.Spinbox(safety, from_=0.1, to=120, increment=0.1, textvariable=maximum_action_hz, width=8).grid(
-            row=8, column=2, sticky="w", pady=(4, 0)
-        )
-        ttk.Label(safety, text="任务所需动作Hz").grid(row=9, column=0, sticky="e", pady=(4, 0))
-        ttk.Spinbox(safety, from_=0, to=120, increment=0.1, textvariable=required_action_hz, width=8).grid(
-            row=9, column=1, sticky="w", pady=(4, 0)
-        )
-        ttk.Checkbutton(safety, text="需要连续控制", variable=continuous_control).grid(
-            row=9, column=2, sticky="w", pady=(4, 0)
-        )
-        restart_enabled = tk.BooleanVar(value=bool(restart))
-        ttk.Checkbutton(safety, text="失败状态后执行一次左键单击重新开始", variable=restart_enabled).grid(
-            row=10, column=0, columnspan=3, sticky="w", pady=(6, 0)
-        )
-        restart_x = tk.StringVar(value=str(round((restart or {"path": [[0.5, 0.5]]})["path"][-1][0], 4)))
-        restart_y = tk.StringVar(value=str(round((restart or {"path": [[0.5, 0.5]]})["path"][-1][1], 4)))
-        ttk.Label(safety, text="归一化X").grid(row=11, column=0, sticky="e", pady=(4, 0))
-        ttk.Entry(safety, textvariable=restart_x, width=10).grid(row=11, column=1, sticky="w", pady=(4, 0))
-        ttk.Label(safety, text="Y").grid(row=11, column=1, sticky="e", pady=(4, 0))
-        ttk.Entry(safety, textvariable=restart_y, width=10).grid(row=11, column=2, sticky="w", pady=(4, 0))
-        state_frame = ttk.LabelFrame(frame, text="成功、失败状态", padding=10)
-        state_frame.pack(fill="both", expand=True, pady=(10, 0))
-        success_states = set(str(value) for value in active_profile.get("success_states", []))
-        failure_states = set(str(value) for value in active_profile.get("failure_states", []))
-        state_text = tk.StringVar()
-        feedback = tk.StringVar(value="选择目标窗口后，可把当前内容区域画面记录为成功或失败状态")
-
-        def refresh_state_text():
-            state_text.set(
-                "成功状态：" + str(len(success_states)) + "个    失败状态：" + str(len(failure_states)) + "个"
-            )
-
-        def capture_task_form(task_id):
-            tid = normalized_identifier(task_id, "default", 96)
-            existing = dict(tasks.get(tid, {}))
-            success_detector = dict(existing.get("success_detector", {}))
-            failure_detector = dict(existing.get("failure_detector", {}))
-            success_detector.update(
-                {
-                    "type": "visual_hash",
-                    "states": sorted(success_states),
-                    "hash_distance": safe_int(profile.get("success_hash_distance", 6), 6, 0, 32),
-                }
-            )
-            failure_detector.update(
-                {
-                    "type": "visual_hash",
-                    "states": sorted(failure_states),
-                    "hash_distance": safe_int(profile.get("failure_hash_distance", 6), 6, 0, 32),
-                }
-            )
-            existing.update(
-                {
-                    "game_id": game["id"],
-                    "task_id": tid,
-                    "name": task_name.get().strip() or tid,
-                    "goal": goal.get("1.0", "end").strip(),
-                    "allowed_families": sorted(family for family, variable in variables.items() if variable.get()),
-                    "success_detector": success_detector,
-                    "failure_detector": failure_detector,
-                    "enabled": True,
-                }
-            )
-            tasks[tid] = TaskDefinition.from_mapping(existing, game["id"], tid).to_dict()
-
-        def load_task_form(task_id):
-            tid = normalized_identifier(task_id, "default", 96)
-            task = tasks[tid]
-            overlay = task_profile_overlay(profile, task)
-            task_name.set(str(task.get("name", tid)))
-            goal.delete("1.0", "end")
-            goal.insert("1.0", str(overlay.get("goal", "")))
-            allowed = set(overlay.get("allowed_families", []))
-            for family, variable in variables.items():
-                variable.set(family in allowed)
-            success_states.clear()
-            success_states.update(str(value) for value in overlay.get("success_states", []))
-            failure_states.clear()
-            failure_states.update(str(value) for value in overlay.get("failure_states", []))
-            refresh_state_text()
-
-        def switch_task():
-            selected = normalized_identifier(task_choice.get(), state["task_id"], 96)
-            if selected not in tasks or selected == state["task_id"]:
-                return
-            capture_task_form(state["task_id"])
-            state["task_id"] = selected
-            load_task_form(selected)
-
-        def new_task():
-            capture_task_form(state["task_id"])
-            index = 1
-            while "task_" + str(index) in tasks:
-                index += 1
-            tid = "task_" + str(index)
-            tasks[tid] = TaskDefinition.from_mapping(
-                {
-                    "game_id": game["id"],
-                    "task_id": tid,
-                    "name": "新任务" + str(index),
-                    "goal": "完成新任务",
-                    "allowed_families": ["no_op", "click|left"],
-                },
-                game["id"],
-                tid,
-            ).to_dict()
-            task_box.configure(values=sorted(tasks))
-            task_choice.set(tid)
-            state["task_id"] = tid
-            load_task_form(tid)
-
-        def delete_task():
-            if len(tasks) <= 1:
-                feedback.set("至少保留一个任务")
-                return
-            tid = state["task_id"]
-            tasks.pop(tid, None)
-            deleted_task_ids.add(tid)
-            selected = sorted(tasks)[0]
-            task_box.configure(values=sorted(tasks))
-            task_choice.set(selected)
-            state["task_id"] = selected
-            load_task_form(selected)
-            feedback.set("任务将在确认保存后删除")
-
-        task_box.bind("<<ComboboxSelected>>", lambda event: switch_task())
-        new_task_button.configure(command=new_task)
-        delete_task_button.configure(command=delete_task)
-
-        def record_state(kind):
-            try:
-                target = app.require_window(False)
-                packet = app.api.capture(target, False)
-                value = visual_perceptual_hash(packet["f"])
-                if kind == "success":
-                    success_states.add(value)
-                    failure_states.discard(value)
-                    feedback.set("已记录成功状态：" + value)
-                else:
-                    failure_states.add(value)
-                    success_states.discard(value)
-                    feedback.set("已记录失败状态：" + value)
-                refresh_state_text()
-            except RECOVERABLE_ERRORS as error:
-                feedback.set("记录失败：" + str(error))
-
-        ttk.Label(state_frame, textvariable=state_text).pack(anchor="w")
-        button_row = ttk.Frame(state_frame)
-        button_row.pack(fill="x", pady=(6, 0))
-        ttk.Button(button_row, text="记录当前画面为成功", command=lambda: record_state("success")).pack(
-            side="left", padx=(0, 6)
-        )
-        ttk.Button(button_row, text="记录当前画面为失败", command=lambda: record_state("failure")).pack(
-            side="left", padx=(0, 6)
-        )
-        ttk.Button(
-            button_row,
-            text="清空成功状态",
-            command=lambda: (success_states.clear(), refresh_state_text(), feedback.set("已清空成功状态")),
-        ).pack(side="left", padx=(0, 6))
-        ttk.Button(
-            button_row,
-            text="清空失败状态",
-            command=lambda: (failure_states.clear(), refresh_state_text(), feedback.set("已清空失败状态")),
-        ).pack(side="left")
-        ttk.Label(state_frame, textvariable=feedback, wraplength=690).pack(anchor="w", fill="x", pady=(8, 0))
-        refresh_state_text()
-
-        def save():
-            try:
-                capture_task_form(state["task_id"])
-                active_task = tasks[state["task_id"]]
-                allowed = sorted(active_task.get("allowed_families", []))
-                if not allowed:
-                    raise RuntimeError("至少选择一个安全动作；建议保留“等待”")
-                restart_action = None
-                if restart_enabled.get():
-                    x = safe_float(restart_x.get(), 0.5, 0.0, 1.0)
-                    y = safe_float(restart_y.get(), 0.5, 0.0, 1.0)
-                    restart_action = normalize_action(
-                        {"kind": "click", "button": "left", "path": [[x, y]], "duration": 0.08}
-                    )
-                    if action_family_key(restart_action) not in allowed:
-                        raise RuntimeError("启用重新开始动作时，必须把“左键单击”加入白名单")
-                active_overlay = task_profile_overlay(profile, active_task)
-                selected_level = safe_int(capability_level.get(), 0, 0, 4)
-                keyboard_permission = bool(keyboard_enabled.get())
-                sound_permission = bool(sound_enabled.get())
-                gamepad_permission = bool(gamepad_enabled.get())
-                expected_keyboard = selected_level >= 2
-                expected_sound = selected_level >= 3
-                expected_gamepad = selected_level >= 4
-                if (
-                    keyboard_permission != expected_keyboard
-                    or sound_permission != expected_sound
-                    or gamepad_permission != expected_gamepad
-                ):
-                    raise RuntimeError(
-                        "能力层级与显式授权不一致：Level 2必须授权语义键盘，Level 3还必须授权声音事件，Level 4还必须授权手柄；较低层级必须关闭对应授权"
-                    )
-                modality_values = list(
-                    dict.fromkeys(
-                        value.strip().casefold()
-                        for value in re.split(r"[,，;；\s]+", required_modalities.get())
-                        if value.strip()
-                    )
-                )
-                known_modalities = {"mouse", "vision", "ocr", "keyboard", "sound", "gamepad", "continuous_control"}
-                unknown_modalities = sorted(set(modality_values) - known_modalities)
-                if unknown_modalities:
-                    raise RuntimeError("存在未知必需模态：" + ",".join(unknown_modalities))
-                if not modality_values:
-                    modality_values = ["mouse", "vision"]
-                value = dict(profile)
-                value.update(
-                    {
-                        "default_task_id": state["task_id"],
-                        "goal": active_overlay.get("goal", ""),
-                        "allowed_families": allowed,
-                        "max_consecutive_failures": safe_int(max_failures.get(), 3, 1, 20),
-                        "exploration_enabled": bool(exploration.get()),
-                        "capability_level": selected_level,
-                        "game_type": game_type.get().strip() or "ui_game",
-                        "required_input_modalities": modality_values,
-                        "minimum_frame_rate": safe_float(minimum_fps.get(), 8.0, 1.0, 240.0),
-                        "maximum_action_frequency": safe_float(maximum_action_hz.get(), 4.0, 0.1, 120.0),
-                        "required_action_frequency": safe_float(required_action_hz.get(), 1.0, 0.0, 120.0),
-                        "continuous_control_required": bool(continuous_control.get()),
-                        "keyboard_enabled": keyboard_permission,
-                        "sound_enabled": sound_permission,
-                        "gamepad_enabled": gamepad_permission,
-                        "restart_action": restart_action,
-                        "success_states": active_overlay.get("success_states", []),
-                        "failure_states": active_overlay.get("failure_states", []),
-                    }
-                )
-                capability = CapabilityProfile(value)
-                capability.require_training_support(
-                    {
-                        "capture_fps": capability.minimum_frame_rate,
-                        "available_action_frequency": capability.maximum_action_frequency,
-                        "semantic_size": HYBRID_GLOBAL_SIZE,
-                        **app.api.execution_capabilities(),
-                    }
-                )
-                value.update(capability.to_dict())
-                app.store.save_game_profile(game["id"], value)
-                for task in tasks.values():
-                    app.store.save_task(game["id"], task, False)
-                for task_id in sorted(deleted_task_ids):
-                    if task_id not in tasks:
-                        app.store.delete_task(game["id"], task_id)
-                app._refresh_all()
-                message = "配置已保存。安全配置或状态定义改变后，必须重新睡眠才能训练。"
-                app.status.set(message)
-                app.show_info("任务与安全", message)
-                app.close_dialog(win, state)
-            except RECOVERABLE_ERRORS as error:
-                feedback.set("无法保存：" + str(error))
-
-        actions = ttk.Frame(frame)
-        actions.pack(fill="x", pady=(12, 0))
-        ttk.Button(actions, text="取消", command=lambda: app.close_dialog(win, state)).pack(side="right")
-        ttk.Button(actions, text="确认", command=save).pack(side="right", padx=(0, 8))
-        win.transient(app.root)
-        win.protocol("WM_DELETE_WINDOW", lambda: app.close_dialog(win, state))
-        win.bind("<Escape>", lambda event: app.close_dialog(win, state))
-        win.wait_visibility()
-        win.grab_set()
-        win.focus_force()
 
 
 class NumericPreference(str, Enum):
-    KEEP_SAME = "keep_same"
     NOW_HIGHER = "now_higher"
     NOW_LOWER = "now_lower"
     POSITIVE_DELTA_HIGHER = "positive_delta_higher"
@@ -26771,9 +25935,9 @@ class NumericPreference(str, Enum):
     REGION_ABS_DIFF_LOWER = "region_abs_diff_lower"
 
 
+DEFAULT_NUMERIC_PREFERENCE = NumericPreference.NOW_HIGHER.value
 NUMERIC_PREFERENCE_OPTIONS = OrderedDict(
     (
-        ("保持不变", NumericPreference.KEEP_SAME.value),
         ("now越大越好", NumericPreference.NOW_HIGHER.value),
         ("now越小越好", NumericPreference.NOW_LOWER.value),
         ("当now-before>0时：now-before越大越好", NumericPreference.POSITIVE_DELTA_HIGHER.value),
@@ -26784,14 +25948,15 @@ NUMERIC_PREFERENCE_OPTIONS = OrderedDict(
         ("当|now-before|≠0时：|now-before|越小越好", NumericPreference.ABS_DELTA_LOWER.value),
         ("与固定值比较：|a-b|越大越好", NumericPreference.FIXED_DISTANCE_HIGHER.value),
         ("与固定值比较：|a-b|越小越好", NumericPreference.FIXED_DISTANCE_LOWER.value),
-        ("与另一区域比较：a-b越大越好", NumericPreference.REGION_DIFF_HIGHER.value),
-        ("与另一区域比较：a-b越小越好", NumericPreference.REGION_DIFF_LOWER.value),
-        ("与另一区域比较：|a-b|越大越好", NumericPreference.REGION_ABS_DIFF_HIGHER.value),
-        ("与另一区域比较：|a-b|越小越好", NumericPreference.REGION_ABS_DIFF_LOWER.value),
+        ("与另一个识别区域内的数字比较：a-b越大越好", NumericPreference.REGION_DIFF_HIGHER.value),
+        ("与另一个识别区域内的数字比较：a-b越小越好", NumericPreference.REGION_DIFF_LOWER.value),
+        ("与另一个识别区域内的数字比较：|a-b|越大越好", NumericPreference.REGION_ABS_DIFF_HIGHER.value),
+        ("与另一个识别区域内的数字比较：|a-b|越小越好", NumericPreference.REGION_ABS_DIFF_LOWER.value),
     )
 )
 NUMERIC_PREFERENCE_LABELS = {value: label for label, value in NUMERIC_PREFERENCE_OPTIONS.items()}
 NUMERIC_LEGACY_PREFERENCE_MAP = {
+    "keep_same": DEFAULT_NUMERIC_PREFERENCE,
     "higher_better": NumericPreference.NOW_HIGHER.value,
     "lower_better": NumericPreference.NOW_LOWER.value,
     "increase_more_better": NumericPreference.POSITIVE_DELTA_HIGHER.value,
@@ -26812,9 +25977,7 @@ NUMERIC_COMPARISON_RELATIONS = {
     NumericPreference.REGION_ABS_DIFF_HIGHER.value,
     NumericPreference.REGION_ABS_DIFF_LOWER.value,
 }
-NUMERIC_REQUIRED_PREFERENCES = tuple(
-    preference.value for preference in NumericPreference if preference is not NumericPreference.KEEP_SAME
-)
+NUMERIC_REQUIRED_PREFERENCES = tuple(preference.value for preference in NumericPreference)
 NUMERIC_OVERLAY_DEFAULT_COLOR = "#FFFFFF"
 NUMERIC_OVERLAY_DEFAULT_OPACITY = 0.50
 NUMERIC_TRACKING_TEMPLATE_W = 16
@@ -26827,36 +25990,318 @@ NUMERIC_TRACKING_CONFIRM_FRAMES = 3
 NUMERIC_TRACKING_TEMPLATE_UPDATE_FRAMES = 6
 NUMERIC_TRACKING_PERSIST_FRAMES = 45
 NUMERIC_REWARD_STABLE_FRAMES = 2
+NUMERIC_OBSERVATION_MIN_CONFIDENCE = 0.64
+NUMERIC_OBSERVATION_STRONG_CONFIDENCE = 0.82
+NUMERIC_PREDICTION_MIN_CONFIDENCE = 0.52
+NUMERIC_PREDICTION_MAX_AGE_MS = 3000.0
+NUMERIC_PREDICTION_VELOCITY_HORIZON_MS = 900.0
+NUMERIC_NEURAL_MIN_HISTORY = 6
+NUMERIC_NEURAL_MAX_HISTORY = 96
+
+
+@dataclass(frozen=True, slots=True)
+class NumericValue:
+    value: float | None
+    source: str
+    confidence: float
+    available: bool = True
+
+    def to_snapshot(self, prediction_source, timestamp, prediction_error=None, last_observed_value=None, last_observed_time=0.0, trend_or_velocity=0.0):
+        predicted = self.source == "predicted"
+        return {
+            "value": self.value,
+            "source": self.source,
+            "available": self.available,
+            "valid": self.available,
+            "predicted": predicted,
+            "confidence": self.confidence,
+            "prediction_age_ms": 0.0 if not predicted or last_observed_time <= 0.0 else max(0.0, timestamp - last_observed_time) * 1000.0,
+            "prediction_source": prediction_source,
+            "prediction_error": prediction_error,
+            "pending_prediction_error": prediction_error,
+            "last_observed_value": last_observed_value,
+            "last_observed_time": last_observed_time,
+            "trend_or_velocity": trend_or_velocity,
+        }
+
+
+class OnlineNeuralNumericForecaster:
+    def __init__(self, input_size=14, hidden_size=20, members=3):
+        self.input_size = int(input_size)
+        self.hidden_size = int(hidden_size)
+        self.history = deque(maxlen=NUMERIC_NEURAL_MAX_HISTORY)
+        self.samples = deque(maxlen=NUMERIC_NEURAL_MAX_HISTORY)
+        self.networks = []
+        for member in range(max(3, int(members))):
+            rng = random.Random(0x4E554D45 + member * 104729)
+            self.networks.append(
+                {
+                    "w1": [[rng.uniform(-0.09, 0.09) for _ in range(self.input_size)] for _ in range(self.hidden_size)],
+                    "b1": [0.0] * self.hidden_size,
+                    "w2": [rng.uniform(-0.09, 0.09) for _ in range(self.hidden_size)],
+                    "b2": 0.0,
+                }
+            )
+        self.updates = 0
+        self.error_ewma = 1.0
+        self.last_scale = 1.0
+        self.last_step_seconds = 0.25
+
+    def _feature_vector(self, records):
+        values = [safe_float(item[0]) for item in records]
+        times = [safe_float(item[1]) for item in records]
+        confidences = [safe_float(item[2], 0.0, 0.0, 1.0) for item in records]
+        deltas = [values[index] - values[index - 1] for index in range(1, len(values))]
+        steps = [max(1e-3, times[index] - times[index - 1]) for index in range(1, len(times))]
+        nonzero_deltas = [abs(value) for value in deltas if abs(value) > 1e-9]
+        scale = max(1e-6, statistics.median(nonzero_deltas) if nonzero_deltas else max(1.0, abs(values[-1]) * 0.01))
+        level_scale = max(1.0, abs(values[-1]), statistics.median(abs(value) for value in values))
+        typical_step = statistics.median(steps) if steps else 0.25
+        recent_deltas = ([0.0] * 5 + deltas)[-5:]
+        recent_steps = ([typical_step] * 4 + steps)[-4:]
+        recent_levels = ([values[-1]] * 3 + values)[-3:]
+        vector = [max(-4.0, min(4.0, value / scale)) for value in recent_deltas]
+        vector.extend(max(0.0, min(4.0, value / max(1e-3, typical_step))) for value in recent_steps)
+        vector.extend(max(-2.0, min(2.0, (value - values[-1]) / level_scale)) for value in recent_levels)
+        vector.append(statistics.fmean(confidences[-4:]) if confidences else 0.0)
+        vector.append(min(1.0, len(records) / float(NUMERIC_NEURAL_MAX_HISTORY)))
+        vector = (vector + [0.0] * self.input_size)[: self.input_size]
+        return vector, scale, typical_step
+
+    @staticmethod
+    def _forward(network, vector):
+        hidden = []
+        for weights, bias in zip(network["w1"], network["b1"]):
+            hidden.append(math.tanh(sum(weight * value for weight, value in zip(weights, vector)) + bias))
+        output = sum(weight * value for weight, value in zip(network["w2"], hidden)) + network["b2"]
+        return max(-4.0, min(4.0, output)), hidden
+
+    def _train_network(self, network, vector, target, weight, rate):
+        output, hidden = self._forward(network, vector)
+        error = max(-4.0, min(4.0, output - target))
+        gradient = max(-1.5, min(1.5, error * max(0.05, weight)))
+        old_w2 = list(network["w2"])
+        for index in range(self.hidden_size):
+            network["w2"][index] -= rate * gradient * hidden[index]
+        network["b2"] -= rate * gradient
+        for row in range(self.hidden_size):
+            hidden_gradient = gradient * old_w2[row] * (1.0 - hidden[row] * hidden[row])
+            hidden_gradient = max(-1.5, min(1.5, hidden_gradient))
+            weights = network["w1"][row]
+            for column in range(self.input_size):
+                weights[column] -= rate * hidden_gradient * vector[column]
+            network["b1"][row] -= rate * hidden_gradient
+        return abs(error)
+
+    def observe(self, value, timestamp, confidence):
+        number = safe_float(value)
+        now = max(0.0, safe_float(timestamp, time.monotonic()))
+        quality = safe_float(confidence, 0.0, 0.0, 1.0)
+        if len(self.history) >= 5:
+            vector, scale, typical_step = self._feature_vector(list(self.history))
+            previous = safe_float(self.history[-1][0])
+            target = max(-4.0, min(4.0, (number - previous) / max(1e-6, scale)))
+            sample = (vector, target, quality)
+            self.samples.append(sample)
+            errors = []
+            training_rows = list(self.samples)[-24:]
+            for pass_index in range(3):
+                for sample_index, (features, expected, sample_weight) in enumerate(training_rows):
+                    for member_index, network in enumerate(self.networks):
+                        if (sample_index + pass_index + member_index) % len(self.networks) == 0 or sample_index >= len(training_rows) - 4:
+                            errors.append(
+                                self._train_network(
+                                    network,
+                                    features,
+                                    expected,
+                                    sample_weight,
+                                    0.012 / math.sqrt(1.0 + self.updates * 0.002),
+                                )
+                            )
+                self.updates += 1
+            if errors:
+                current_error = statistics.fmean(errors)
+                self.error_ewma = current_error if self.updates <= 3 else self.error_ewma * 0.88 + current_error * 0.12
+            self.last_scale = scale
+            self.last_step_seconds = typical_step
+        self.history.append((number, now, quality))
+
+    def predict(self, timestamp):
+        if len(self.history) < NUMERIC_NEURAL_MIN_HISTORY or self.updates < 3:
+            return {"available": False, "source": "insufficient_neural_history", "confidence": 0.0}
+        vector, scale, typical_step = self._feature_vector(list(self.history))
+        outputs = [self._forward(network, vector)[0] for network in self.networks]
+        mean = statistics.fmean(outputs)
+        disagreement = statistics.pstdev(outputs) if len(outputs) > 1 else 0.0
+        last_value, last_time, last_confidence = self.history[-1]
+        age = max(0.0, safe_float(timestamp, time.monotonic()) - safe_float(last_time))
+        steps = max(0.25, min(2.5, age / max(0.04, typical_step)))
+        predicted = safe_float(last_value) + mean * scale * steps
+        normalized_error = max(0.0, self.error_ewma)
+        confidence = safe_float(last_confidence, 0.0, 0.0, 1.0)
+        confidence *= min(1.0, len(self.history) / 14.0)
+        confidence *= math.exp(-age / 2.4)
+        confidence *= math.exp(-0.70 * normalized_error - 1.6 * disagreement)
+        return {
+            "available": finite_number(predicted),
+            "value": predicted,
+            "confidence": max(0.0, min(1.0, confidence)),
+            "source": "online_neural_temporal_ensemble",
+            "ensemble_disagreement": disagreement,
+            "normalized_error": normalized_error,
+            "history_size": len(self.history),
+            "updates": self.updates,
+            "scale": scale,
+            "typical_step_seconds": typical_step,
+        }
+
+
+@dataclass(slots=True)
+class NumericPredictionState:
+    last_observed_value: float | None = None
+    last_observed_time: float = 0.0
+    predicted_value: float | None = None
+    prediction_confidence: float = 0.0
+    trend_or_velocity: float = 0.0
+    prediction_source: str = "no_history"
+    pending_prediction_error: float | None = None
+    stable_count: int = 0
+    last_prediction_time: float = 0.0
+    last_observation_confidence: float = 0.0
+    trusted_observations: int = 0
+    forecaster: OnlineNeuralNumericForecaster = field(default_factory=OnlineNeuralNumericForecaster)
+
+    def _unavailable(self, detail, now):
+        self.predicted_value = None
+        self.prediction_confidence = 0.0
+        self.prediction_source = str(detail)
+        self.last_prediction_time = now
+        return NumericValue(None, "unavailable", 0.0, False).to_snapshot(
+            detail,
+            now,
+            None,
+            self.last_observed_value,
+            self.last_observed_time,
+            self.trend_or_velocity,
+        )
+
+    def observe(self, value, timestamp, confidence):
+        observed = safe_float(value)
+        now = max(0.0, safe_float(timestamp, time.monotonic()))
+        confidence_value = safe_float(confidence, 0.0, 0.0, 1.0)
+        if confidence_value < NUMERIC_OBSERVATION_MIN_CONFIDENCE:
+            return self._unavailable("observation_below_confidence_threshold", now)
+        correction = observed - self.predicted_value if finite_number(self.predicted_value) else None
+        if finite_number(self.last_observed_value) and self.last_observed_time > 0.0 and now > self.last_observed_time:
+            elapsed = max(1e-6, now - self.last_observed_time)
+            instantaneous = (observed - safe_float(self.last_observed_value)) / elapsed
+            self.trend_or_velocity = self.trend_or_velocity * 0.72 + instantaneous * 0.28
+            tolerance = max(1e-9, max(abs(observed), abs(safe_float(self.last_observed_value)), 1.0) * 0.0005)
+            self.stable_count = self.stable_count + 1 if abs(observed - safe_float(self.last_observed_value)) <= tolerance else 1
+        else:
+            self.trend_or_velocity = 0.0
+            self.stable_count = 1
+        self.forecaster.observe(observed, now, confidence_value)
+        self.trusted_observations += 1
+        self.last_observed_value = observed
+        self.last_observed_time = now
+        self.predicted_value = observed
+        self.prediction_confidence = confidence_value
+        self.prediction_source = "trusted_observation"
+        self.pending_prediction_error = correction
+        self.last_prediction_time = now
+        self.last_observation_confidence = confidence_value
+        snapshot = NumericValue(observed, "observed", confidence_value, True).to_snapshot(
+            "trusted_observation",
+            now,
+            correction,
+            self.last_observed_value,
+            self.last_observed_time,
+            self.trend_or_velocity,
+        )
+        snapshot["neural_history_size"] = len(self.forecaster.history)
+        snapshot["neural_updates"] = self.forecaster.updates
+        return snapshot
+
+    def predict(self, timestamp, consensus_value=None, consensus_confidence=0.0):
+        now = max(0.0, safe_float(timestamp, time.monotonic()))
+        if not finite_number(self.last_observed_value) or self.last_observed_time <= 0.0:
+            return self._unavailable("no_history", now)
+        age_ms = max(0.0, now - self.last_observed_time) * 1000.0
+        if age_ms > NUMERIC_PREDICTION_MAX_AGE_MS:
+            return self._unavailable("stale_history", now)
+        neural = self.forecaster.predict(now)
+        if not neural.get("available") or not finite_number(neural.get("value")):
+            return self._unavailable(str(neural.get("source", "insufficient_neural_history")), now)
+        value = safe_float(neural.get("value"))
+        confidence_value = safe_float(neural.get("confidence"), 0.0, 0.0, 1.0)
+        detail = "online_neural_temporal_ensemble"
+        visual_confidence = safe_float(consensus_confidence, 0.0, 0.0, 1.0)
+        if finite_number(consensus_value) and visual_confidence >= 0.30:
+            visual_value = safe_float(consensus_value)
+            scale = max(1.0, abs(safe_float(neural.get("scale"), 1.0)), abs(value) * 0.01)
+            disagreement = abs(visual_value - value) / scale
+            if disagreement <= 4.0:
+                visual_weight = min(0.38, visual_confidence * 0.38) * math.exp(-0.35 * disagreement)
+                value = value * (1.0 - visual_weight) + visual_value * visual_weight
+                confidence_value *= math.exp(-0.12 * disagreement)
+                confidence_value = min(0.96, confidence_value + visual_confidence * 0.12 * math.exp(-disagreement))
+                detail = "neural_temporal_visual_fusion"
+        if not finite_number(value) or confidence_value < NUMERIC_PREDICTION_MIN_CONFIDENCE:
+            return self._unavailable("low_neural_prediction_confidence", now)
+        self.predicted_value = value
+        self.prediction_confidence = confidence_value
+        self.prediction_source = detail
+        self.last_prediction_time = now
+        snapshot = NumericValue(value, "predicted", confidence_value, True).to_snapshot(
+            detail,
+            now,
+            None,
+            self.last_observed_value,
+            self.last_observed_time,
+            self.trend_or_velocity,
+        )
+        snapshot["neural_history_size"] = safe_int(neural.get("history_size"), 0)
+        snapshot["neural_updates"] = safe_int(neural.get("updates"), 0)
+        snapshot["neural_ensemble_disagreement"] = safe_float(neural.get("ensemble_disagreement"), 0.0)
+        snapshot["neural_normalized_error"] = safe_float(neural.get("normalized_error"), 0.0)
+        return snapshot
 
 
 def normalize_numeric_preference(value):
-    token = str(value or NumericPreference.KEEP_SAME.value)
+    token = str(value or DEFAULT_NUMERIC_PREFERENCE)
     token = NUMERIC_LEGACY_PREFERENCE_MAP.get(token, token)
-    return token if token in NUMERIC_PREFERENCE_LABELS else NumericPreference.KEEP_SAME.value
+    return token if token in NUMERIC_PREFERENCE_LABELS else DEFAULT_NUMERIC_PREFERENCE
 
 
 def numeric_snapshot_value(value):
+    if isinstance(value, NumericValue):
+        return safe_float(value.value) if value.available and finite_number(value.value) else None
     if finite_number(value):
         return safe_float(value)
     if not isinstance(value, dict):
         return None
-    if value.get("valid") is False:
-        return None
-    if value.get("occluded") or value.get("recovered") or value.get("temporal_disagreement"):
-        return None
-    if safe_int(value.get("stable_frames", NUMERIC_REWARD_STABLE_FRAMES), 0) < NUMERIC_REWARD_STABLE_FRAMES:
+    if value.get("available") is False or value.get("valid") is False:
         return None
     number = value.get("value", value.get("numeric_value"))
     return safe_float(number) if finite_number(number) else None
 
 
+def numeric_decimal_value(value):
+    number = numeric_snapshot_value(value)
+    if number is None:
+        return None
+    try:
+        decimal_value = Decimal(str(number))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return decimal_value.normalize() if decimal_value.is_finite() else None
+
+
 def numeric_values_equal(first, second):
-    a = numeric_snapshot_value(first)
-    b = numeric_snapshot_value(second)
-    if a is None or b is None:
-        return False
-    tolerance = max(1e-6, max(abs(a), abs(b), 1.0) * 0.0005)
-    return abs(a - b) <= tolerance
+    a = numeric_decimal_value(first)
+    b = numeric_decimal_value(second)
+    return a is not None and b is not None and a == b
 
 
 def _numeric_scale(*values):
@@ -26893,20 +26338,18 @@ def _utility_difference(before_metric, now_metric, higher_is_better=True, scale=
 def evaluate_numeric_preference_detailed(region, old_value, new_value, before_snapshot, now_snapshot):
     old = numeric_snapshot_value(old_value)
     new = numeric_snapshot_value(new_value)
-    if old is None or new is None:
+    old_decimal = numeric_decimal_value(old_value)
+    new_decimal = numeric_decimal_value(new_value)
+    if old is None or new is None or old_decimal is None or new_decimal is None:
         return {"valid": False, "reward": 0.0, "status": "invalid_snapshot"}
     config = normalize_relation_config(region.get("relation_config", {}))
     relation = normalize_numeric_preference(
-        config.get("preference", region.get("goal_relation", NumericPreference.KEEP_SAME.value))
+        config.get("preference", region.get("goal_relation", DEFAULT_NUMERIC_PREFERENCE))
     )
-    delta = new - old
-    tolerance = max(1e-6, max(abs(old), abs(new), 1.0) * 0.0005)
+    delta_decimal = new_decimal - old_decimal
+    delta = float(delta_decimal)
     scale = _numeric_scale(old, new)
     result = {"valid": True, "reward": 0.0, "status": "neutral", "preference": relation}
-    if relation == NumericPreference.KEEP_SAME.value:
-        result.update(_utility_difference(abs(delta), 0.0, True, scale))
-        result["status"] = "keep_same"
-        return result
     if relation == NumericPreference.NOW_HIGHER.value:
         result.update(_utility_difference(old, new, True, scale))
         return result
@@ -26917,50 +26360,31 @@ def evaluate_numeric_preference_detailed(region, old_value, new_value, before_sn
         NumericPreference.POSITIVE_DELTA_HIGHER.value,
         NumericPreference.POSITIVE_DELTA_LOWER.value,
     }:
-        if delta <= tolerance:
+        if delta_decimal <= 0:
             return {"valid": False, "reward": -1.0, "status": "positive_delta_condition_failed", "preference": relation}
-        result.update(
-            _utility_difference(
-                0.0,
-                delta,
-                relation == NumericPreference.POSITIVE_DELTA_HIGHER.value,
-                scale,
-            )
-        )
+        result.update(_utility_difference(0.0, delta, relation == NumericPreference.POSITIVE_DELTA_HIGHER.value, scale))
         result["status"] = "positive_delta"
         return result
     if relation in {
         NumericPreference.NEGATIVE_DELTA_HIGHER.value,
         NumericPreference.NEGATIVE_DELTA_LOWER.value,
     }:
-        decrease = old - new
-        if decrease <= tolerance:
+        decrease_decimal = old_decimal - new_decimal
+        if decrease_decimal <= 0:
             return {"valid": False, "reward": -1.0, "status": "negative_delta_condition_failed", "preference": relation}
-        result.update(
-            _utility_difference(
-                0.0,
-                decrease,
-                relation == NumericPreference.NEGATIVE_DELTA_HIGHER.value,
-                scale,
-            )
-        )
+        decrease = float(decrease_decimal)
+        result.update(_utility_difference(0.0, decrease, relation == NumericPreference.NEGATIVE_DELTA_HIGHER.value, scale))
         result["status"] = "negative_delta"
         return result
     if relation in {
         NumericPreference.ABS_DELTA_HIGHER.value,
         NumericPreference.ABS_DELTA_LOWER.value,
     }:
-        magnitude = abs(delta)
-        if magnitude <= tolerance:
+        magnitude_decimal = abs(delta_decimal)
+        if magnitude_decimal == 0:
             return {"valid": False, "reward": -1.0, "status": "absolute_delta_condition_failed", "preference": relation}
-        result.update(
-            _utility_difference(
-                0.0,
-                magnitude,
-                relation == NumericPreference.ABS_DELTA_HIGHER.value,
-                scale,
-            )
-        )
+        magnitude = float(magnitude_decimal)
+        result.update(_utility_difference(0.0, magnitude, relation == NumericPreference.ABS_DELTA_HIGHER.value, scale))
         result["status"] = "absolute_delta"
         return result
     if relation in NUMERIC_FIXED_VALUE_RELATIONS:
@@ -27009,14 +26433,6 @@ def evaluate_numeric_preference_detailed(region, old_value, new_value, before_sn
     return {"valid": False, "reward": -1.0, "status": "unsupported_preference", "preference": relation}
 
 
-def evaluate_numeric_preference(region, old_value, new_value, before_snapshot, now_snapshot):
-    return safe_float(
-        evaluate_numeric_preference_detailed(region, old_value, new_value, before_snapshot, now_snapshot).get("reward"),
-        0.0,
-        -1.0,
-        1.0,
-    )
-
 def select_numeric_priority_difference(regions, before, now):
     before_snapshot = dict(before) if isinstance(before, dict) else {}
     now_snapshot = dict(now) if isinstance(now, dict) else {}
@@ -27036,28 +26452,27 @@ def select_numeric_priority_difference(regions, before, now):
         new_number = numeric_snapshot_value(new_value)
         if old_number is None or new_number is None:
             return {
-                "status": "unreadable_or_recovered",
+                "status": "waiting_for_trusted_numeric_observation",
                 "region": region,
                 "region_id": region_id,
                 "priority": safe_int(region.get("priority"), 0),
-                "old_value": old_value,
-                "new_value": new_value,
                 "before_snapshot": before_snapshot,
                 "now_snapshot": now_snapshot,
             }
-        if not numeric_values_equal(old_value, new_value):
-            return {
-                "status": "difference_selected",
-                "region": region,
-                "region_id": region_id,
-                "priority": safe_int(region.get("priority"), 0),
-                "old_value": old_value,
-                "new_value": new_value,
-                "before": old_number,
-                "now": new_number,
-                "before_snapshot": before_snapshot,
-                "now_snapshot": now_snapshot,
-            }
+        if numeric_values_equal(old_value, new_value):
+            continue
+        return {
+            "status": "difference_selected",
+            "region": region,
+            "region_id": region_id,
+            "priority": safe_int(region.get("priority"), 0),
+            "old_value": old_value,
+            "new_value": new_value,
+            "before": old_number,
+            "now": new_number,
+            "before_snapshot": before_snapshot,
+            "now_snapshot": now_snapshot,
+        }
     return {
         "status": "all_equal",
         "region": None,
@@ -27093,11 +26508,13 @@ def compare_numeric_snapshots_detailed(regions, before, now):
         "now": selected["now"],
         "preference": str(evaluation.get("preference", "")),
         "valid": bool(evaluation.get("valid")),
+        "used_prediction": bool(
+            isinstance(selected.get("old_value"), dict) and selected["old_value"].get("predicted")
+            or isinstance(selected.get("new_value"), dict) and selected["new_value"].get("predicted")
+        ),
         "utility": evaluation,
     }
 
-def compare_numeric_snapshots(regions, before, now):
-    return safe_float(compare_numeric_snapshots_detailed(regions, before, now).get("reward"), 0.0, -1.0, 1.0)
 
 
 def reorder_numeric_regions(regions, source_index, target_index):
@@ -27125,8 +26542,8 @@ def clean_numeric_region_references(regions, deleted_region_id):
         if str(config.get("compare_region_id", "")) == deleted_id:
             config["compare_region_id"] = ""
             if normalize_numeric_preference(config.get("preference")) in NUMERIC_COMPARISON_RELATIONS:
-                config["preference"] = NumericPreference.KEEP_SAME.value
-                item["goal_relation"] = NumericPreference.KEEP_SAME.value
+                config["preference"] = DEFAULT_NUMERIC_PREFERENCE
+                item["goal_relation"] = DEFAULT_NUMERIC_PREFERENCE
         item["relation_config"] = config
         values.append(item)
     for priority, item in enumerate(values):
@@ -27166,18 +26583,42 @@ def _region_descriptor(rgb, width, height, norm, out_w=NUMERIC_TRACKING_TEMPLATE
     if raw is None or len(raw) != width * height * 3:
         return b""
     x, y, region_w, region_h = _clamp_region_norm(norm)
-    left = max(0, min(width - 1, int(round(x * (width - 1)))))
-    top = max(0, min(height - 1, int(round(y * (height - 1)))))
-    right = max(left + 1, min(width, int(round((x + region_w) * width))))
-    bottom = max(top + 1, min(height, int(round((y + region_h) * height))))
-    values = bytearray()
+    margin_x = max(region_w * 0.34, 0.018)
+    margin_y = max(region_h * 0.50, 0.018)
+    outer = _clamp_region_norm([x - margin_x, y - margin_y, region_w + margin_x * 2.0, region_h + margin_y * 2.0])
+    ox, oy, ow, oh = outer
+    left = max(0, min(width - 1, int(round(ox * (width - 1)))))
+    top = max(0, min(height - 1, int(round(oy * (height - 1)))))
+    right = max(left + 1, min(width, int(round((ox + ow) * width))))
+    bottom = max(top + 1, min(height, int(round((oy + oh) * height))))
+    inner_left = int(round(x * width))
+    inner_top = int(round(y * height))
+    inner_right = int(round((x + region_w) * width))
+    inner_bottom = int(round((y + region_h) * height))
+    ring_values = []
+    fallback_values = []
     for out_y in range(max(1, int(out_h))):
         source_y = min(bottom - 1, top + int((out_y + 0.5) * (bottom - top) / max(1, int(out_h))))
         for out_x in range(max(1, int(out_w))):
             source_x = min(right - 1, left + int((out_x + 0.5) * (right - left) / max(1, int(out_w))))
             offset = (source_y * width + source_x) * 3
             red, green, blue = raw[offset : offset + 3]
-            values.append((77 * red + 150 * green + 29 * blue) >> 8)
+            gray = (77 * red + 150 * green + 29 * blue) >> 8
+            fallback_values.append(gray)
+            if not (inner_left <= source_x < inner_right and inner_top <= source_y < inner_bottom):
+                ring_values.append(gray)
+    fill = int(statistics.median(ring_values or fallback_values or [0]))
+    values = bytearray()
+    for out_y in range(max(1, int(out_h))):
+        source_y = min(bottom - 1, top + int((out_y + 0.5) * (bottom - top) / max(1, int(out_h))))
+        for out_x in range(max(1, int(out_w))):
+            source_x = min(right - 1, left + int((out_x + 0.5) * (right - left) / max(1, int(out_w))))
+            if inner_left <= source_x < inner_right and inner_top <= source_y < inner_bottom:
+                values.append(fill)
+            else:
+                offset = (source_y * width + source_x) * 3
+                red, green, blue = raw[offset : offset + 3]
+                values.append((77 * red + 150 * green + 29 * blue) >> 8)
     return bytes(values)
 
 
@@ -27269,9 +26710,6 @@ def _decode_tracking_templates(definition):
     return result
 
 
-def _decode_tracking_template(definition):
-    templates = _decode_tracking_templates(definition)
-    return templates[0] if templates else b""
 
 
 def _tracking_template_distance(templates, descriptor):
@@ -27458,7 +26896,7 @@ class NumericRegionEditor:
             1.0,
         )
         preference = normalize_numeric_preference(
-            config.get("preference") or value.get("goal_relation") or NumericPreference.KEEP_SAME.value
+            config.get("preference") or value.get("goal_relation") or DEFAULT_NUMERIC_PREFERENCE
         )
         config["preference"] = preference
         config["compare_region_id"] = str(config.get("compare_region_id", ""))
@@ -27530,7 +26968,7 @@ class NumericRegionEditor:
         form = ttk.LabelFrame(outer, text="所选区域设置", padding=10)
         form.pack(fill="x", pady=(10, 0))
         self.name_var = tk.StringVar()
-        self.preference_var = tk.StringVar(value="保持不变")
+        self.preference_var = tk.StringVar(value=NUMERIC_PREFERENCE_LABELS[DEFAULT_NUMERIC_PREFERENCE])
         self.compare_var = tk.StringVar()
         self.fixed_value_var = tk.StringVar()
         self.opacity_var = tk.DoubleVar(value=50.0)
@@ -27602,7 +27040,7 @@ class NumericRegionEditor:
         for index, region in enumerate(self.regions):
             region["priority"] = index
             label = self.display_name(region)
-            preference = NUMERIC_PREFERENCE_LABELS.get(str(region.get("goal_relation")), "保持不变")
+            preference = NUMERIC_PREFERENCE_LABELS.get(str(region.get("goal_relation")), NUMERIC_PREFERENCE_LABELS[DEFAULT_NUMERIC_PREFERENCE])
             self.listbox.insert("end", label + "  ·  " + preference)
             if str(region.get("id")) == str(self.selected_id):
                 selected_index = index
@@ -27615,7 +27053,7 @@ class NumericRegionEditor:
         state = "normal" if region is not None else "disabled"
         if region is None:
             self.name_var.set("")
-            self.preference_var.set("保持不变")
+            self.preference_var.set(NUMERIC_PREFERENCE_LABELS[DEFAULT_NUMERIC_PREFERENCE])
             self.compare_var.set("")
             self.fixed_value_var.set("")
             self.color_text.set(NUMERIC_OVERLAY_DEFAULT_COLOR)
@@ -27624,8 +27062,8 @@ class NumericRegionEditor:
             return
         config = normalize_relation_config(region.get("relation_config", {}))
         self.name_var.set(str(config.get("display_name", "数字区域")))
-        relation = str(config.get("preference", region.get("goal_relation", "keep_same")))
-        self.preference_var.set(NUMERIC_PREFERENCE_LABELS.get(relation, "保持不变"))
+        relation = str(config.get("preference", region.get("goal_relation", DEFAULT_NUMERIC_PREFERENCE)))
+        self.preference_var.set(NUMERIC_PREFERENCE_LABELS.get(relation, NUMERIC_PREFERENCE_LABELS[DEFAULT_NUMERIC_PREFERENCE]))
         self.fixed_value_var.set(
             str(config.get("fixed_value")) if finite_number(config.get("fixed_value")) else ""
         )
@@ -27840,12 +27278,12 @@ class NumericRegionEditor:
                 "id": uuid.uuid4().hex,
                 "region_norm": [0.35 + offset, 0.42 + offset, 0.30, 0.16],
                 "priority": len(self.regions),
-                "goal_relation": NumericPreference.KEEP_SAME.value,
+                "goal_relation": DEFAULT_NUMERIC_PREFERENCE,
                 "relation_config": {
                     "display_name": "数字区域" + str(index),
                     "overlay_color": NUMERIC_OVERLAY_DEFAULT_COLOR,
                     "overlay_opacity": NUMERIC_OVERLAY_DEFAULT_OPACITY,
-                    "preference": NumericPreference.KEEP_SAME.value,
+                    "preference": DEFAULT_NUMERIC_PREFERENCE,
                     "compare_region_id": "",
                 },
             }
@@ -27875,7 +27313,7 @@ class NumericRegionEditor:
 
     def _preference_changed(self, update=True):
         relation = normalize_numeric_preference(
-            NUMERIC_PREFERENCE_OPTIONS.get(self.preference_var.get(), NumericPreference.KEEP_SAME.value)
+            NUMERIC_PREFERENCE_OPTIONS.get(self.preference_var.get(), DEFAULT_NUMERIC_PREFERENCE)
         )
         compare_enabled = relation in NUMERIC_COMPARISON_RELATIONS and bool(
             getattr(self, "compare_target_by_display", {})
@@ -27916,7 +27354,7 @@ class NumericRegionEditor:
         config["overlay_color"] = _valid_overlay_color(self.color_text.get())
         config["overlay_opacity"] = safe_float(self.opacity_var.get(), 50.0, 0.0, 100.0) / 100.0
         relation = normalize_numeric_preference(
-            NUMERIC_PREFERENCE_OPTIONS.get(self.preference_var.get(), NumericPreference.KEEP_SAME.value)
+            NUMERIC_PREFERENCE_OPTIONS.get(self.preference_var.get(), DEFAULT_NUMERIC_PREFERENCE)
         )
         config["preference"] = relation
         if relation in NUMERIC_COMPARISON_RELATIONS:
@@ -27944,7 +27382,7 @@ class NumericRegionEditor:
             region["priority"] = priority
             config = normalize_relation_config(region.get("relation_config", {}))
             relation = normalize_numeric_preference(
-                config.get("preference", region.get("goal_relation", NumericPreference.KEEP_SAME.value))
+                config.get("preference", region.get("goal_relation", DEFAULT_NUMERIC_PREFERENCE))
             )
             config["preference"] = relation
             if relation in NUMERIC_FIXED_VALUE_RELATIONS and not finite_number(config.get("fixed_value")):
@@ -27981,8 +27419,11 @@ class NumericRegionEditor:
                 "tracking_templates": templates,
                 "tracking_template_w": NUMERIC_TRACKING_TEMPLATE_W,
                 "tracking_template_h": NUMERIC_TRACKING_TEMPLATE_H,
-                "tracking_search": "local_template_expanded_then_global_coarse_to_fine",
+                "tracking_search": "stable_ui_anchor_optical_flow_neural_embedding_multi_hypothesis",
                 "tracking_independent_scales": True,
+                "tracking_anchor_excludes_numeric_content": True,
+                "tracking_uses_learned_roi_embedding": True,
+                "tracking_uses_online_box_regression": True,
                 "tracking_occlusion_recovery": True,
                 "tracking_update_confirmation_frames": NUMERIC_TRACKING_CONFIRM_FRAMES,
                 "tracking_persist_stable": bool(config.get("tracking_persist_stable", False)),
@@ -28104,25 +27545,6 @@ class AppUiService(AppServiceBase):
         flow.columnconfigure(0, weight=1)
         flow.columnconfigure(1, weight=1)
 
-        capture = ttk.LabelFrame(outer, text="采集内容", style="Card.TLabelframe")
-        capture.pack(fill="x", pady=(0, 12))
-        capture_specs = [
-            ("鼠标", self.capture_mouse_var),
-            ("键盘", self.capture_keyboard_var),
-            ("手柄", self.capture_gamepad_var),
-            ("声音", self.capture_audio_var),
-        ]
-        self.capture_toggle_widgets = {}
-        for index, (name, variable) in enumerate(capture_specs):
-            widget = ttk.Checkbutton(capture, text=name, variable=variable, command=self._capture_options_changed)
-            widget.grid(row=0, column=index, sticky="w", padx=(0, 18) if index < 3 else 0)
-            self.capture_toggle_widgets[name] = widget
-        ttk.Label(capture, textvariable=self.capture_options_text, wraplength=760).grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(8, 0)
-        )
-        for index in range(4):
-            capture.columnconfigure(index, weight=1)
-
         info = ttk.LabelFrame(outer, text="当前配置", style="Card.TLabelframe")
         info.pack(fill="x", pady=(0, 12))
         labels = [
@@ -28154,36 +27576,9 @@ class AppUiService(AppServiceBase):
         ttk.Label(bottom, textvariable=self.status, wraplength=570).pack(side="left", fill="x", expand=True)
         ttk.Label(bottom, text="ESC 结束当前长流程").pack(side="right", padx=(12, 0))
 
-    def _capture_options_from_vars(self):
-        return CaptureOptions(
-            mouse=bool(self.capture_mouse_var.get()),
-            keyboard=bool(self.capture_keyboard_var.get()),
-            gamepad=bool(self.capture_gamepad_var.get()),
-            audio=bool(self.capture_audio_var.get()),
-        )
-
     def _set_capture_options(self, options, persist=False):
         value = options if isinstance(options, CaptureOptions) else CaptureOptions()
         self.capture_options = value
-        self.capture_mouse_var.set(value.mouse)
-        self.capture_keyboard_var.set(value.keyboard)
-        self.capture_gamepad_var.set(value.gamepad)
-        self.capture_audio_var.set(value.audio)
-        enabled = [
-            name
-            for name, state in (
-                ("鼠标", value.mouse),
-                ("键盘", value.keyboard),
-                ("手柄", value.gamepad),
-                ("声音", value.audio),
-            )
-            if state
-        ]
-        self.capture_options_text.set(
-            "已开启："
-            + ("、".join(enabled) if enabled else "无")
-            + "。鼠标可由AI执行；键盘、手柄和声音当前作为感知与行为条件，AI不会向系统注入这些输入。"
-        )
         if persist and self.store is not None and isinstance(self.selected_game, dict):
             profile = self.store.load_game_profile(self.selected_game["id"])
             self.store.save_game_profile(self.selected_game["id"], value.apply_profile(profile))
@@ -28194,31 +27589,6 @@ class AppUiService(AppServiceBase):
             return
         profile = self.store.load_game_profile(self.selected_game["id"])
         self._set_capture_options(CaptureOptions.from_profile(profile), False)
-
-    def _capture_options_changed(self):
-        if self.mode_state != MODE_IDLE:
-            self._set_capture_options(self.capture_options, False)
-            self.show_error("运行期间不能更改采集内容，请先按ESC结束")
-            return
-        value = self._capture_options_from_vars()
-        try:
-            self._set_capture_options(value, True)
-            self.status.set(
-                "采集内容已更新："
-                + "、".join(
-                    name
-                    for name, state in (
-                        ("鼠标", value.mouse),
-                        ("键盘", value.keyboard),
-                        ("手柄", value.gamepad),
-                        ("声音", value.audio),
-                    )
-                    if state
-                )
-            )
-        except (StorageError, sqlite3.Error, OSError, ValueError, RuntimeError) as error:
-            self._set_capture_options(self.capture_options, False)
-            self.show_error(str(error))
 
     def tk_exception(self, exc_type, exc_value, exc_traceback):
         self.show_error("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
@@ -28820,93 +28190,7 @@ class AppUiService(AppServiceBase):
         except RECOVERABLE_ERRORS as error:
             self.show_error("无法打开数字识别区域：" + str(error))
 
-    def open_task_dialog(self):
-        return TaskSettingsDialog(self).open()
 
-    def open_data_dialog(self):
-        if self.mode:
-            self.show_error("请先停止当前模式")
-            return
-        try:
-            game = self.require_game()
-        except RECOVERABLE_ERRORS as error:
-            self.show_error(str(error))
-            return
-        win = tk.Toplevel(self.root)
-        state = {"closed": False, "background_keys": ["data_dialog_refresh"]}
-        win.title("数据清理")
-        fit_window(win, 560, 300, 420, 260)
-        win.transient(self.root)
-        win.grab_set()
-        frame = ttk.Frame(win, padding=18)
-        frame.pack(fill="both", expand=True)
-        text = tk.StringVar()
-        ttk.Label(frame, text="当前游戏数据维护", font=("Microsoft YaHei UI", 13, "bold")).pack(
-            anchor="w", pady=(0, 10)
-        )
-        ttk.Label(frame, textvariable=text, wraplength=510).pack(anchor="w", fill="x")
-
-        def refresh():
-            text.set("正在后台读取样本统计和模型状态…")
-
-            def load():
-                stats = self.store.sample_stats(game["id"])
-                model = self.store.load_model(game["id"])
-                prototype_count = len(model.get("prototypes", [])) if model else 0
-                return UserMessageCatalog.data_summary(game["name"], stats, prototype_count)
-
-            def apply(value):
-                if not state["closed"] and win.winfo_exists():
-                    text.set(value)
-
-            def failed(error):
-                if not state["closed"] and win.winfo_exists():
-                    text.set("数据读取失败：" + str(error))
-
-            self.run_background("data_dialog_refresh", load, apply, failed)
-
-        def compact():
-            result = self.store.compact_samples(game["id"])
-            message = UserMessageCatalog.compaction(result)
-            self.status.set(message)
-            self.show_info("数据压缩完成", message)
-            refresh()
-            self._refresh_all()
-
-        def restore():
-            self.store.restore_model_backup(game["id"])
-            message = "已从数据库中的完整校验备份恢复模型"
-            self.status.set(message)
-            self.show_info("模型恢复完成", message)
-            refresh()
-            self._refresh_all()
-
-        def backup():
-            path = self.store.create_recovery_backup("manual")
-            message = UserMessageCatalog.backup_created(path)
-            self.status.set(message)
-            self.show_info("恢复备份已创建", message)
-
-        def clear():
-            if not self.confirm_dialog("清空数据", "确认清空当前游戏的全部样本、模型和备份吗？此操作不可撤销。"):
-                return
-            self.store.clear_game_data(game["id"])
-            message = "已清空当前游戏的样本、模型、备份和拒绝记录"
-            self.status.set(message)
-            self.show_info("数据清空完成", message)
-            self.close_dialog(win, state)
-            self._refresh_all()
-
-        buttons = ttk.Frame(frame)
-        buttons.pack(side="bottom", fill="x", pady=(14, 0))
-        ttk.Button(buttons, text="压缩重复样本", command=compact).pack(side="left", padx=(0, 6))
-        ttk.Button(buttons, text="恢复模型备份", command=restore).pack(side="left", padx=6)
-        ttk.Button(buttons, text="创建恢复备份", command=backup).pack(side="left", padx=6)
-        ttk.Button(buttons, text="清空全部数据", command=clear).pack(side="left", padx=6)
-        ttk.Button(buttons, text="关闭", command=lambda: self.close_dialog(win, state)).pack(side="right")
-        win.protocol("WM_DELETE_WINDOW", lambda: self.close_dialog(win, state))
-        win.bind("<Escape>", lambda event: self.close_dialog(win, state))
-        refresh()
 
 
 class AppLifecycleService(AppServiceBase):
@@ -29282,20 +28566,7 @@ class AppLifecycleService(AppServiceBase):
     def _fail_active_mode(self, message):
         self.request_mode_stop("failed", str(message))
 
-    def retest_capture_backends(self):
-        self.start_worker("重测采集", self.retest_capture_worker, True)
 
-    def retest_capture_worker(self):
-        target = self.require_window(False)
-        self.api.reset_capture_backends(target)
-        self.api.calibrations.pop(int(target["hwnd"]), None)
-        result = self.ensure_capture_calibration(target, "重新测试采集后端")
-        self.lifecycle.mark_running()
-        return ModeResult(
-            "completed",
-            "采集后端重新测试完成：" + str(result.get("validated_backend", "未知")),
-            {"validated_backends": list(result.get("validated_backends", []))},
-        )
 
     def _escape_hook_signal(self, event):
         state, name, stop_event, _, _ = self.lifecycle.snapshot()
@@ -31918,6 +31189,14 @@ class AppStorageService(AppServiceBase):
         candidate.closed = True
         candidate.store = None
         candidate.source_paused = False
+        old_entry = rollback / "main.py"
+        new_entry = destination / "main.py"
+        if candidate.source_base is None and old_entry.is_file() and new_entry.is_file():
+            try:
+                if sha256_file(old_entry) == sha256_file(new_entry):
+                    old_entry.unlink()
+            except RECOVERABLE_ERRORS as error:
+                record_cleanup_error("INITIAL_ENTRY_CLEANUP_FAILED", error)
         if old_store is not None and old_store is not new_store:
             if not old_store.close(5.0):
                 old_store.emergency_checkpoint("migration_source_close_timeout")
@@ -32229,8 +31508,6 @@ class AppStorageService(AppServiceBase):
             "文件", self.integrity_check_worker, False, False, "正在自动检查、下载、修复并删除无效文件；按ESC可提前结束"
         )
 
-    def start_download(self):
-        return self.start_integrity_check()
 
     def integrity_check_worker(self):
         self.lifecycle.mark_running()
@@ -32301,16 +31578,10 @@ class AppStorageService(AppServiceBase):
 class App:
     def _build(self, *args, **kwargs):
         return self.ui_service._build(*args, **kwargs)
-    def _capture_options_from_vars(self, *args, **kwargs):
-        return self.ui_service._capture_options_from_vars(*args, **kwargs)
     def _set_capture_options(self, *args, **kwargs):
         return self.ui_service._set_capture_options(*args, **kwargs)
     def _sync_capture_options_from_profile(self, *args, **kwargs):
         return self.ui_service._sync_capture_options_from_profile(*args, **kwargs)
-    def _capture_options_changed(self, *args, **kwargs):
-        return self.ui_service._capture_options_changed(*args, **kwargs)
-    def _toggle_advanced(self, *args, **kwargs):
-        return self.ui_service._toggle_advanced(*args, **kwargs)
     def tk_exception(self, *args, **kwargs):
         return self.ui_service.tk_exception(*args, **kwargs)
     def ui(self, *args, **kwargs):
@@ -32350,10 +31621,6 @@ class App:
         return self.ui_service.open_window_dialog(*args, **kwargs)
     def open_numeric_region_dialog(self, *args, **kwargs):
         return self.ui_service.open_numeric_region_dialog(*args, **kwargs)
-    def open_task_dialog(self, *args, **kwargs):
-        return self.ui_service.open_task_dialog(*args, **kwargs)
-    def open_data_dialog(self, *args, **kwargs):
-        return self.ui_service.open_data_dialog(*args, **kwargs)
     def run_background(self, *args, **kwargs):
         return self.lifecycle_service.run_background(*args, **kwargs)
     def process_ui_queue(self, *args, **kwargs):
@@ -32368,10 +31635,6 @@ class App:
         return self.lifecycle_service._poll_mode_shutdown(*args, **kwargs)
     def _fail_active_mode(self, *args, **kwargs):
         return self.lifecycle_service._fail_active_mode(*args, **kwargs)
-    def retest_capture_backends(self, *args, **kwargs):
-        return self.lifecycle_service.retest_capture_backends(*args, **kwargs)
-    def retest_capture_worker(self, *args, **kwargs):
-        return self.lifecycle_service.retest_capture_worker(*args, **kwargs)
     def _escape_hook_signal(self, *args, **kwargs):
         return self.lifecycle_service._escape_hook_signal(*args, **kwargs)
     def poll_global_escape(self, *args, **kwargs):
@@ -32467,8 +31730,6 @@ class App:
         return self.storage_service.require_ai_runtime(*args, **kwargs)
     def start_integrity_check(self, *args, **kwargs):
         return self.storage_service.start_integrity_check(*args, **kwargs)
-    def start_download(self, *args, **kwargs):
-        return self.storage_service.start_download(*args, **kwargs)
     def integrity_check_worker(self, *args, **kwargs):
         return self.storage_service.integrity_check_worker(*args, **kwargs)
 
@@ -32594,14 +31855,6 @@ class App:
         )
         self.input_text = tk.StringVar(value="自动输入：已锁定")
         self.capture_options = CaptureOptions()
-        self.capture_mouse_var = tk.BooleanVar(value=True)
-        self.capture_keyboard_var = tk.BooleanVar(value=False)
-        self.capture_gamepad_var = tk.BooleanVar(value=False)
-        self.capture_audio_var = tk.BooleanVar(value=False)
-        self.capture_options_text = tk.StringVar(
-            value="已开启：鼠标。键盘可通过扫描码执行；手柄需ViGEm/XInput可用；声音仅用于感知。"
-        )
-        self.capture_toggle_widgets = {}
         self.progress_value = tk.DoubleVar(value=0.0)
         self.escape_metrics = {
             "pressed": 0.0,
@@ -32715,11 +31968,6 @@ class App:
                 button.configure(state="normal" if mapping.get(name, False) else "disabled")
                 if name in REQUIRED_DEFAULT_BUTTONS:
                     button.configure(style="Primary.TButton" if name == recommended else "Workflow.TButton")
-            except RECOVERABLE_ERRORS as error:
-                record_cleanup_error("BEST_EFFORT_EXCEPTION", error)
-        for widget in self.capture_toggle_widgets.values():
-            try:
-                widget.configure(state="disabled" if running or directory_busy else "normal")
             except RECOVERABLE_ERRORS as error:
                 record_cleanup_error("BEST_EFFORT_EXCEPTION", error)
 
@@ -33696,73 +32944,47 @@ def managed_startup_generation(base):
                 record_cleanup_error("STARTUP_GENERATION_DB_CLOSE_FAILED", error)
 
 
-def quarantine_owned_paths(base, paths, category, release_generation=None):
+def delete_owned_paths(base, paths, category):
     root = Path(base).resolve()
-    generation = managed_startup_generation(root)
-    release = generation + 1 if release_generation is None else max(generation + 1, safe_int(release_generation, generation + 1))
-    transaction = root / "quarantine" / "orphans" / uuid.uuid4().hex
-    records = []
-    moved = []
+    candidates = []
     for raw in paths:
         source = Path(raw).resolve()
         if not source.exists() or not path_inside(source, root) or source == root:
             continue
-        if path_inside(source, root / "quarantine" / "orphans"):
-            continue
         relative = source.relative_to(root)
-        if relative.as_posix() in {"main.py", "universal_game_ai.db", "universal_game_ai.db-wal", "universal_game_ai.db-shm"}:
+        if relative.as_posix() in {"main.py", "universal_game_ai.db", "universal_game_ai.db-wal", "universal_game_ai.db-shm", ".ugai.lock"}:
             continue
-        destination = transaction / "files" / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            size = source.stat().st_size if source.is_file() else 0
-        except RECOVERABLE_ERRORS:
-            size = 0
+        reject_reparse_points(root, source)
+        candidates.append(source)
+    unique = sorted(set(candidates), key=lambda item: (len(item.parts), str(item).casefold()))
+    collapsed = []
+    for candidate in unique:
+        if any(candidate.is_relative_to(parent) for parent in collapsed):
+            continue
+        collapsed.append(candidate)
+    records = []
+    for source in collapsed:
+        relative = source.relative_to(root).as_posix()
+        size = 0
         checksum = ""
-        if source.is_file() and size <= MODEL_MAX_BYTES:
-            try:
+        if source.is_file():
+            size = source.stat().st_size
+            if size <= MODEL_MAX_BYTES:
                 checksum = sha256_file(source, MODEL_MAX_BYTES)
-            except RECOVERABLE_ERRORS:
-                checksum = ""
-        os.replace(source, destination)
-        moved.append((source, destination))
+            source.unlink()
+        else:
+            shutil.rmtree(source, ignore_errors=False)
+        if source.exists():
+            raise StorageError("无法彻底删除无效或冗余项：" + relative)
         records.append(
             {
-                "original": relative.as_posix(),
-                "stored": destination.relative_to(transaction).as_posix(),
-                "is_directory": destination.is_dir(),
+                "original": relative,
+                "is_directory": not bool(checksum or size),
                 "bytes": size,
                 "sha256": checksum,
             }
         )
-    if not records:
-        try:
-            transaction.rmdir()
-        except OSError as error:
-            record_cleanup_error("EMPTY_QUARANTINE_REMOVE_FAILED", error)
-        return {"category": str(category), "items": [], "transaction": ""}
-    manifest = {
-        "schema_version": 1,
-        "category": str(category),
-        "created": time.time(),
-        "created_generation": generation,
-        "release_generation": release,
-        "items": records,
-    }
-    try:
-        durable_atomic_write(
-            transaction / "manifest.json",
-            json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
-            root,
-        )
-    except RECOVERABLE_ERRORS:
-        for source, destination in reversed(moved):
-            if destination.exists() and not source.exists():
-                source.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(destination, source)
-        raise
-    manifest["transaction"] = transaction.relative_to(root).as_posix()
-    return manifest
+    return {"category": str(category), "items": records, "transaction": "", "deleted": True}
 
 
 def recover_runtime_layout(base):
@@ -33779,15 +33001,15 @@ def recover_runtime_layout(base):
         reverse=True,
     )
     if _runtime_tree_manifest(current, True) is not None:
-        quarantine_owned_paths(root, rollbacks, "runtime_redundant_rollback")
+        delete_owned_paths(root, rollbacks, "runtime_redundant_rollback")
         return True
     valid = next((item for item in rollbacks if _runtime_tree_manifest(item, True) is not None), None)
     if valid is None:
         return False
     invalid_paths = [current] if current.exists() else []
-    quarantine_owned_paths(root, invalid_paths, "runtime_invalid_current")
+    delete_owned_paths(root, invalid_paths, "runtime_invalid_current")
     os.replace(valid, current)
-    quarantine_owned_paths(root, [item for item in rollbacks if item.exists()], "runtime_redundant_rollback")
+    delete_owned_paths(root, [item for item in rollbacks if item.exists()], "runtime_redundant_rollback")
     return True
 
 
@@ -33900,7 +33122,7 @@ def directory_runtime_manifest(base):
     except RuntimeError:
         root = Path(base).resolve()
         current = root / "runtime.current"
-        quarantine_owned_paths(root, [current] if current.exists() else [], "runtime_incompatible")
+        delete_owned_paths(root, [current] if current.exists() else [], "runtime_incompatible")
         return None
 
 
@@ -33946,8 +33168,7 @@ def validate_data_directory_selection(path, source_store=None, source_base=None)
     destination = Path(path).expanduser().resolve()
     if "\x00" in str(destination):
         raise RuntimeError("目录路径无效")
-    if source_store is None and same_directory(destination, Path(__file__).resolve().parent):
-        raise RuntimeError("首次运行不能把main.py所在文件夹作为目标目录")
+    initial_entry_directory = source_store is None and same_directory(destination, Path(__file__).resolve().parent)
     existing_parent = destination
     while not existing_parent.exists() and existing_parent != existing_parent.parent:
         existing_parent = existing_parent.parent
@@ -33960,7 +33181,12 @@ def validate_data_directory_selection(path, source_store=None, source_base=None)
             raise RuntimeError("所选路径不是文件夹")
         reject_reparse_points(destination)
         if not same_directory(destination, source_path):
-            existing = [item for item in destination.iterdir() if item.name != ".ugai.lock"]
+            existing = [
+                item
+                for item in destination.iterdir()
+                if item.name != ".ugai.lock"
+                and not (initial_entry_directory and item.name == "main.py" and item.is_file())
+            ]
             if existing:
                 valid_existing, reason = existing_data_directory_status(destination)
                 if source_store is not None or not valid_existing:
@@ -34014,7 +33240,13 @@ def prepare_data_directory(
     ):
         if stale.is_dir():
             shutil.rmtree(stale, ignore_errors=True)
-    existing = [item for item in destination.iterdir() if item.name != ".ugai.lock"]
+    initial_entry_directory = source_store is None and same_directory(destination, Path(__file__).resolve().parent)
+    existing = [
+        item
+        for item in destination.iterdir()
+        if item.name != ".ugai.lock"
+        and not (initial_entry_directory and item.name == "main.py" and item.is_file())
+    ]
     reopening = False
     if existing:
         valid_existing, existing_reason = existing_data_directory_status(destination)
@@ -34369,12 +33601,6 @@ def _runtime_emit(kind, **values):
     sys.stdout.flush()
 
 
-def _runtime_python(runtime_root):
-    root = Path(runtime_root)
-    direct = root / "python" / ("python.exe" if os.name == "nt" else "python")
-    if direct.exists():
-        return str(direct)
-    return str(root / ("venv/Scripts/python.exe" if os.name == "nt" else "venv/bin/python"))
 
 
 def _runtime_worker_command(command, env, label):
@@ -35364,7 +34590,7 @@ def runtime_install_worker(request_path):
                 os.replace(backup, current)
             raise
         if backup.exists():
-            quarantine_owned_paths(base, [backup], "runtime_replaced_rollback")
+            delete_owned_paths(base, [backup], "runtime_replaced_rollback")
         retained_root = current / "retained"
         retained_backup = rollback_root / ("runtime.rollback.retained." + uuid.uuid4().hex)
         retained_moved = False
@@ -35381,13 +34607,13 @@ def runtime_install_worker(request_path):
                 os.replace(retained_backup, retained_root)
             raise
         if retained_backup.exists():
-            quarantine_owned_paths(base, [retained_backup], "runtime_replaced_retained_rollback")
+            delete_owned_paths(base, [retained_backup], "runtime_replaced_retained_rollback")
         _runtime_emit("progress", value=100.0, message="下载与离线验证完成，CPU安全后端已保留")
         _runtime_emit("result", manifest=manifest)
         return 0
     except Exception as error:
         if staging.exists():
-            quarantine_owned_paths(base, [staging], "runtime_failed_staging")
+            delete_owned_paths(base, [staging], "runtime_failed_staging")
         _runtime_emit("error", message=str(error), traceback=traceback.format_exc()[-6000:])
         return 1
 
@@ -35510,7 +34736,7 @@ class ManagedIntegrityManager:
             value = validate_runtime_manifest(self.base, True, True)
         except RuntimeError as error:
             current = self.base / "runtime.current"
-            quarantined = quarantine_owned_paths(self.base, [current] if current.exists() else [], "runtime_invalid")
+            quarantined = delete_owned_paths(self.base, [current] if current.exists() else [], "runtime_invalid")
             if require_ready:
                 raise RuntimeError("运行库恢复后仍未通过可信清单：" + str(error)) from error
             return {"ready": False, "reason": str(error), "quarantined": quarantined.get("items", [])}
@@ -35702,8 +34928,8 @@ class ManagedIntegrityManager:
                     continue
                 if self._owned_model_name(relative):
                     orphaned.append(path)
-        quarantined_corrupt = quarantine_owned_paths(self.base, corrupt, "managed_optional_corrupt_model")
-        quarantined_orphans = quarantine_owned_paths(self.base, orphaned, "forbidden_or_orphaned_model")
+        quarantined_corrupt = delete_owned_paths(self.base, corrupt, "managed_optional_corrupt_model")
+        quarantined_orphans = delete_owned_paths(self.base, orphaned, "forbidden_or_orphaned_model")
         return {
             "referenced": len(references),
             "missing_regenerable": sorted(set(missing)),
@@ -35719,7 +34945,7 @@ class ManagedIntegrityManager:
         for pattern in ("runtime.staging.*", "runtime.candidate.*", "runtime.retained.*"):
             candidates.extend(path for path in temp_root.glob(pattern) if path.exists())
         candidates.extend(path for path in rollback_root.glob("runtime.rollback.*") if path.exists())
-        return quarantine_owned_paths(self.base, candidates, "forbidden_or_orphaned_runtime")
+        return delete_owned_paths(self.base, candidates, "forbidden_or_orphaned_runtime")
 
     def _stale_cache_orphans(self):
         now = time.time()
@@ -35762,7 +34988,7 @@ class ManagedIntegrityManager:
                         stale = False
                     if stale:
                         candidates.append(path)
-        return quarantine_owned_paths(self.base, candidates, "expired_managed_cache")
+        return delete_owned_paths(self.base, candidates, "expired_managed_cache")
 
     def _audit_attachment_orphans(self):
         attachment_root = self.base / "audit" / "attachments"
@@ -35781,7 +35007,7 @@ class ManagedIntegrityManager:
                 if candidate.is_file() and candidate.name in text:
                     referenced.add(candidate.resolve())
         candidates = [path for path in attachment_root.rglob("*") if path.is_file() and path.resolve() not in referenced]
-        return quarantine_owned_paths(self.base, candidates, "orphaned_audit_attachment")
+        return delete_owned_paths(self.base, candidates, "orphaned_audit_attachment")
 
     def _is_currently_referenced(self, relative, references):
         path = Path(relative)
@@ -35802,11 +35028,8 @@ class ManagedIntegrityManager:
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except RECOVERABLE_ERRORS:
-                result["pending"].append(transaction.relative_to(self.base).as_posix())
-                continue
-            release = safe_int(manifest.get("release_generation"), safe_int(manifest.get("created_generation"), 0) + 1, 0)
-            if self.generation < release:
-                result["pending"].append(transaction.relative_to(self.base).as_posix())
+                shutil.rmtree(transaction, ignore_errors=False)
+                result["deleted"].append(transaction.relative_to(self.base).as_posix())
                 continue
             for item in manifest.get("items", []):
                 original = Path(str(item.get("original", "")))
@@ -35838,9 +35061,8 @@ class ManagedIntegrityManager:
             try:
                 manifest = json.loads((transaction / "manifest.json").read_text(encoding="utf-8"))
             except RECOVERABLE_ERRORS:
-                continue
-            release = safe_int(manifest.get("release_generation"), safe_int(manifest.get("created_generation"), 0) + 1, 0)
-            if manifest.get("delete_after_startup_generation") is True and self.generation >= release:
+                manifest = {"delete_after_startup_generation": True}
+            if manifest.get("delete_after_startup_generation") is True:
                 shutil.rmtree(transaction)
                 result.append(transaction.name)
         return result
@@ -36013,7 +35235,7 @@ class RuntimeInstaller:
         return handle
 
     def _cleanup_staging(self):
-        quarantine_owned_paths(
+        delete_owned_paths(
             self.base,
             [item for item in (self.base / "temp").glob("runtime.staging.*") if item.exists()],
             "runtime_interrupted_staging",
@@ -36751,8 +35973,6 @@ class OfflineVisionRuntime:
         self.base = Path(base)
         self.model_dir = self.base / "models" / "vision"
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        self.quarantine_dir = self.base / "quarantine" / "vision"
-        self.quarantine_dir.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.torch = None
         self.np = None
@@ -36975,17 +36195,18 @@ class OfflineVisionRuntime:
             for key, value in model.state_dict().items()
         }
 
-    def _quarantine(self, path, reason):
-        stamp = str(int(time.time())) + "_" + uuid.uuid4().hex
+    def _delete_invalid_model(self, path, reason):
+        failures = []
         for source in (Path(path), self._metadata_path(path)):
-            if source.exists():
-                target = self.quarantine_dir / (source.name + "." + stamp + ".invalid")
-                try:
-                    os.replace(source, target)
-                except RECOVERABLE_ERRORS:
-                    shutil.copy2(source, target)
-                    source.unlink()
-        raise RuntimeError("模型校验失败，已隔离并要求重新睡眠：" + str(reason))
+            try:
+                source.unlink()
+            except FileNotFoundError:
+                pass
+            except RECOVERABLE_ERRORS as error:
+                failures.append(str(source) + ":" + str(error))
+        if failures:
+            raise RuntimeError("模型校验失败且无法彻底删除：" + "；".join(failures))
+        raise RuntimeError("模型校验失败，已彻底删除并要求重新升级：" + str(reason))
 
     def _atomic_save(self, path, state, metadata):
         tensors = {str(key): value.detach().to("cpu").contiguous() for key, value in state.items()}
@@ -37008,7 +36229,7 @@ class OfflineVisionRuntime:
     def _load_state(self, path, model):
         meta_path = self._metadata_path(path)
         if not meta_path.exists():
-            self._quarantine(path, "缺少模型清单")
+            self._delete_invalid_model(path, "缺少模型清单")
         try:
             metadata = json.loads(meta_path.read_text(encoding="utf-8"))
             checksum = str(metadata.pop("metadata_checksum", ""))
@@ -37042,7 +36263,7 @@ class OfflineVisionRuntime:
             model.load_state_dict(tensors, strict=True)
             return metadata
         except RECOVERABLE_ERRORS as error:
-            self._quarantine(path, error)
+            self._delete_invalid_model(path, error)
 
     def _builtin_default_state(self, game_id):
         return {
@@ -37551,17 +36772,27 @@ class OfflineOCRRuntime:
         self.lock = threading.RLock()
         self.engine = None
         self.np = None
+        self.cv2 = None
+        self.vision = None
         self.backend_name = "none"
         self.self_test_passed = False
         self.ready = False
         self.error = "尚未检查OCR运行库"
+        self.region_profiles = {}
+        self.tracking_states = {}
+        self.frame_counter = 0
         self._load_runtime()
+
+    def attach_vision(self, vision):
+        self.vision = vision
+        return True
 
     def _load_runtime(self):
         try:
             validate_runtime_manifest(self.base, True, True)
             self.engine = None
             self.np = None
+            self.cv2 = None
             self.backend_name = "none"
             self.self_test_passed = False
             self.ready = True
@@ -37574,6 +36805,7 @@ class OfflineOCRRuntime:
 
                 importlib.invalidate_caches()
                 self.np = importlib.import_module("numpy")
+                self.cv2 = importlib.import_module("cv2")
                 try:
                     module = importlib.import_module("rapidocr")
                     self.engine = module.RapidOCR()
@@ -37583,12 +36815,14 @@ class OfflineOCRRuntime:
                 self.backend_name = "rapidocr"
                 self.self_test_passed = self._self_test()
                 if not self.self_test_passed:
-                    self.error = "RapidOCR真实图片识别自检失败"
-            except RECOVERABLE_ERRORS:
+                    self.error = "RapidOCR多分支真实图片识别自检失败"
+            except RECOVERABLE_ERRORS as error:
                 self.engine = None
                 self.np = None
+                self.cv2 = None
                 self.backend_name = "none"
                 self.self_test_passed = False
+                self.error = str(error)
         except RECOVERABLE_ERRORS as error:
             self.engine = None
             self.ready = False
@@ -37597,26 +36831,13 @@ class OfflineOCRRuntime:
             self.error = str(error)
 
     def _self_test(self):
-        if self.engine is None or self.np is None:
+        if self.engine is None or self.np is None or self.cv2 is None:
             return False
         try:
             image = self.np.full((96, 320, 3), 255, dtype=self.np.uint8)
-            try:
-                cv2 = __import__("cv2")
-                cv2.putText(image, "12345", (20, 68), cv2.FONT_HERSHEY_SIMPLEX, 1.7, (0, 0, 0), 3, cv2.LINE_AA)
-            except RECOVERABLE_ERRORS:
-                return False
-            with self.lock:
-                output = self.engine(image)
-            if hasattr(output, "txts"):
-                texts = list(output.txts or [])
-            elif isinstance(output, tuple) and output:
-                texts = [
-                    str(item[1]) for item in (output[0] or []) if isinstance(item, (list, tuple)) and len(item) >= 2
-                ]
-            else:
-                texts = [str(item[1]) for item in (output or []) if isinstance(item, (list, tuple)) and len(item) >= 2]
-            return any("123" in "".join(ch for ch in str(text) if ch.isdigit()) for text in texts)
+            self.cv2.putText(image, "12345", (20, 68), self.cv2.FONT_HERSHEY_SIMPLEX, 1.7, (0, 0, 0), 3, self.cv2.LINE_AA)
+            result = self._multi_branch_numeric(image, {}, "auto", maximum_branches=12)
+            return bool(result.get("parsed", {}).get("valid") and abs(safe_float(result["parsed"].get("value")) - 12345.0) < 0.5)
         except RECOVERABLE_ERRORS:
             return False
 
@@ -37625,6 +36846,10 @@ class OfflineOCRRuntime:
             "ocr_backend": self.backend_name,
             "ocr_self_test": bool(self.self_test_passed),
             "ocr_recognize": bool(self.backend_name == "rapidocr" and self.self_test_passed),
+            "ocr_multi_branch": bool(self.self_test_passed and self.cv2 is not None),
+            "ocr_profile_learning": bool(self.self_test_passed),
+            "ocr_neural_roi_embedding": bool(self.vision is not None),
+            "ocr_tracking": "stable_anchor_optical_flow_neural_embedding_box_regression",
         }
 
     def require_ready(self):
@@ -37639,6 +36864,547 @@ class OfflineOCRRuntime:
         if len(raw) != int(width) * int(height) * 3:
             raise RuntimeError("OCR图像尺寸无效")
         return self.np.frombuffer(raw, dtype=self.np.uint8).reshape(int(height), int(width), 3).copy()
+
+    def _frame_array(self, frame):
+        preview = preview_rgb_bytes(frame.get("preview_rgb"))
+        width = safe_int(frame.get("preview_width", PREVIEW_W), PREVIEW_W, 1, 8192)
+        height = safe_int(frame.get("preview_height", PREVIEW_H), PREVIEW_H, 1, 8192)
+        if preview is None:
+            preview = rgb_bytes(frame.get("rgb"))
+            width = FEATURE_W
+            height = FEATURE_H
+        if preview is None:
+            raise RuntimeError("当前帧没有可用OCR图像")
+        return self._array(preview, width, height), width, height
+
+    @staticmethod
+    def _norm_rect(norm, width, height):
+        x, y, w, h = _clamp_region_norm(norm)
+        left = max(0, min(width - 1, int(round(x * width))))
+        top = max(0, min(height - 1, int(round(y * height))))
+        right = max(left + 1, min(width, int(round((x + w) * width))))
+        bottom = max(top + 1, min(height, int(round((y + h) * height))))
+        return left, top, right, bottom
+
+    @staticmethod
+    def _rect_norm(left, top, right, bottom, width, height):
+        return _clamp_region_norm(
+            [
+                safe_float(left) / max(1, width),
+                safe_float(top) / max(1, height),
+                max(1.0, safe_float(right) - safe_float(left)) / max(1, width),
+                max(1.0, safe_float(bottom) - safe_float(top)) / max(1, height),
+            ]
+        )
+
+    def _crop(self, image, norm):
+        height, width = image.shape[:2]
+        left, top, right, bottom = self._norm_rect(norm, width, height)
+        return image[top:bottom, left:right].copy(), (left, top, right, bottom)
+
+    def _engine_records(self, image):
+        if image is None or image.size == 0:
+            return []
+        with self.lock:
+            output = self.engine(image)
+        if hasattr(output, "boxes"):
+            records = zip(output.boxes or [], output.txts or [], output.scores or [])
+        elif isinstance(output, tuple) and output:
+            records = output[0] or []
+        else:
+            records = output or []
+        values = []
+        for item in records:
+            try:
+                if isinstance(item, (list, tuple)):
+                    box, text, score = item[:3]
+                else:
+                    box, text, score = item
+                xs = [float(point[0]) for point in box]
+                ys = [float(point[1]) for point in box]
+                values.append(
+                    {
+                        "box": [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
+                        "text": str(text),
+                        "confidence": max(0.0, min(1.0, float(score))),
+                    }
+                )
+            except RECOVERABLE_ERRORS:
+                continue
+        return values
+
+    def _branch_images(self, image, maximum_branches=12, profile=None):
+        cv2 = self.cv2
+        h, w = image.shape[:2]
+        scale = 3.0 if h < 28 else 2.4 if h < 48 else 1.8 if h < 80 else 1.35
+        target = cv2.resize(image, (max(8, int(round(w * scale))), max(8, int(round(h * scale)))), interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(target, cv2.COLOR_RGB2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.8, tileGridSize=(max(2, min(8, target.shape[1] // 24)), max(2, min(8, target.shape[0] // 16)))).apply(gray)
+        blur = cv2.GaussianBlur(clahe, (0, 0), 1.0)
+        unsharp = cv2.addWeighted(clahe, 1.8, blur, -0.8, 0)
+        _, otsu = cv2.threshold(clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        adaptive = cv2.adaptiveThreshold(clahe, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 5)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+        opened = cv2.morphologyEx(otsu, cv2.MORPH_OPEN, kernel)
+        outline_removed = cv2.subtract(otsu, cv2.morphologyEx(otsu, cv2.MORPH_GRADIENT, kernel))
+        branches = [
+            ("upscaled_rgb", target, 1.00),
+            ("grayscale", cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB), 0.98),
+            ("local_contrast", cv2.cvtColor(clahe, cv2.COLOR_GRAY2RGB), 1.04),
+            ("inverted_local_contrast", cv2.cvtColor(255 - clahe, cv2.COLOR_GRAY2RGB), 0.99),
+            ("unsharp", cv2.cvtColor(unsharp, cv2.COLOR_GRAY2RGB), 1.01),
+            ("otsu", cv2.cvtColor(otsu, cv2.COLOR_GRAY2RGB), 0.97),
+            ("otsu_inverted", cv2.cvtColor(255 - otsu, cv2.COLOR_GRAY2RGB), 0.96),
+            ("adaptive", cv2.cvtColor(adaptive, cv2.COLOR_GRAY2RGB), 0.94),
+            ("stroke_cleanup", cv2.cvtColor(opened, cv2.COLOR_GRAY2RGB), 0.95),
+            ("outline_removed", cv2.cvtColor(outline_removed, cv2.COLOR_GRAY2RGB), 0.93),
+        ]
+        profile_value = profile if isinstance(profile, dict) else {}
+        foreground = list(profile_value.get("foreground_rgb", []))[:3]
+        if safe_int(profile_value.get("samples"), 0, 0) >= 3 and len(foreground) == 3:
+            expected = self.np.asarray(foreground, dtype=self.np.float32).reshape(1, 1, 3)
+            distance = self.np.linalg.norm(target.astype(self.np.float32) - expected, axis=2)
+            threshold = max(24.0, min(112.0, 40.0 + safe_float(profile_value.get("contrast"), 0.5, 0.0, 2.0) * 44.0))
+            color_mask = self.np.where(distance <= threshold, 255, 0).astype(self.np.uint8)
+            color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
+            branches.extend(
+                [
+                    ("learned_foreground_color", cv2.cvtColor(color_mask, cv2.COLOR_GRAY2RGB), 1.03),
+                    ("learned_foreground_color_inverted", cv2.cvtColor(255 - color_mask, cv2.COLOR_GRAY2RGB), 1.00),
+                ]
+            )
+        return [(name, value, weight, value.shape[1] / max(1, w), value.shape[0] / max(1, h)) for name, value, weight in branches[: max(2, int(maximum_branches))]]
+
+    @staticmethod
+    def _numeric_chars(text):
+        token = str(text or "").strip()
+        return bool(token) and all(character.isdigit() or character in "OoIlBSZ.,:/%+-KkMmBb$¥￥€£" for character in token)
+
+    def _record_candidates(self, records, branch_name, branch_weight, scale_x, scale_y, number_format):
+        values = []
+        transformed = []
+        for record in records:
+            box = record.get("box", [0, 0, 0, 0])
+            transformed.append(
+                {
+                    "box": [safe_float(box[0]) / scale_x, safe_float(box[1]) / scale_y, safe_float(box[2]) / scale_x, safe_float(box[3]) / scale_y],
+                    "text": str(record.get("text", "")),
+                    "confidence": safe_float(record.get("confidence"), 0.0, 0.0, 1.0),
+                }
+            )
+        for record in transformed:
+            parsed = parse_ocr_number(record["text"], number_format)
+            if parsed.get("valid"):
+                values.append(
+                    {
+                        "text": str(parsed.get("raw_token") or record["text"]),
+                        "raw_text": record["text"],
+                        "parsed": parsed,
+                        "items": [record],
+                        "ocr_confidence": record["confidence"],
+                        "branch": branch_name,
+                        "branch_weight": branch_weight,
+                        "grouped": False,
+                    }
+                )
+        ordered = sorted(transformed, key=lambda item: (item["box"][1] + item["box"][3] * 0.5, item["box"][0]))
+        for start in range(len(ordered)):
+            group = [ordered[start]]
+            for index in range(start + 1, min(len(ordered), start + 4)):
+                previous = group[-1]
+                candidate = ordered[index]
+                ph = max(1.0, previous["box"][3])
+                ch = max(1.0, candidate["box"][3])
+                center_delta = abs((previous["box"][1] + ph * 0.5) - (candidate["box"][1] + ch * 0.5))
+                gap = candidate["box"][0] - (previous["box"][0] + previous["box"][2])
+                if center_delta > max(ph, ch) * 0.42 or gap > max(ph, ch) * 0.30 or gap < -max(ph, ch) * 0.35:
+                    break
+                if not self._numeric_chars(candidate["text"]) or not self._numeric_chars(previous["text"]):
+                    break
+                group.append(candidate)
+                combined = "".join(item["text"].strip() for item in group)
+                separator_fragment = any(
+                    item["text"].strip() and all(symbol in ".,:/%" for symbol in item["text"].strip())
+                    for item in group
+                )
+                if not separator_fragment:
+                    continue
+                parsed = parse_ocr_number(combined, number_format)
+                parsed_token = str(parsed.get("raw_token", ""))
+                if (
+                    parsed.get("valid")
+                    and safe_int(parsed.get("token_count"), 0, 0) == 1
+                    and safe_float(parsed.get("token_coverage"), 0.0, 0.0, 1.0) >= 0.82
+                    and any(symbol in parsed_token for symbol in ".,:/%")
+                ):
+                    values.append(
+                        {
+                            "text": str(parsed.get("raw_token") or combined),
+                            "raw_text": combined,
+                            "parsed": parsed,
+                            "items": list(group),
+                            "ocr_confidence": statistics.fmean(item["confidence"] for item in group) * 0.96,
+                            "branch": branch_name,
+                            "branch_weight": branch_weight,
+                            "grouped": True,
+                        }
+                    )
+        return values, transformed
+
+    def _style_features(self, image, parsed=None):
+        if image is None or image.size == 0:
+            return {}
+        cv2 = self.cv2
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        white_ratio = float((binary > 0).mean())
+        foreground_mask = binary > 0 if white_ratio < 0.5 else binary == 0
+        background_mask = ~foreground_mask
+        if int(foreground_mask.sum()) < 4:
+            foreground_mask = gray < float(gray.mean())
+            background_mask = ~foreground_mask
+        foreground = image[foreground_mask]
+        background = image[background_mask]
+        fg = [float(value) for value in (self.np.median(foreground, axis=0) if foreground.size else self.np.median(image.reshape(-1, 3), axis=0))]
+        bg = [float(value) for value in (self.np.median(background, axis=0) if background.size else self.np.median(image.reshape(-1, 3), axis=0))]
+        components, labels, stats, _ = cv2.connectedComponentsWithStats(foreground_mask.astype(self.np.uint8), 8)
+        areas = [int(stats[index, cv2.CC_STAT_AREA]) for index in range(1, components) if int(stats[index, cv2.CC_STAT_AREA]) >= max(2, image.shape[0] * image.shape[1] // 800)]
+        value = parsed if isinstance(parsed, dict) else {}
+        return {
+            "foreground_rgb": [round(item, 3) for item in fg],
+            "background_rgb": [round(item, 3) for item in bg],
+            "contrast": round(abs(float(gray[foreground_mask].mean()) - float(gray[background_mask].mean())) / 255.0 if foreground_mask.any() and background_mask.any() else float(gray.std()) / 128.0, 6),
+            "stroke_density": round(float(foreground_mask.mean()), 6),
+            "component_count": len(areas),
+            "aspect_ratio": round(image.shape[1] / max(1.0, image.shape[0]), 6),
+            "digit_count": safe_int(value.get("digit_count"), 0, 0, 32),
+            "decimal_places": safe_int(value.get("decimal_places"), 0, 0, 12),
+            "kind": str(value.get("kind", "unknown")),
+            "format_signature": str(value.get("format_signature", "")),
+            "separator": str(value.get("separator", "")),
+            "has_thousands_separator": bool(value.get("has_thousands_separator")),
+        }
+
+    @staticmethod
+    def _profile_counter(profile, name):
+        value = profile.get(name, {}) if isinstance(profile, dict) else {}
+        if isinstance(value, Counter):
+            return value
+        if isinstance(value, dict):
+            return Counter({str(key): safe_int(count, 0, 0) for key, count in value.items()})
+        return Counter()
+
+    def _profile_from_context(self, region_id, context):
+        token = str(region_id or "")
+        profile = self.region_profiles.get(token)
+        if profile is not None:
+            return profile
+        definition = context.get("definition") if isinstance(context, dict) and isinstance(context.get("definition"), dict) else {}
+        config = normalize_relation_config(definition.get("relation_config", {}))
+        stored = config.get("numeric_visual_profile") if isinstance(config.get("numeric_visual_profile"), dict) else {}
+        profile = {
+            "samples": safe_int(stored.get("samples"), 0, 0, 1000000),
+            "foreground_rgb": list(stored.get("foreground_rgb", []))[:3],
+            "background_rgb": list(stored.get("background_rgb", []))[:3],
+            "contrast": safe_float(stored.get("contrast"), 0.0, 0.0, 4.0),
+            "stroke_density": safe_float(stored.get("stroke_density"), 0.0, 0.0, 1.0),
+            "aspect_ratio": safe_float(stored.get("aspect_ratio"), 0.0, 0.0, 100.0),
+            "component_count": safe_float(stored.get("component_count"), 0.0, 0.0, 100.0),
+            "digit_counts": self._profile_counter(stored, "digit_counts"),
+            "decimal_places": self._profile_counter(stored, "decimal_places"),
+            "kinds": self._profile_counter(stored, "kinds"),
+            "format_signatures": self._profile_counter(stored, "format_signatures"),
+            "separators": self._profile_counter(stored, "separators"),
+            "thousands": self._profile_counter(stored, "thousands"),
+            "roi_embedding": [safe_float(value, 0.0, -1.0, 1.0) for value in list(stored.get("roi_embedding", []))[:VISUAL_EMBEDDING_SIZE]],
+            "anchor_embedding": [safe_float(value, 0.0, -1.0, 1.0) for value in list(stored.get("anchor_embedding", []))[:VISUAL_EMBEDDING_SIZE]],
+        }
+        self.region_profiles[token] = profile
+        return profile
+
+    def _profile_number_format(self, profile, requested):
+        token = str(requested or "auto").strip().casefold()
+        if token not in {"", "auto"} or safe_int(profile.get("samples"), 0, 0) < 4:
+            return token or "auto"
+        kinds = self._profile_counter(profile, "kinds")
+        decimals = self._profile_counter(profile, "decimal_places")
+        thousands = self._profile_counter(profile, "thousands")
+        if kinds:
+            kind, count = kinds.most_common(1)[0]
+            if count / max(1, sum(kinds.values())) >= 0.60:
+                mapping = {
+                    "time": "time",
+                    "current_max": "current_max",
+                    "percent": "percent",
+                    "decimal": "decimal",
+                    "integer": "integer",
+                }
+                if kind in mapping:
+                    return mapping[kind]
+        if decimals:
+            decimal_places, count = decimals.most_common(1)[0]
+            if count / max(1, sum(decimals.values())) >= 0.65 and safe_int(decimal_places, 0, 0) > 0:
+                return "decimal"
+        if thousands:
+            thousands_value, count = thousands.most_common(1)[0]
+            if count / max(1, sum(thousands.values())) >= 0.65 and thousands_value == "1":
+                return "integer"
+        return "auto"
+
+    def _profile_match(self, profile, style, parsed, embedding=None):
+        samples = safe_int(profile.get("samples"), 0, 0) if isinstance(profile, dict) else 0
+        if samples < 2:
+            return 0.62
+        scores = []
+        for key in ("foreground_rgb", "background_rgb"):
+            expected = profile.get(key, [])
+            actual = style.get(key, [])
+            if len(expected) == 3 and len(actual) == 3:
+                distance = math.sqrt(sum((safe_float(a) - safe_float(b)) ** 2 for a, b in zip(expected, actual))) / 441.7
+                scores.append(math.exp(-3.0 * distance))
+        for key, scale in (("contrast", 0.35), ("stroke_density", 0.20), ("aspect_ratio", 2.0), ("component_count", 5.0)):
+            expected = safe_float(profile.get(key), 0.0)
+            actual = safe_float(style.get(key), 0.0)
+            if expected > 0.0:
+                scores.append(math.exp(-abs(expected - actual) / max(1e-6, scale)))
+        if parsed.get("valid") or str(parsed.get("kind", "unknown")) not in {"", "unknown"}:
+            for counter_name, value in (
+                ("digit_counts", str(safe_int(parsed.get("digit_count"), 0))),
+                ("decimal_places", str(safe_int(parsed.get("decimal_places"), 0))),
+                ("kinds", str(parsed.get("kind", "unknown"))),
+                ("format_signatures", str(parsed.get("format_signature", ""))),
+                ("separators", str(parsed.get("separator", ""))),
+                ("thousands", "1" if parsed.get("has_thousands_separator") else "0"),
+            ):
+                counter = self._profile_counter(profile, counter_name)
+                if counter:
+                    scores.append((counter.get(value, 0) + 0.5) / (sum(counter.values()) + 0.5 * max(1, len(counter))))
+        expected_embedding = profile.get("roi_embedding", [])
+        if embedding and expected_embedding and len(embedding) == len(expected_embedding):
+            scores.append(max(0.0, self._cosine_similarity(embedding, expected_embedding)))
+        return max(0.0, min(1.0, statistics.fmean(scores) if scores else 0.62))
+
+    def _update_profile(self, profile, style, parsed, embedding=None, anchor_embedding=None):
+        samples = safe_int(profile.get("samples"), 0, 0)
+        alpha = max(0.025, min(0.28, 2.0 / (samples + 2.0)))
+        for key in ("foreground_rgb", "background_rgb"):
+            actual = list(style.get(key, []))[:3]
+            old = list(profile.get(key, []))[:3]
+            if len(actual) == 3:
+                profile[key] = actual if len(old) != 3 else [old[index] * (1.0 - alpha) + safe_float(actual[index]) * alpha for index in range(3)]
+        for key in ("contrast", "stroke_density", "aspect_ratio", "component_count"):
+            actual = safe_float(style.get(key), 0.0)
+            old = safe_float(profile.get(key), actual)
+            profile[key] = actual if samples == 0 else old * (1.0 - alpha) + actual * alpha
+        for counter_name, value in (
+            ("digit_counts", str(safe_int(parsed.get("digit_count"), 0))),
+            ("decimal_places", str(safe_int(parsed.get("decimal_places"), 0))),
+            ("kinds", str(parsed.get("kind", "unknown"))),
+            ("format_signatures", str(parsed.get("format_signature", ""))),
+            ("separators", str(parsed.get("separator", ""))),
+            ("thousands", "1" if parsed.get("has_thousands_separator") else "0"),
+        ):
+            counter = self._profile_counter(profile, counter_name)
+            counter[value] += 1
+            profile[counter_name] = counter
+        if embedding:
+            old = list(profile.get("roi_embedding", []))
+            profile["roi_embedding"] = list(embedding) if len(old) != len(embedding) else self._normalized_blend(old, embedding, alpha)
+        if anchor_embedding:
+            old = list(profile.get("anchor_embedding", []))
+            profile["anchor_embedding"] = list(anchor_embedding) if len(old) != len(anchor_embedding) else self._normalized_blend(old, anchor_embedding, alpha)
+        profile["samples"] = samples + 1
+
+    def _profile_snapshot(self, profile):
+        return {
+            "version": 2,
+            "samples": safe_int(profile.get("samples"), 0, 0),
+            "foreground_rgb": [round(safe_float(value), 4) for value in list(profile.get("foreground_rgb", []))[:3]],
+            "background_rgb": [round(safe_float(value), 4) for value in list(profile.get("background_rgb", []))[:3]],
+            "contrast": round(safe_float(profile.get("contrast"), 0.0), 6),
+            "stroke_density": round(safe_float(profile.get("stroke_density"), 0.0), 6),
+            "aspect_ratio": round(safe_float(profile.get("aspect_ratio"), 0.0), 6),
+            "component_count": round(safe_float(profile.get("component_count"), 0.0), 6),
+            "digit_counts": dict(self._profile_counter(profile, "digit_counts").most_common(8)),
+            "decimal_places": dict(self._profile_counter(profile, "decimal_places").most_common(8)),
+            "kinds": dict(self._profile_counter(profile, "kinds").most_common(8)),
+            "format_signatures": dict(self._profile_counter(profile, "format_signatures").most_common(12)),
+            "separators": dict(self._profile_counter(profile, "separators").most_common(8)),
+            "thousands": dict(self._profile_counter(profile, "thousands").most_common(4)),
+            "roi_embedding": [round(safe_float(value), 6) for value in list(profile.get("roi_embedding", []))[:VISUAL_EMBEDDING_SIZE]],
+            "anchor_embedding": [round(safe_float(value), 6) for value in list(profile.get("anchor_embedding", []))[:VISUAL_EMBEDDING_SIZE]],
+        }
+
+    @staticmethod
+    def _normalized_blend(first, second, alpha):
+        values = [safe_float(a) * (1.0 - alpha) + safe_float(b) * alpha for a, b in zip(first, second)]
+        norm = math.sqrt(sum(value * value for value in values))
+        return [value / max(1e-9, norm) for value in values]
+
+    @staticmethod
+    def _cosine_similarity(first, second):
+        if not first or not second or len(first) != len(second):
+            return 0.0
+        numerator = sum(safe_float(a) * safe_float(b) for a, b in zip(first, second))
+        first_norm = math.sqrt(sum(safe_float(value) ** 2 for value in first))
+        second_norm = math.sqrt(sum(safe_float(value) ** 2 for value in second))
+        return numerator / max(1e-9, first_norm * second_norm)
+
+    def _ensure_vision_game(self, context):
+        if self.vision is None:
+            return False
+        game_id = str(context.get("game_id", "")) if isinstance(context, dict) else ""
+        if game_id and self.vision.active_game != game_id:
+            self.vision.activate_game(game_id)
+        return self.vision.model is not None and self.vision.torch is not None and self.vision.np is not None
+
+    def _learned_embedding(self, image, context=None):
+        if image is None or image.size == 0 or not self._ensure_vision_game(context or {}):
+            return []
+        vision = self.vision
+        try:
+            resized = self.cv2.resize(image, (128, 64), interpolation=self.cv2.INTER_AREA if image.shape[1] > 128 else self.cv2.INTER_CUBIC)
+            tensor = vision.torch.from_numpy(resized.copy()).permute(2, 0, 1).unsqueeze(0).to(vision.device, dtype=vision.torch.float32) / 255.0
+            with vision.lock, vision.torch.inference_mode():
+                embedding = vision.model.global_embedding(tensor).squeeze(0).to("cpu", dtype=vision.torch.float32).tolist()
+            return [safe_float(value, 0.0, -2.0, 2.0) for value in embedding[:VISUAL_EMBEDDING_SIZE]]
+        except RECOVERABLE_ERRORS:
+            return []
+
+    def _anchor_image(self, image, norm):
+        x, y, w, h = _clamp_region_norm(norm)
+        outer = _clamp_region_norm([x - max(0.02, w * 0.45), y - max(0.02, h * 0.65), w * 1.9, h * 2.3])
+        crop, rect = self._crop(image, outer)
+        if crop.size == 0:
+            return crop
+        left, top, right, bottom = rect
+        inner_left = max(0, int(round(x * image.shape[1])) - left)
+        inner_top = max(0, int(round(y * image.shape[0])) - top)
+        inner_right = min(crop.shape[1], int(round((x + w) * image.shape[1])) - left)
+        inner_bottom = min(crop.shape[0], int(round((y + h) * image.shape[0])) - top)
+        if inner_right > inner_left and inner_bottom > inner_top:
+            ring = crop.copy()
+            mask = self.np.ones(crop.shape[:2], dtype=bool)
+            mask[inner_top:inner_bottom, inner_left:inner_right] = False
+            fill = self.np.median(crop[mask], axis=0) if mask.any() else self.np.median(crop.reshape(-1, 3), axis=0)
+            ring[inner_top:inner_bottom, inner_left:inner_right] = fill.astype(self.np.uint8)
+            return ring
+        return crop
+
+    def _multi_branch_numeric(self, image, context, number_format="auto", maximum_branches=12):
+        candidates = []
+        raw_items = []
+        profile = self._profile_from_context(str(context.get("region_id", "")), context)
+        effective_number_format = self._profile_number_format(profile, number_format)
+        embedding = self._learned_embedding(image, context)
+        style_without_parse = self._style_features(image, {})
+        for branch_index, (branch_name, branch_image, branch_weight, scale_x, scale_y) in enumerate(self._branch_images(image, maximum_branches, profile)):
+            records = self._engine_records(branch_image)
+            branch_candidates, transformed = self._record_candidates(records, branch_name, branch_weight, scale_x, scale_y, effective_number_format)
+            raw_items.extend({**item, "branch": branch_name} for item in transformed)
+            for candidate in branch_candidates:
+                parsed = candidate["parsed"]
+                style = self._style_features(image, parsed)
+                profile_match = self._profile_match(profile, style, parsed, embedding)
+                token_coverage = safe_float(parsed.get("token_coverage"), 0.0, 0.0, 1.0)
+                score = (
+                    safe_float(candidate.get("ocr_confidence"), 0.0) * 0.48
+                    + safe_float(parsed.get("confidence"), 0.0) * 0.20
+                    + safe_float(candidate.get("branch_weight"), 1.0) * 0.08
+                    + profile_match * 0.14
+                    + token_coverage * 0.10
+                    - (0.06 if candidate.get("grouped") else 0.0)
+                )
+                candidate["profile_match"] = profile_match
+                candidate["style"] = style
+                candidate["embedding"] = embedding
+                candidate["score"] = score
+                candidates.append(candidate)
+        if not candidates:
+            return {
+                "text": "",
+                "confidence": 0.0,
+                "items": raw_items[:32],
+                "parsed": {"valid": False},
+                "candidates": [],
+                "ensemble_agreement": 0.0,
+                "profile_confidence": 0.0,
+                "style_features": style_without_parse,
+                "visual_embedding": embedding,
+                "preprocessing_branches": list(dict.fromkeys(item.get("branch", "") for item in raw_items)),
+                "effective_number_format": effective_number_format,
+            }
+        clusters = []
+        for candidate in sorted(candidates, key=lambda item: item.get("score", 0.0), reverse=True):
+            parsed = candidate["parsed"]
+            value = safe_float(parsed.get("value"))
+            tolerance = max(1e-6, abs(value) * 0.0005)
+            cluster = next(
+                (
+                    item
+                    for item in clusters
+                    if item["kind"] == str(parsed.get("kind")) and abs(item["value"] - value) <= tolerance
+                ),
+                None,
+            )
+            if cluster is None:
+                cluster = {"kind": str(parsed.get("kind")), "value": value, "members": [], "branches": set()}
+                clusters.append(cluster)
+            cluster["members"].append(candidate)
+            cluster["branches"].add(str(candidate.get("branch")))
+        for cluster in clusters:
+            members = cluster["members"]
+            branch_support = len(cluster["branches"])
+            score = statistics.fmean(safe_float(item.get("score"), 0.0) for item in members[:6])
+            best_score = max(safe_float(item.get("score"), 0.0) for item in members)
+            cluster["ranking"] = best_score + min(0.36, branch_support * 0.09) + min(0.12, len(members) * 0.02) + score * 0.12
+        winner = max(clusters, key=lambda item: item["ranking"])
+        best = max(winner["members"], key=lambda item: item.get("score", 0.0))
+        support = len(winner["branches"])
+        agreement = min(1.0, support / 4.0 + min(0.20, (len(winner["members"]) - support) * 0.04))
+        runner_up = max((item["ranking"] for item in clusters if item is not winner), default=0.0)
+        margin = max(0.0, winner["ranking"] - runner_up)
+        confidence = (
+            safe_float(best.get("ocr_confidence"), 0.0) * 0.42
+            + safe_float(best.get("parsed", {}).get("confidence"), 0.0) * 0.18
+            + agreement * 0.23
+            + safe_float(best.get("profile_match"), 0.0) * 0.12
+            + min(1.0, margin) * 0.05
+        )
+        confidence = max(0.0, min(0.995, confidence))
+        parsed = dict(best["parsed"])
+        parsed["confidence"] = max(0.0, min(0.995, safe_float(parsed.get("confidence"), 0.0) * 0.55 + confidence * 0.45))
+        result = {
+            "text": str(best.get("text", "")),
+            "confidence": confidence,
+            "items": best.get("items", []),
+            "parsed": parsed,
+            "candidates": [
+                {
+                    "text": str(item.get("text", "")),
+                    "value": item.get("parsed", {}).get("value"),
+                    "kind": str(item.get("parsed", {}).get("kind", "unknown")),
+                    "confidence": round(safe_float(item.get("ocr_confidence"), 0.0), 6),
+                    "score": round(safe_float(item.get("score"), 0.0), 6),
+                    "branch": str(item.get("branch", "")),
+                    "grouped": bool(item.get("grouped")),
+                }
+                for item in sorted(candidates, key=lambda item: item.get("score", 0.0), reverse=True)[:12]
+            ],
+            "ensemble_agreement": agreement,
+            "ensemble_margin": margin,
+            "branch_support": support,
+            "profile_confidence": safe_float(best.get("profile_match"), 0.0),
+            "style_features": best.get("style", style_without_parse),
+            "visual_embedding": embedding,
+            "preprocessing_branches": list(dict.fromkeys(str(item.get("branch", "")) for item in candidates)),
+            "recognition_model": "rapidocr_neural_ensemble_with_adaptive_preprocessing",
+            "effective_number_format": effective_number_format,
+        }
+        if confidence >= 0.78 and agreement >= 0.50 and parsed.get("valid"):
+            self._update_profile(profile, result["style_features"], parsed, embedding)
+        result["region_profile"] = self._profile_snapshot(profile)
+        return result
 
     def recognize(self, rgb, width, height, region=None):
         self.require_ready()
@@ -37656,236 +37422,387 @@ class OfflineOCRRuntime:
             image = image[y : y + h, x : x + w]
             offset_x = x
             offset_y = y
-        with self.lock:
-            output = self.engine(image)
+        values = self._engine_records(image)
+        for value in values:
+            value["box"][0] += offset_x
+            value["box"][1] += offset_y
+        return values
+
+    def recognize_regions(self, frame, requests):
         values = []
-        if hasattr(output, "boxes"):
-            records = zip(output.boxes or [], output.txts or [], output.scores or [])
-        elif isinstance(output, tuple) and len(output) >= 1:
-            records = output[0] or []
-        else:
-            records = output or []
+        for request in list(requests or [])[:32]:
+            if isinstance(request, dict):
+                norm = request.get("norm")
+                context = dict(request.get("context", {})) if isinstance(request.get("context"), dict) else {}
+            else:
+                norm = request
+                context = {}
+            values.append(self.recognize_region(frame, norm, context))
+        return values
+
+    def recognize_region(self, frame, norm, context=None):
+        self.require_ready()
+        image, width, height = self._frame_array(frame)
+        candidate_norm = _clamp_region_norm(norm)
+        crop, _ = self._crop(image, candidate_norm)
+        context_value = dict(context) if isinstance(context, dict) else {}
+        context_value["candidate_norm"] = candidate_norm
+        definition = context_value.get("definition") if isinstance(context_value.get("definition"), dict) else {}
+        number_format = str(definition.get("number_format", context_value.get("number_format", "auto")))
+        maximum_branches = 12
+        result = self._multi_branch_numeric(crop, context_value, number_format, maximum_branches)
+        result["candidate_norm"] = candidate_norm
+        result["crop_size"] = [crop.shape[1], crop.shape[0]] if crop.size else [0, 0]
+        region_id = str(context_value.get("region_id", ""))
+        if region_id and bool(context_value.get("commit_tracking_feedback", False)):
+            self._tracking_feedback(image, candidate_norm, context_value, result)
+        return result
+
+    def commit_tracking_feedback(self, frame, norm, context, result):
+        self.require_ready()
+        image, width, height = self._frame_array(frame)
+        candidate_norm = _clamp_region_norm(norm)
+        context_value = dict(context) if isinstance(context, dict) else {}
+        payload = dict(result) if isinstance(result, dict) else {}
+        self._tracking_feedback(image, candidate_norm, context_value, payload)
+        return {
+            "accepted": bool(payload.get("tracking_feedback", {}).get("accepted")),
+            "tracking_feedback": dict(payload.get("tracking_feedback", {})),
+            "region_profile": dict(payload.get("region_profile", {})) if isinstance(payload.get("region_profile"), dict) else {},
+        }
+
+    def _new_box_regressor(self):
+        if self.vision is None or self.vision.torch is None:
+            return None
+        torch = self.vision.torch
+        network = torch.nn.Sequential(
+            torch.nn.Linear(18, 32),
+            torch.nn.Tanh(),
+            torch.nn.Linear(32, 20),
+            torch.nn.Tanh(),
+            torch.nn.Linear(20, 4),
+            torch.nn.Tanh(),
+        ).to(torch.device("cpu"))
+        with torch.no_grad():
+            network[-2].weight.zero_()
+            network[-2].bias.zero_()
+        return {"network": network, "optimizer": torch.optim.AdamW(network.parameters(), lr=0.002, weight_decay=0.0002), "samples": deque(maxlen=96), "updates": 0, "error": 1.0}
+
+    def _tracking_state(self, region_id, norm, context):
+        token = str(region_id)
+        state = self.tracking_states.get(token)
+        if state is None:
+            profile = self._profile_from_context(token, context)
+            state = {
+                "norm": _clamp_region_norm(norm),
+                "prev_gray": None,
+                "prev_points": None,
+                "hypotheses": deque(maxlen=8),
+                "lost": 0,
+                "anchor_embedding": list(profile.get("anchor_embedding", [])),
+                "roi_embedding": list(profile.get("roi_embedding", [])),
+                "regressor": self._new_box_regressor(),
+                "pending": None,
+                "last_global_scan": -1000,
+                "accepted": 0,
+            }
+            self.tracking_states[token] = state
+        return state
+
+    def _anchor_mask(self, gray, norm):
+        height, width = gray.shape[:2]
+        x, y, w, h = _clamp_region_norm(norm)
+        outer = _clamp_region_norm([x - max(0.02, w * 0.45), y - max(0.02, h * 0.65), w * 1.9, h * 2.3])
+        mask = self.np.zeros_like(gray, dtype=self.np.uint8)
+        left, top, right, bottom = self._norm_rect(outer, width, height)
+        mask[top:bottom, left:right] = 255
+        inner_left, inner_top, inner_right, inner_bottom = self._norm_rect(norm, width, height)
+        mask[inner_top:inner_bottom, inner_left:inner_right] = 0
+        return mask
+
+    def _optical_flow(self, state, gray, norm):
+        previous = state.get("prev_gray")
+        if previous is None or previous.shape != gray.shape:
+            return _clamp_region_norm(norm), 0.0, [0.0, 0.0, 0.0, 0.0]
+        points = state.get("prev_points")
+        if points is None or len(points) < 6:
+            points = self.cv2.goodFeaturesToTrack(previous, maxCorners=80, qualityLevel=0.012, minDistance=4, mask=self._anchor_mask(previous, state.get("norm", norm)), blockSize=5)
+        if points is None or len(points) < 4:
+            return _clamp_region_norm(norm), 0.0, [0.0, 0.0, 0.0, 0.0]
+        next_points, status, errors = self.cv2.calcOpticalFlowPyrLK(previous, gray, points, None, winSize=(21, 21), maxLevel=3, criteria=(self.cv2.TERM_CRITERIA_EPS | self.cv2.TERM_CRITERIA_COUNT, 30, 0.01))
+        if next_points is None or status is None:
+            return _clamp_region_norm(norm), 0.0, [0.0, 0.0, 0.0, 0.0]
+        good_old = points[status.reshape(-1) == 1].reshape(-1, 2)
+        good_new = next_points[status.reshape(-1) == 1].reshape(-1, 2)
+        if len(good_old) < 4:
+            return _clamp_region_norm(norm), 0.0, [0.0, 0.0, 0.0, 0.0]
+        matrix, inliers = self.cv2.estimateAffinePartial2D(good_old, good_new, method=self.cv2.RANSAC, ransacReprojThreshold=3.0, maxIters=500, confidence=0.995)
+        if matrix is None:
+            return _clamp_region_norm(norm), 0.0, [0.0, 0.0, 0.0, 0.0]
+        height, width = gray.shape[:2]
+        left, top, right, bottom = self._norm_rect(norm, width, height)
+        corners = self.np.asarray([[left, top], [right, top], [right, bottom], [left, bottom]], dtype=self.np.float32).reshape(-1, 1, 2)
+        transformed = self.cv2.transform(corners, matrix).reshape(-1, 2)
+        candidate = self._rect_norm(float(transformed[:, 0].min()), float(transformed[:, 1].min()), float(transformed[:, 0].max()), float(transformed[:, 1].max()), width, height)
+        inlier_ratio = float(inliers.mean()) if inliers is not None and len(inliers) else 0.0
+        error_values = errors[status.reshape(-1) == 1].reshape(-1) if errors is not None else self.np.asarray([10.0])
+        error_quality = math.exp(-float(self.np.median(error_values)) / 18.0)
+        point_quality = min(1.0, len(good_old) / 24.0)
+        confidence = max(0.0, min(1.0, inlier_ratio * 0.50 + error_quality * 0.25 + point_quality * 0.25))
+        state["prev_points"] = good_new.reshape(-1, 1, 2)
+        base = _clamp_region_norm(norm)
+        delta = [candidate[index] - base[index] for index in range(4)]
+        return candidate, confidence, delta
+
+    def _tracking_features(self, base, flow_norm, flow_confidence, lost, anchor_similarity, roi_similarity, style_similarity):
+        x, y, w, h = _clamp_region_norm(base)
+        fx, fy, fw, fh = _clamp_region_norm(flow_norm)
+        return [
+            x,
+            y,
+            w,
+            h,
+            (fx - x) / max(0.01, w),
+            (fy - y) / max(0.01, h),
+            math.log(max(0.1, fw / max(0.01, w))),
+            math.log(max(0.1, fh / max(0.01, h))),
+            safe_float(flow_confidence, 0.0, 0.0, 1.0),
+            min(1.0, safe_int(lost, 0, 0) / 12.0),
+            safe_float(anchor_similarity, 0.0, -1.0, 1.0),
+            safe_float(roi_similarity, 0.0, -1.0, 1.0),
+            safe_float(style_similarity, 0.0, 0.0, 1.0),
+            w / max(0.01, h),
+            fx + fw * 0.5,
+            fy + fh * 0.5,
+            min(1.0, safe_float(self.frame_counter) / 10000.0),
+            1.0,
+        ]
+
+    def _regressor_predict(self, regressor, features, base):
+        if not regressor or safe_int(regressor.get("updates"), 0) < 8 or safe_float(regressor.get("error"), 1.0) > 0.45:
+            return None, 0.0
+        torch = self.vision.torch
+        with torch.no_grad():
+            output = regressor["network"](torch.tensor([features], dtype=torch.float32)).squeeze(0).tolist()
+        x, y, w, h = _clamp_region_norm(base)
+        candidate = _clamp_region_norm([x + safe_float(output[0]) * w * 0.35, y + safe_float(output[1]) * h * 0.35, w * math.exp(safe_float(output[2]) * 0.25), h * math.exp(safe_float(output[3]) * 0.25)])
+        confidence = max(0.0, min(0.85, math.exp(-safe_float(regressor.get("error"), 1.0) * 2.2) * min(1.0, regressor["updates"] / 32.0)))
+        return candidate, confidence
+
+    def _regressor_train(self, regressor, features, target, confidence):
+        if not regressor or self.vision is None or self.vision.torch is None:
+            return
+        regressor["samples"].append((list(features), list(target), safe_float(confidence, 0.0, 0.0, 1.0)))
+        torch = self.vision.torch
+        rows = list(regressor["samples"])[-32:]
+        network = regressor["network"]
+        optimizer = regressor["optimizer"]
+        errors = []
+        network.train()
+        for _ in range(3):
+            features_tensor = torch.tensor([row[0] for row in rows], dtype=torch.float32)
+            targets_tensor = torch.tensor([row[1] for row in rows], dtype=torch.float32)
+            weights_tensor = torch.tensor([max(0.1, row[2]) for row in rows], dtype=torch.float32).unsqueeze(1)
+            optimizer.zero_grad(set_to_none=True)
+            prediction = network(features_tensor)
+            loss = ((prediction - targets_tensor).pow(2) * weights_tensor).mean()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(network.parameters(), 2.0)
+            optimizer.step()
+            errors.append(float(loss.detach().item()))
+            regressor["updates"] = safe_int(regressor.get("updates"), 0) + 1
+        network.eval()
+        current = math.sqrt(max(0.0, statistics.fmean(errors))) if errors else 1.0
+        regressor["error"] = current if regressor["updates"] <= 3 else safe_float(regressor.get("error"), current) * 0.88 + current * 0.12
+
+    def _global_numeric_candidates(self, image, number_format, maximum=16):
+        records = self._engine_records(image)
+        height, width = image.shape[:2]
+        result = []
         for item in records:
-            try:
-                box, text, score = item[:3] if isinstance(item, (list, tuple)) else item
-                xs = [float(point[0]) + offset_x for point in box]
-                ys = [float(point[1]) + offset_y for point in box]
-                values.append(
+            parsed = parse_ocr_number(item.get("text"), number_format)
+            if not parsed.get("valid") or safe_float(item.get("confidence"), 0.0) < 0.35:
+                continue
+            x, y, w, h = item.get("box", [0, 0, 0, 0])
+            margin_x = max(2.0, w * 0.12)
+            margin_y = max(2.0, h * 0.20)
+            result.append(
+                {
+                    "norm": self._rect_norm(x - margin_x, y - margin_y, x + w + margin_x, y + h + margin_y, width, height),
+                    "source": "ocr_long_term_relocalization",
+                    "ocr_confidence": safe_float(item.get("confidence"), 0.0),
+                    "text": str(item.get("text", "")),
+                }
+            )
+        return result[: max(1, int(maximum))]
+
+    def track_numeric_regions(self, frame, requests):
+        self.require_ready()
+        image, width, height = self._frame_array(frame)
+        gray = self.cv2.cvtColor(image, self.cv2.COLOR_RGB2GRAY)
+        self.frame_counter += 1
+        values = []
+        for request in list(requests or [])[:32]:
+            context = dict(request.get("context", {})) if isinstance(request, dict) and isinstance(request.get("context"), dict) else {}
+            norm = _clamp_region_norm(request.get("norm") if isinstance(request, dict) else request)
+            region_id = str(context.get("region_id", request.get("region_id", "") if isinstance(request, dict) else ""))
+            definition = context.get("definition") if isinstance(context.get("definition"), dict) else {}
+            number_format = str(definition.get("number_format", "auto"))
+            state = self._tracking_state(region_id, norm, context)
+            base = _clamp_region_norm(state.get("norm", norm))
+            flow_norm, flow_confidence, _ = self._optical_flow(state, gray, base)
+            profile = self._profile_from_context(region_id, context)
+            candidates = [
+                {"norm": base, "source": "accepted_track", "source_confidence": 0.58},
+                {"norm": flow_norm, "source": "pyramidal_lk_ransac", "source_confidence": flow_confidence},
+            ]
+            for hypothesis in list(state.get("hypotheses", [])):
+                if isinstance(hypothesis, dict):
+                    candidates.append(dict(hypothesis))
+            if safe_int(state.get("lost"), 0, 0) >= 4 and self.frame_counter - safe_int(state.get("last_global_scan"), -1000) >= 4:
+                candidates.extend(self._global_numeric_candidates(image, number_format, 20))
+                state["last_global_scan"] = self.frame_counter
+            seed_candidates = list(candidates)
+            for seed in seed_candidates[:4]:
+                x, y, w, h = _clamp_region_norm(seed.get("norm"))
+                for ox, oy, sx, sy in ((-0.08, 0.0, 1.0, 1.0), (0.08, 0.0, 1.0, 1.0), (0.0, -0.10, 1.0, 1.0), (0.0, 0.10, 1.0, 1.0), (0.0, 0.0, 0.90, 1.0), (0.0, 0.0, 1.12, 1.0), (0.0, 0.0, 1.0, 0.90), (0.0, 0.0, 1.0, 1.12)):
+                    candidates.append({"norm": _tracking_scaled_norm([x, y, w, h], x + w * (0.5 + ox), y + h * (0.5 + oy), sx, sy), "source": "local_multi_hypothesis", "source_confidence": safe_float(seed.get("source_confidence"), 0.0) * 0.84})
+            seen = set()
+            unique = []
+            for candidate in candidates:
+                candidate_norm = _clamp_region_norm(candidate.get("norm"))
+                key = tuple(round(value, 5) for value in candidate_norm)
+                if key not in seen:
+                    seen.add(key)
+                    candidate["norm"] = candidate_norm
+                    unique.append(candidate)
+            anchor_reference = list(state.get("anchor_embedding") or profile.get("anchor_embedding", []))
+            roi_reference = list(state.get("roi_embedding") or profile.get("roi_embedding", []))
+            ranked = []
+            for candidate in unique[:24]:
+                candidate_norm = candidate["norm"]
+                crop, _ = self._crop(image, candidate_norm)
+                anchor = self._anchor_image(image, candidate_norm)
+                anchor_embedding = self._learned_embedding(anchor, context)
+                roi_embedding = self._learned_embedding(crop, context)
+                anchor_similarity = max(0.0, self._cosine_similarity(anchor_embedding, anchor_reference)) if anchor_reference else 0.58
+                roi_similarity = max(0.0, self._cosine_similarity(roi_embedding, roi_reference)) if roi_reference else 0.55
+                style = self._style_features(crop, {})
+                style_similarity = self._profile_match(profile, style, {}, roi_embedding)
+                geometry = max(0.0, _rect_iou(candidate_norm, flow_norm if flow_confidence >= 0.25 else base))
+                source_confidence = safe_float(candidate.get("source_confidence"), 0.0, 0.0, 1.0)
+                score = anchor_similarity * 0.34 + roi_similarity * 0.10 + style_similarity * 0.12 + geometry * 0.22 + source_confidence * 0.18 + (0.04 if candidate.get("source") == "ocr_long_term_relocalization" else 0.0)
+                ranked.append(
                     {
-                        "box": [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
-                        "text": str(text),
-                        "confidence": max(0.0, min(1.0, float(score))),
+                        **candidate,
+                        "score": max(0.0, min(1.0, score)),
+                        "distance": max(0.0, min(1.5, 1.0 - score)),
+                        "anchor_similarity": anchor_similarity,
+                        "roi_similarity": roi_similarity,
+                        "style_similarity": style_similarity,
+                        "flow_confidence": flow_confidence,
+                        "anchor_embedding": anchor_embedding,
+                        "roi_embedding": roi_embedding,
                     }
                 )
-            except RECOVERABLE_ERRORS:
-                continue
+            ranked.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+            best = ranked[0] if ranked else {"norm": base, "anchor_similarity": 0.0, "roi_similarity": 0.0, "style_similarity": 0.0}
+            features = self._tracking_features(base, flow_norm, flow_confidence, state.get("lost", 0), best.get("anchor_similarity", 0.0), best.get("roi_similarity", 0.0), best.get("style_similarity", 0.0))
+            regressed, regression_confidence = self._regressor_predict(state.get("regressor"), features, base)
+            if regressed is not None:
+                crop, _ = self._crop(image, regressed)
+                anchor = self._anchor_image(image, regressed)
+                anchor_embedding = self._learned_embedding(anchor, context)
+                roi_embedding = self._learned_embedding(crop, context)
+                anchor_similarity = max(0.0, self._cosine_similarity(anchor_embedding, anchor_reference)) if anchor_reference else 0.58
+                roi_similarity = max(0.0, self._cosine_similarity(roi_embedding, roi_reference)) if roi_reference else 0.55
+                style_similarity = self._profile_match(profile, self._style_features(crop, {}), {}, roi_embedding)
+                score = anchor_similarity * 0.38 + roi_similarity * 0.12 + style_similarity * 0.14 + regression_confidence * 0.24 + _rect_iou(regressed, flow_norm) * 0.12
+                ranked.append({"norm": regressed, "source": "online_neural_box_regression", "source_confidence": regression_confidence, "score": score, "distance": 1.0 - score, "anchor_similarity": anchor_similarity, "roi_similarity": roi_similarity, "style_similarity": style_similarity, "flow_confidence": flow_confidence, "anchor_embedding": anchor_embedding, "roi_embedding": roi_embedding})
+                ranked.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+            state["pending"] = {"base": base, "features": features, "gray": gray.copy(), "ranked": ranked[:8], "context": context}
+            state["prev_gray"] = gray.copy()
+            state["prev_points"] = self.cv2.goodFeaturesToTrack(gray, maxCorners=80, qualityLevel=0.012, minDistance=4, mask=self._anchor_mask(gray, ranked[0]["norm"] if ranked else base), blockSize=5)
+            values.append(
+                {
+                    "region_id": region_id,
+                    "candidates": [
+                        {
+                            "norm": list(item["norm"]),
+                            "distance": round(safe_float(item.get("distance"), 1.0), 6),
+                            "score": round(safe_float(item.get("score"), 0.0), 6),
+                            "source": str(item.get("source", "")),
+                            "flow_confidence": round(safe_float(item.get("flow_confidence"), 0.0), 6),
+                            "anchor_similarity": round(safe_float(item.get("anchor_similarity"), 0.0), 6),
+                            "roi_similarity": round(safe_float(item.get("roi_similarity"), 0.0), 6),
+                            "style_similarity": round(safe_float(item.get("style_similarity"), 0.0), 6),
+                        }
+                        for item in ranked[:8]
+                    ],
+                    "tracking_model": "stable_ui_anchor+pyramidal_lk_ransac+learned_roi_embedding+online_neural_box_regression+multi_hypothesis+ocr_relocalization",
+                    "lost_frames": safe_int(state.get("lost"), 0, 0),
+                    "box_regression_updates": safe_int((state.get("regressor") or {}).get("updates"), 0, 0),
+                    "box_regression_error": safe_float((state.get("regressor") or {}).get("error"), 1.0),
+                }
+            )
         return values
 
-    def recognize_regions(self, frame, norms):
-        values = []
-        for norm in list(norms or [])[:32]:
-            values.append(self.recognize_region(frame, norm))
-        return values
-
-    def recognize_region(self, frame, norm):
-        preview = preview_rgb_bytes(frame.get("preview_rgb"))
-        width = safe_int(frame.get("preview_width", PREVIEW_W), PREVIEW_W, 1, 8192)
-        height = safe_int(frame.get("preview_height", PREVIEW_H), PREVIEW_H, 1, 8192)
-        if preview is None:
-            preview = rgb_bytes(frame.get("rgb"))
-            width = FEATURE_W
-            height = FEATURE_H
-        if preview is None:
-            raise RuntimeError("当前帧没有可用OCR图像")
-        x = max(0, min(width - 1, round(safe_float(norm[0]) * width)))
-        y = max(0, min(height - 1, round(safe_float(norm[1]) * height)))
-        right = max(x + 1, min(width, round((safe_float(norm[0]) + safe_float(norm[2])) * width)))
-        bottom = max(y + 1, min(height, round((safe_float(norm[1]) + safe_float(norm[3])) * height)))
-        values = self.recognize(preview, width, height, [x, y, right - x, bottom - y])
-        text = "".join(value["text"] for value in values).strip()
-        confidence = sum(value["confidence"] for value in values) / max(1, len(values))
-        return {"text": text, "confidence": confidence, "items": values}
+    def _tracking_feedback(self, image, candidate_norm, context, result):
+        region_id = str(context.get("region_id", ""))
+        state = self.tracking_states.get(region_id)
+        if state is None:
+            return
+        confidence = safe_float(result.get("confidence"), 0.0, 0.0, 1.0)
+        agreement = safe_float(result.get("ensemble_agreement"), 0.0, 0.0, 1.0)
+        profile_confidence = safe_float(result.get("profile_confidence"), 0.0, 0.0, 1.0)
+        parsed = result.get("parsed", {}) if isinstance(result.get("parsed"), dict) else {}
+        trusted = bool(parsed.get("valid") and confidence >= 0.62 and agreement >= 0.25 and profile_confidence >= 0.30)
+        if not trusted:
+            state["lost"] = min(1000, safe_int(state.get("lost"), 0, 0) + 1)
+            return
+        pending = state.get("pending") if isinstance(state.get("pending"), dict) else {}
+        base = _clamp_region_norm(pending.get("base", state.get("norm", candidate_norm)))
+        accepted = _clamp_region_norm(candidate_norm)
+        x, y, w, h = base
+        ax, ay, aw, ah = accepted
+        target = [max(-1.0, min(1.0, (ax - x) / max(0.01, w) / 0.35)), max(-1.0, min(1.0, (ay - y) / max(0.01, h) / 0.35)), max(-1.0, min(1.0, math.log(max(0.1, aw / max(0.01, w))) / 0.25)), max(-1.0, min(1.0, math.log(max(0.1, ah / max(0.01, h))) / 0.25))]
+        features = pending.get("features") if isinstance(pending.get("features"), list) else None
+        if features:
+            self._regressor_train(state.get("regressor"), features, target, confidence * agreement)
+        anchor = self._anchor_image(image, accepted)
+        crop, _ = self._crop(image, accepted)
+        anchor_embedding = self._learned_embedding(anchor, context)
+        roi_embedding = self._learned_embedding(crop, context)
+        if anchor_embedding:
+            old = list(state.get("anchor_embedding", []))
+            state["anchor_embedding"] = anchor_embedding if len(old) != len(anchor_embedding) else self._normalized_blend(old, anchor_embedding, 0.08)
+        if roi_embedding:
+            old = list(state.get("roi_embedding", []))
+            state["roi_embedding"] = roi_embedding if len(old) != len(roi_embedding) else self._normalized_blend(old, roi_embedding, 0.06)
+        state["norm"] = accepted
+        state["lost"] = 0
+        state["accepted"] = safe_int(state.get("accepted"), 0) + 1
+        hypotheses = deque(maxlen=8)
+        hypotheses.append({"norm": accepted, "source": "trusted_ocr_feedback", "source_confidence": confidence})
+        for item in list(pending.get("ranked", []))[:5]:
+            if _rect_iou(item.get("norm"), accepted) >= 0.25:
+                hypotheses.append({"norm": list(item.get("norm")), "source": "retained_hypothesis", "source_confidence": safe_float(item.get("score"), 0.0) * 0.82})
+        state["hypotheses"] = hypotheses
+        profile = self._profile_from_context(region_id, context)
+        if parsed.get("valid"):
+            self._update_profile(profile, result.get("style_features", {}), parsed, roi_embedding, anchor_embedding)
+        result["region_profile"] = self._profile_snapshot(profile)
+        result["tracking_feedback"] = {"accepted": True, "box_regression_updates": safe_int((state.get("regressor") or {}).get("updates"), 0), "box_regression_error": safe_float((state.get("regressor") or {}).get("error"), 1.0)}
 
     def candidate_regions(self, frame, maximum=8):
         if isinstance(frame, dict) and frame.get("ocr_allowed") is False:
             return []
-        preview = preview_rgb_bytes(frame.get("preview_rgb"))
-        width = safe_int(frame.get("preview_width", PREVIEW_W), PREVIEW_W, 1, 8192)
-        height = safe_int(frame.get("preview_height", PREVIEW_H), PREVIEW_H, 1, 8192)
-        if preview is None:
-            raise RuntimeError("当前画面没有可用OCR预览")
-        regions = []
-        changed = [
-            list(value[:4])
-            for value in (frame.get("changed_regions", []) if isinstance(frame, dict) else [])
-            if isinstance(value, (list, tuple)) and len(value) >= 4
-        ]
-        if not changed:
-            return []
-        try:
-            for roi in changed[:8]:
-                recognized = self.recognize_region(frame, roi).get("items", [])
-                for item in recognized:
-                    x, y, w, h = item["box"]
-                    margin = max(2, int(min(width, height) * 0.008))
-                    x = max(0, x - margin)
-                    y = max(0, y - margin)
-                    w = min(width - x, w + margin * 2)
-                    h = min(height - y, h + margin * 2)
-                    if w >= 4 and h >= 4:
-                        regions.append(
-                            {
-                                "norm": [x / width, y / height, w / width, h / height],
-                                "score": 2.0 + item["confidence"],
-                                "text": item["text"],
-                            }
-                        )
-        except RECOVERABLE_ERRORS as error:
-            record_cleanup_error("BEST_EFFORT_EXCEPTION", error)
-        gray = []
-        for index in range(0, len(preview), 3):
-            gray.append((preview[index] * 77 + preview[index + 1] * 150 + preview[index + 2] * 29) >> 8)
-        cells = []
-        cell_w = max(8, width // 20)
-        cell_h = max(6, height // 14)
-        for y in range(0, height, cell_h):
-            for x in range(0, width, cell_w):
-                cell_norm = [x / width, y / height, min(cell_w, width - x) / width, min(cell_h, height - y) / height]
-                if not any(_rect_iou(cell_norm, roi) > 0.0 for roi in changed):
-                    continue
-                values = []
-                for yy in range(y, min(height, y + cell_h)):
-                    start = yy * width + x
-                    values.extend(gray[start : start + min(cell_w, width - x)])
-                if len(values) < 8:
-                    continue
-                mean = sum(values) / len(values)
-                variance = sum((value - mean) * (value - mean) for value in values) / len(values)
-                if variance >= 650:
-                    cells.append([x, y, min(cell_w, width - x), min(cell_h, height - y), variance])
-        cells.sort(key=lambda value: value[4], reverse=True)
-        for x, y, w, h, score in cells[: maximum * 3]:
-            norm = [x / width, y / height, w / width, h / height]
-            if any(_rect_iou(norm, value["norm"]) > 0.45 for value in regions):
-                continue
-            regions.append({"norm": norm, "score": score / 1000.0, "text": ""})
-        regions.sort(key=lambda value: value["score"], reverse=True)
-        selected = []
-        for value in regions:
-            if any(_rect_iou(value["norm"], old["norm"]) > 0.65 for old in selected):
-                continue
-            selected.append(value)
-            if len(selected) >= maximum:
-                break
-        if not selected:
-            selected = [
-                {"norm": [0.05, 0.05, 0.25, 0.15], "score": 0.0, "text": ""},
-                {"norm": [0.7, 0.05, 0.25, 0.15], "score": 0.0, "text": ""},
-                {"norm": [0.05, 0.8, 0.25, 0.15], "score": 0.0, "text": ""},
-                {"norm": [0.7, 0.8, 0.25, 0.15], "score": 0.0, "text": ""},
-            ]
-        return selected
-
-
-def _disable_network_access():
-    import socket
-
-    def denied(*args, **kwargs):
-        raise RuntimeError("离线AI工作进程禁止网络访问")
-
-    socket.socket = denied
-    socket.create_connection = denied
-    socket.getaddrinfo = denied
-    urllib.request.urlopen = denied
-    urllib.request.build_opener = denied
-    globals()["OFFLINE_NETWORK_DENIED_FUNCTION"] = denied
-    for name in ("_validated_download", "_runtime_download_locked_wheels", "runtime_install_worker"):
-        if name in globals():
-            globals()[name] = denied
-    return denied
-
-
-def _verify_offline_network_block():
-    import socket
-
-    before = {safe_int(getattr(child, "pid", 0), 0) for child in multiprocessing.active_children()}
-    checks = {}
-    for name, call in (
-        ("socket.socket", lambda: socket.socket()),
-        ("socket.getaddrinfo", lambda: socket.getaddrinfo("example.invalid", 443)),
-        ("urllib.request.urlopen", lambda: urllib.request.urlopen("https://example.invalid", timeout=0.01)),
-    ):
-        try:
-            call()
-            checks[name] = False
-        except RECOVERABLE_ERRORS:
-            checks[name] = True
-    download_checks = {}
-    denied_function = globals().get("OFFLINE_NETWORK_DENIED_FUNCTION")
-    for name in ("_validated_download", "_runtime_download_locked_wheels", "runtime_install_worker"):
-        function = globals().get(name)
-        blocked = bool(function is denied_function and callable(function))
-        if blocked:
-            try:
-                function()
-                blocked = False
-            except RuntimeError as error:
-                blocked = "禁止网络访问" in str(error)
-            except RECOVERABLE_ERRORS:
-                blocked = False
-        download_checks[name] = blocked
-    download_denied = all(download_checks.values())
-    after = {safe_int(getattr(child, "pid", 0), 0) for child in multiprocessing.active_children()}
-    evidence = {
-        "network_block_version": 2,
-        "checks": checks,
-        "no_new_children": not bool(after - before),
-        "download_entrypoints": download_checks,
-        "download_entrypoints_disabled": download_denied,
-    }
-    evidence["blocked"] = all(checks.values()) and evidence["no_new_children"] and download_denied
-    if not evidence["blocked"]:
-        raise RuntimeError("离线网络封锁主动验证失败：" + json.dumps(evidence, ensure_ascii=False, sort_keys=True))
-    return evidence
-
-
-TRAINING_SNAPSHOT_SCHEMA_VERSION = 1
-TRAINING_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024 * 1024
-
-
-class TrainingSnapshotRows:
-    def __init__(self, path, count):
-        self.path = Path(path)
-        self.count = max(0, int(count))
-
-    def __len__(self):
-        return self.count
-
-    def __iter__(self):
-        uri = "file:" + self.path.as_posix() + "?mode=ro&immutable=1"
-        connection = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
-        try:
-            cursor = connection.execute("SELECT rgb,action,session,created FROM training_samples ORDER BY sample_id")
-            while True:
-                rows = cursor.fetchmany(128)
-                if not rows:
-                    break
-                for rgb, action, session, created in rows:
-                    yield {"rgb": bytes(rgb), "a": str(action), "session_id": str(session), "created": float(created)}
-        finally:
-            connection.close()
-
-
-def _training_snapshot_path(base, value):
-    root = (Path(base).resolve() / "temp").resolve()
-    target = Path(value).resolve()
-    try:
-        target.relative_to(root)
-    except ValueError as error:
-        raise RuntimeError("训练快照路径越出用户确认目录") from error
-    if target.parent != root or not target.name.startswith("training_snapshot_") or target.suffix != ".sqlite3":
-        raise RuntimeError("训练快照路径格式无效")
-    return target
+        image, width, height = self._frame_array(frame)
+        values = self._global_numeric_candidates(image, "auto", max(8, int(maximum) * 3))
+        result = []
+        for item in values:
+            result.append({"norm": item["norm"], "score": 2.0 + safe_float(item.get("ocr_confidence"), 0.0), "text": str(item.get("text", "")), "source": "rapidocr_neural_detector"})
+        return result[: max(1, int(maximum))]
 
 
 def create_training_snapshot(base, game_id, samples):
@@ -38063,6 +37980,7 @@ def ai_worker_main(base, address, auth_text, family, protocol_version=None):
     try:
         vision = OfflineVisionRuntime(base)
         ocr = OfflineOCRRuntime(base)
+        ocr.attach_vision(vision)
         vision.require_ready()
         ocr.require_ready()
         initial_vision = vision.manifest()
@@ -38318,9 +38236,28 @@ def ai_worker_main(base, address, auth_text, family, protocol_version=None):
                         ),
                     )
                 elif operation == "ocr_recognize_region":
-                    value = ocr.recognize_region(dict(payload.get("frame", {})), payload.get("norm"))
+                    value = ocr.recognize_region(
+                        dict(payload.get("frame", {})),
+                        payload.get("norm"),
+                        dict(payload.get("context", {})),
+                    )
                 elif operation == "ocr_recognize_regions":
-                    value = ocr.recognize_regions(dict(payload.get("frame", {})), payload.get("norms", []))
+                    value = ocr.recognize_regions(
+                        dict(payload.get("frame", {})),
+                        payload.get("requests", payload.get("norms", [])),
+                    )
+                elif operation == "ocr_track_numeric_regions":
+                    value = ocr.track_numeric_regions(
+                        dict(payload.get("frame", {})),
+                        payload.get("requests", []),
+                    )
+                elif operation == "ocr_commit_tracking_feedback":
+                    value = ocr.commit_tracking_feedback(
+                        dict(payload.get("frame", {})),
+                        payload.get("norm"),
+                        dict(payload.get("context", {})),
+                        dict(payload.get("result", {})),
+                    )
                 else:
                     raise RuntimeError("未知AI工作进程操作：" + operation)
                 connection.send({"kind": WorkerMessageKind.RESULT.value, "id": request_id, "value": value})
@@ -38829,17 +38766,64 @@ class OCRRuntimeProxy:
             raise RuntimeError("AI工作进程不可用")
         return True
 
-    def recognize_regions(self, frame, norms):
+    def recognize_regions(self, frame, requests):
         self.require_ready()
+        normalized = []
+        for request in list(requests or [])[:32]:
+            if isinstance(request, dict):
+                normalized.append(
+                    {
+                        "norm": list(request.get("norm") or [0.0, 0.0, 1.0, 1.0]),
+                        "context": dict(request.get("context", {})) if isinstance(request.get("context"), dict) else {},
+                    }
+                )
+            else:
+                normalized.append({"norm": list(request), "context": {}})
         return self.worker.request(
             "ocr_recognize_regions",
-            {"frame": dict(frame), "norms": [list(value) for value in list(norms or [])[:32]]},
-            45.0,
+            {"frame": dict(frame), "requests": normalized},
+            90.0,
         )
 
-    def recognize_region(self, frame, norm):
+    def recognize_region(self, frame, norm, context=None):
         self.require_ready()
-        return self.worker.request("ocr_recognize_region", {"frame": dict(frame), "norm": norm}, 45.0)
+        return self.worker.request(
+            "ocr_recognize_region",
+            {"frame": dict(frame), "norm": list(norm), "context": dict(context or {})},
+            90.0,
+        )
+
+    def track_numeric_regions(self, frame, requests):
+        self.require_ready()
+        normalized = []
+        for request in list(requests or [])[:32]:
+            if not isinstance(request, dict):
+                continue
+            normalized.append(
+                {
+                    "norm": list(request.get("norm") or [0.0, 0.0, 1.0, 1.0]),
+                    "region_id": str(request.get("region_id", "")),
+                    "context": dict(request.get("context", {})) if isinstance(request.get("context"), dict) else {},
+                }
+            )
+        return self.worker.request(
+            "ocr_track_numeric_regions",
+            {"frame": dict(frame), "requests": normalized},
+            90.0,
+        )
+
+    def commit_tracking_feedback(self, frame, norm, context, result):
+        self.require_ready()
+        return self.worker.request(
+            "ocr_commit_tracking_feedback",
+            {
+                "frame": dict(frame),
+                "norm": list(norm),
+                "context": dict(context or {}),
+                "result": dict(result or {}),
+            },
+            90.0,
+        )
 
 
 def normalize_relation_config(value):
@@ -38934,16 +38918,9 @@ def _numeric_variant_values(token):
 
 
 def parse_ocr_number(text, number_format="auto"):
-    raw = (
-        str(text or "")
-        .strip()
-        .replace("，", ",")
-        .replace("％", "%")
-        .replace("：", ":")
-        .replace("／", "/")
-        .replace("−", "-")
-    )
-    compact = re.sub(r"\s+", "", raw)
+    raw = unicodedata.normalize("NFKC", str(text or "")).strip()
+    raw = raw.replace("，", ",").replace("％", "%").replace("：", ":").replace("／", "/").replace("−", "-").replace("–", "-").replace("—", "-")
+    compact = re.sub(r"\s+", " ", raw).strip()
     result = {
         "valid": False,
         "kind": "unknown",
@@ -38956,184 +38933,467 @@ def parse_ocr_number(text, number_format="auto"):
         "alternatives": [],
         "ambiguities": [],
         "raw_token": "",
+        "token_count": 0,
+        "token_coverage": 0.0,
+        "digit_count": 0,
+        "decimal_places": 0,
+        "separator": "",
+        "has_thousands_separator": False,
+        "format_signature": "",
     }
     if not compact:
         return result
-    ambiguity_labels = []
-    for character in compact:
-        if character in "Oo":
-            ambiguity_labels.append("0/O")
-        elif character in "Il":
-            ambiguity_labels.append("1/I/l")
-        elif character == "B":
-            ambiguity_labels.append("8/B")
-        elif character == "S":
-            ambiguity_labels.append("5/S")
-        elif character == "Z":
-            ambiguity_labels.append("2/Z")
-    token_patterns = [
-        r"[-+]?[0-9OoIl]{1,5}:[0-9OoIl]{1,2}(?::[0-9OoIl]{1,2})?",
-        r"[-+]?[0-9OoIlBSZ]+(?:[.,][0-9OoIlBSZ]+)?/[-+]?[0-9OoIlBSZ]+(?:[.,][0-9OoIlBSZ]+)?",
-        r"[-+]?[0-9OoIlBSZ]+(?:[.,][0-9OoIlBSZ]+)?(?:[%KkMmBb])?",
-    ]
-    tokens = []
-    for pattern in token_patterns:
-        for match in re.finditer(pattern, compact):
-            token = match.group(0)
-            if not any(character.isdigit() for character in token):
-                continue
-            tokens.append((match.start(), -len(token), token))
-    if not tokens:
-        return result
-    _, _, token = sorted(tokens)[0]
-    normalized = normalize_numeric_token(token)
-    normalized = "".join(OCR_OPTIONAL_DIGIT_CONFUSIONS.get(character, character) for character in normalized)
-    result["raw_token"] = token
-    result["normalized"] = normalized
-    result["ambiguities"] = list(dict.fromkeys(ambiguity_labels))
-    ambiguity_count = len(result["ambiguities"])
-    digit_ratio = sum(character.isdigit() for character in normalized) / max(1, len(normalized))
-    confidence = max(0.20, min(0.99, 0.96 - 0.09 * ambiguity_count + 0.08 * digit_ratio))
-    time_match = re.fullmatch(r"(-?\d+):([0-5]?\d)(?::([0-5]?\d))?", normalized)
-    if time_match:
-        parts = [int(value) for value in time_match.groups() if value is not None]
-        seconds = parts[0] * 60 + parts[1] if len(parts) == 2 else parts[0] * 3600 + parts[1] * 60 + parts[2]
-        result.update(
-            {
-                "valid": True,
-                "kind": "time",
-                "seconds": float(seconds),
-                "value": float(seconds),
-                "confidence": confidence,
-            }
-        )
-        result["alternatives"] = [float(seconds)]
-        return result
-    pair = re.fullmatch(r"(-?\d+(?:\.\d+)?)[/](-?\d+(?:\.\d+)?)", normalized.replace(",", "."))
-    if pair:
-        current = float(pair.group(1))
-        maximum = float(pair.group(2))
-        result.update(
-            {
-                "valid": True,
-                "kind": "current_max",
-                "value": current,
-                "maximum": maximum,
-                "confidence": confidence,
-            }
-        )
-        result["alternatives"] = [current]
-        return result
-    match = re.fullmatch(r"([-+]?\d+(?:[.,]\d+)?)([%KkMmBb]?)", normalized)
-    if not match:
-        return result
-    number = float(match.group(1).replace(",", "."))
-    suffix = match.group(2).upper()
-    multiplier = 1.0
-    unit = suffix
-    if suffix == "K":
-        multiplier = 1000.0
-    elif suffix == "M":
-        multiplier = 1000000.0
-    elif suffix == "B":
-        multiplier = 1000000000.0
-    value = number * multiplier
-    kind = "decimal" if "." in match.group(1) or "," in match.group(1) else "integer"
-    if suffix == "%":
-        kind = "percent"
-    elif multiplier != 1.0:
-        kind = "unit"
-    elif any(symbol in compact for symbol in ("$", "¥", "￥", "€", "£", "分")):
-        kind = "currency_or_score"
-    alternatives = []
-    for variant in _numeric_variant_values(token):
-        candidate = "".join(OCR_OPTIONAL_DIGIT_CONFUSIONS.get(character, character) for character in variant)
-        candidate_match = re.fullmatch(r"([-+]?\d+(?:[.,]\d+)?)([%KkMmBb]?)", candidate)
-        if not candidate_match:
+    def token_ambiguities(token):
+        labels = []
+        for character in str(token or ""):
+            if character in "Oo":
+                labels.append("0/O")
+            elif character in "Il":
+                labels.append("1/I/l")
+            elif character == "B":
+                labels.append("8/B")
+            elif character == "S":
+                labels.append("5/S")
+            elif character == "Z":
+                labels.append("2/Z")
+        return list(dict.fromkeys(labels))
+    token_pattern = re.compile(
+        r"(?:[$¥￥€£])?[-+]?(?:[0-9OoIlBSZ]{1,3}(?:[.,][0-9OoIlBSZ]{3})+|[0-9OoIlBSZ]+)(?:[.,][0-9OoIlBSZ]+)?(?:[:/](?:[-+]?[0-9OoIlBSZ]+(?:[.,][0-9OoIlBSZ]+)?)){0,2}(?:[%KkMmBb])?"
+    )
+    matches = []
+    occupied = []
+    structured_pattern = re.compile(
+        r"(?:[$¥￥€£])?[-+]?(?:[0-9OoIlBSZ]{1,3}(?:[.,][0-9OoIlBSZ]{3})+|[0-9OoIlBSZ]+)(?:[.,][0-9OoIlBSZ]+)?\s*[:/]\s*[-+]?(?:[0-9OoIlBSZ]{1,3}(?:[.,][0-9OoIlBSZ]{3})+|[0-9OoIlBSZ]+)(?:[.,][0-9OoIlBSZ]+)?(?:\s*:\s*[0-9OoIlBSZ]+)?"
+    )
+    for match in structured_pattern.finditer(compact):
+        token = re.sub(r"\s*([:/])\s*", r"\1", match.group(0))
+        matches.append((match.start(), match.end(), token))
+        occupied.append((match.start(), match.end()))
+    for match in token_pattern.finditer(compact):
+        if any(start < match.end() and match.start() < end for start, end in occupied):
             continue
-        candidate_number = float(candidate_match.group(1).replace(",", "."))
-        candidate_suffix = candidate_match.group(2).upper()
-        candidate_multiplier = (
-            1000.0
-            if candidate_suffix == "K"
-            else 1000000.0
-            if candidate_suffix == "M"
-            else 1000000000.0
-            if candidate_suffix == "B"
-            else 1.0
+        token = match.group(0)
+        has_digit = any(character.isdigit() for character in token)
+        if not has_digit:
+            left_alpha = match.start() > 0 and compact[match.start() - 1].isalpha()
+            right_alpha = match.end() < len(compact) and compact[match.end()].isalpha()
+            if left_alpha or right_alpha or len(token) < 2:
+                continue
+        if has_digit or any(character in "OoIlBSZ" for character in token):
+            matches.append((match.start(), match.end(), token))
+    matches.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    result["token_count"] = len(matches)
+    if not matches:
+        result["ambiguities"] = []
+        return result
+    expected_format = str(number_format or "auto").strip().casefold()
+
+    def parse_token(token):
+        currency = token[0] if token and token[0] in "$¥￥€£" else ""
+        body = token[1:] if currency else token
+        normalized = normalize_numeric_token(body)
+        normalized = "".join(OCR_OPTIONAL_DIGIT_CONFUSIONS.get(character, character) for character in normalized)
+        token_result = {
+            "valid": False,
+            "kind": "unknown",
+            "value": None,
+            "maximum": None,
+            "seconds": None,
+            "unit": currency,
+            "normalized": normalized,
+            "raw_token": token,
+            "digit_count": sum(character.isdigit() for character in normalized),
+            "decimal_places": 0,
+            "separator": "",
+            "has_thousands_separator": False,
+            "format_signature": "",
+            "alternatives": [],
+        }
+        time_match = re.fullmatch(r"(-?\d+):([0-5]?\d)(?::([0-5]?\d))?", normalized)
+        if time_match:
+            groups = time_match.groups()
+            parts = [int(value) for value in groups if value is not None]
+            seconds = parts[0] * 60 + parts[1] if len(parts) == 2 else parts[0] * 3600 + parts[1] * 60 + parts[2]
+            token_result.update(
+                {
+                    "valid": expected_format in {"auto", "time", "timer", "duration"},
+                    "kind": "time",
+                    "seconds": float(seconds),
+                    "value": float(seconds),
+                    "format_signature": "time_hms" if len(parts) == 3 else "time_ms",
+                    "alternatives": [float(seconds)],
+                }
+            )
+            return token_result
+
+        def normalize_body(value):
+            sign = ""
+            if value.startswith(("+", "-")):
+                sign, value = value[0], value[1:]
+            suffix = value[-1].upper() if value and value[-1] in "%KkMmBb" else ""
+            if suffix:
+                value = value[:-1]
+            separators = [character for character in value if character in ".,"]
+            decimal_separator = ""
+            thousands = False
+            if separators:
+                if "." in value and "," in value:
+                    decimal_separator = "." if value.rfind(".") > value.rfind(",") else ","
+                    thousands = True
+                else:
+                    separator = separators[0]
+                    groups = value.split(separator)
+                    if len(groups) > 2 and all(len(group) == 3 for group in groups[1:]):
+                        thousands = True
+                    elif len(groups) == 2:
+                        trailing = len(groups[1])
+                        leading = len(groups[0])
+                        if expected_format in {"decimal", "float", "percent", "percentage"}:
+                            decimal_separator = separator
+                        elif trailing == 3 and leading >= 1 and groups[0] not in {"0", "00"}:
+                            thousands = True
+                        else:
+                            decimal_separator = separator
+                    else:
+                        decimal_separator = separator
+            if decimal_separator:
+                other = "," if decimal_separator == "." else "."
+                value = value.replace(other, "")
+                if value.count(decimal_separator) > 1:
+                    pieces = value.split(decimal_separator)
+                    value = "".join(pieces[:-1]) + "." + pieces[-1]
+                    thousands = True
+                else:
+                    value = value.replace(decimal_separator, ".")
+            else:
+                value = value.replace(",", "").replace(".", "")
+            return sign + value, suffix, decimal_separator, thousands
+
+        if "/" in normalized:
+            parts = normalized.split("/")
+            if len(parts) == 2:
+                left_body, left_suffix, left_separator, left_thousands = normalize_body(parts[0])
+                right_body, right_suffix, right_separator, right_thousands = normalize_body(parts[1])
+                try:
+                    current = float(left_body)
+                    maximum = float(right_body)
+                except (ValueError, OverflowError):
+                    return token_result
+                if finite_number(current) and finite_number(maximum):
+                    token_result.update(
+                        {
+                            "valid": expected_format in {"auto", "current_max", "ratio", "fraction"},
+                            "kind": "current_max",
+                            "value": current,
+                            "maximum": maximum,
+                            "separator": "/",
+                            "has_thousands_separator": bool(left_thousands or right_thousands),
+                            "format_signature": "current_max",
+                            "alternatives": [current],
+                        }
+                    )
+                return token_result
+        body_value, suffix, decimal_separator, thousands = normalize_body(normalized)
+        if not re.fullmatch(r"[-+]?\d+(?:\.\d+)?", body_value):
+            return token_result
+        try:
+            number = float(body_value)
+        except (ValueError, OverflowError):
+            return token_result
+        if not finite_number(number):
+            return token_result
+        multiplier = 1.0
+        if suffix == "K":
+            multiplier = 1000.0
+        elif suffix == "M":
+            multiplier = 1000000.0
+        elif suffix == "B":
+            multiplier = 1000000000.0
+        value = number * multiplier
+        decimal_places = len(body_value.rsplit(".", 1)[1]) if "." in body_value else 0
+        kind = "decimal" if decimal_places else "integer"
+        if suffix == "%":
+            kind = "percent"
+        elif multiplier != 1.0:
+            kind = "unit"
+        elif currency:
+            kind = "currency_or_score"
+        format_allowed = True
+        if expected_format in {"integer", "int"} and decimal_places:
+            format_allowed = False
+        elif expected_format in {"percent", "percentage"} and suffix != "%":
+            format_allowed = False
+        elif expected_format in {"decimal", "float"} and not decimal_places:
+            format_allowed = False
+        elif expected_format in {"time", "timer", "duration", "current_max", "ratio", "fraction"}:
+            format_allowed = False
+        signature = kind
+        if thousands:
+            signature += ":thousands"
+        if decimal_places:
+            signature += ":d" + str(decimal_places)
+        if suffix:
+            signature += ":" + suffix
+        token_result.update(
+            {
+                "valid": bool(format_allowed),
+                "kind": kind,
+                "value": value,
+                "unit": suffix or currency,
+                "decimal_places": decimal_places,
+                "separator": decimal_separator,
+                "has_thousands_separator": thousands,
+                "format_signature": signature,
+            }
         )
-        alternatives.append(candidate_number * candidate_multiplier)
-    alternatives = list(dict.fromkeys(alternatives))[:6]
-    if value not in alternatives:
-        alternatives.insert(0, value)
+        alternatives = []
+        for variant in _numeric_variant_values(token):
+            variant_normalized = normalize_numeric_token(variant)
+            variant_normalized = "".join(OCR_OPTIONAL_DIGIT_CONFUSIONS.get(character, character) for character in variant_normalized)
+            candidate_body, candidate_suffix, _, _ = normalize_body(variant_normalized)
+            if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", candidate_body):
+                candidate_multiplier = 1000.0 if candidate_suffix == "K" else 1000000.0 if candidate_suffix == "M" else 1000000000.0 if candidate_suffix == "B" else 1.0
+                candidate_value = float(candidate_body) * candidate_multiplier
+                if finite_number(candidate_value):
+                    alternatives.append(candidate_value)
+        alternatives = list(dict.fromkeys(alternatives))[:8]
+        if value not in alternatives:
+            alternatives.insert(0, value)
+        token_result["alternatives"] = alternatives
+        return token_result
+
+    parsed_candidates = []
+    for start, end, token in matches:
+        parsed = parse_token(token)
+        if not parsed.get("valid"):
+            continue
+        coverage = len(token) / max(1, len(compact))
+        boundary_quality = 1.0
+        if start > 0 and compact[start - 1].isalnum():
+            boundary_quality -= 0.20
+        if end < len(compact) and compact[end : end + 1].isalnum():
+            boundary_quality -= 0.20
+        candidate_ambiguities = token_ambiguities(token)
+        ambiguity_count = len(candidate_ambiguities)
+        digit_ratio = safe_int(parsed.get("digit_count"), 0) / max(1, len(str(parsed.get("normalized", ""))))
+        score = coverage * 0.38 + boundary_quality * 0.18 + min(1.0, digit_ratio) * 0.20 + min(1.0, safe_int(parsed.get("digit_count"), 0) / 4.0) * 0.14 + (0.10 if parsed.get("kind") != "unknown" else 0.0)
+        score -= ambiguity_count * 0.035
+        parsed_candidates.append((score, start, end, token, parsed, coverage, candidate_ambiguities))
+    if not parsed_candidates:
+        result["ambiguities"] = []
+        return result
+    parsed_candidates.sort(key=lambda item: (-item[0], item[1], -(item[2] - item[1])))
+    score, start, end, token, parsed, coverage, winner_ambiguities = parsed_candidates[0]
+    ambiguity_count = len(winner_ambiguities)
+    competing = len(parsed_candidates) - 1
+    confidence = 0.95 - ambiguity_count * 0.065 - min(0.24, competing * 0.08)
+    confidence *= 0.64 + min(1.0, coverage) * 0.36
+    confidence *= max(0.55, min(1.0, score))
+    if parsed.get("has_thousands_separator"):
+        confidence *= 0.97
+    result.update(parsed)
     result.update(
         {
             "valid": True,
-            "kind": kind,
-            "value": value,
-            "unit": unit,
-            "confidence": confidence,
-            "alternatives": alternatives,
+            "raw_token": token,
+            "normalized": str(parsed.get("normalized", token)),
+            "confidence": max(0.12, min(0.995, confidence)),
+            "alternatives": list(parsed.get("alternatives", []))[:8],
+            "ambiguities": winner_ambiguities,
+            "token_count": len(matches),
+            "token_coverage": max(0.0, min(1.0, coverage)),
+            "digit_count": safe_int(parsed.get("digit_count"), sum(character.isdigit() for character in token), 0, 32),
+            "decimal_places": safe_int(parsed.get("decimal_places"), 0, 0, 12),
+            "separator": str(parsed.get("separator", "")),
+            "has_thousands_separator": bool(parsed.get("has_thousands_separator")),
+            "format_signature": str(parsed.get("format_signature", parsed.get("kind", "unknown"))),
         }
     )
     return result
 
 
 class OCRConsensusTracker:
-    def __init__(self, window_size=5):
-        self.window_size = max(3, int(window_size))
+    def __init__(self, window_size=7):
+        self.window_size = max(5, int(window_size))
         self.history = defaultdict(lambda: deque(maxlen=self.window_size))
+        self.format_profiles = defaultdict(
+            lambda: {
+                "samples": 0,
+                "format_signatures": Counter(),
+                "digit_counts": Counter(),
+                "decimal_places": Counter(),
+                "separators": Counter(),
+                "thousands": Counter(),
+            }
+        )
         self.lock = threading.RLock()
 
-    def update(self, region_id, text, value, confidence):
+    @staticmethod
+    def _dominant_probability(counter, value):
+        if not counter:
+            return 0.62
+        total = sum(counter.values())
+        return max(0.0, min(1.0, (counter.get(str(value), 0) + 0.5) / max(1.0, total + 0.5 * len(counter))))
+
+    @staticmethod
+    def _same_value(first, second):
+        if not finite_number(first) or not finite_number(second):
+            return False
+        a = safe_float(first)
+        b = safe_float(second)
+        return abs(a - b) <= max(1e-6, max(abs(a), abs(b), 1.0) * 0.001)
+
+    @staticmethod
+    def _weighted_center(records):
+        values = sorted((safe_float(item["value"]), max(1e-6, safe_float(item["weight"], 0.0))) for item in records)
+        total = sum(weight for _, weight in values)
+        cursor = 0.0
+        for value, weight in values:
+            cursor += weight
+            if cursor >= total * 0.5:
+                return value
+        return values[-1][0] if values else None
+
+    def update(
+        self,
+        region_id,
+        text,
+        value,
+        confidence,
+        parse_confidence=0.0,
+        ensemble_agreement=0.0,
+        profile_confidence=0.0,
+        format_signature="",
+        digit_count=0,
+        decimal_places=0,
+        separator="",
+        has_thousands_separator=False,
+        token_coverage=0.0,
+        grouped=False,
+    ):
         token = str(region_id)
         number = safe_float(value) if finite_number(value) else None
-        record = {
-            "text": str(text or ""),
-            "normalized": normalize_numeric_token(str(text or "")),
-            "value": number,
-            "confidence": safe_float(confidence, 0.0, 0.0, 1.0),
-        }
+        ocr_confidence = safe_float(confidence, 0.0, 0.0, 1.0)
+        parse_quality = safe_float(parse_confidence, 0.0, 0.0, 1.0)
+        agreement = safe_float(ensemble_agreement, 0.0, 0.0, 1.0)
+        profile_quality = safe_float(profile_confidence, 0.0, 0.0, 1.0)
+        coverage = safe_float(token_coverage, 0.0, 0.0, 1.0)
+        signature = str(format_signature or "")
         with self.lock:
+            profile = self.format_profiles[token]
+            format_scores = []
+            if profile["samples"] >= 3:
+                for counter_name, actual in (
+                    ("format_signatures", signature),
+                    ("digit_counts", safe_int(digit_count, 0)),
+                    ("decimal_places", safe_int(decimal_places, 0)),
+                    ("separators", str(separator or "")),
+                    ("thousands", "1" if has_thousands_separator else "0"),
+                ):
+                    format_scores.append(self._dominant_probability(profile[counter_name], actual))
+            format_consistency = statistics.fmean(format_scores) if format_scores else 0.68
+            quality = (
+                ocr_confidence * 0.32
+                + parse_quality * 0.22
+                + agreement * 0.20
+                + profile_quality * 0.14
+                + coverage * 0.07
+                + format_consistency * 0.05
+            )
+            if grouped:
+                quality *= 0.92
+            quality = max(0.0, min(0.995, quality))
+            record = {
+                "text": str(text or ""),
+                "normalized": normalize_numeric_token(str(text or "")),
+                "value": number,
+                "confidence": ocr_confidence,
+                "parse_confidence": parse_quality,
+                "ensemble_agreement": agreement,
+                "profile_confidence": profile_quality,
+                "format_consistency": format_consistency,
+                "format_signature": signature,
+                "weight": quality,
+                "timestamp": time.monotonic(),
+            }
             history = self.history[token]
             history.append(record)
-            values = [item["value"] for item in history if item["value"] is not None]
+            valid_records = [item for item in history if item["value"] is not None and item["weight"] >= 0.22]
             normalized = [item["normalized"] for item in history if item["normalized"]]
+            if number is not None and quality >= 0.58:
+                profile["samples"] += 1
+                profile["format_signatures"][signature] += 1
+                profile["digit_counts"][str(safe_int(digit_count, 0))] += 1
+                profile["decimal_places"][str(safe_int(decimal_places, 0))] += 1
+                profile["separators"][str(separator or "")] += 1
+                profile["thousands"]["1" if has_thousands_separator else "0"] += 1
+            profile_snapshot = {
+                "samples": safe_int(profile["samples"], 0),
+                "format_signatures": dict(profile["format_signatures"].most_common(8)),
+                "digit_counts": dict(profile["digit_counts"].most_common(8)),
+                "decimal_places": dict(profile["decimal_places"].most_common(8)),
+                "separators": dict(profile["separators"].most_common(8)),
+                "thousands": dict(profile["thousands"].most_common(4)),
+            }
+        clusters = []
+        for record in valid_records:
+            cluster = next((item for item in clusters if self._same_value(item["center"], record["value"])), None)
+            if cluster is None:
+                cluster = {"center": record["value"], "records": [], "weight": 0.0}
+                clusters.append(cluster)
+            recency = 0.72 + 0.28 * (valid_records.index(record) + 1) / max(1, len(valid_records))
+            cluster["records"].append({**record, "weight": record["weight"] * recency})
+            cluster["weight"] += record["weight"] * recency
+            cluster["center"] = self._weighted_center(cluster["records"])
+        clusters.sort(key=lambda item: item["weight"], reverse=True)
+        total_weight = sum(item["weight"] for item in clusters)
+        winner = clusters[0] if clusters else None
+        winner_support = winner["weight"] / max(1e-9, total_weight) if winner else 0.0
+        recent_values = [item for item in valid_records[-4:] if item["weight"] >= 0.48]
+        deltas = [safe_float(recent_values[index]["value"]) - safe_float(recent_values[index - 1]["value"]) for index in range(1, len(recent_values))]
+        meaningful = [delta for delta in deltas if abs(delta) > max(1e-6, abs(safe_float(recent_values[-1]["value"])) * 0.0005)] if recent_values else []
+        dynamic_sequence = bool(len(meaningful) >= 2 and (all(delta > 0 for delta in meaningful) or all(delta < 0 for delta in meaningful)))
         stable_frames = 0
+        reference = number if number is not None else winner["center"] if winner else None
+        for item in reversed(valid_records):
+            if self._same_value(item["value"], reference):
+                stable_frames += 1
+            else:
+                break
+        runner_support = clusters[1]["weight"] / max(1e-9, total_weight) if len(clusters) > 1 else 0.0
+        conflict = bool(
+            len(clusters) >= 2
+            and winner_support < 0.67
+            and runner_support >= 0.24
+            and stable_frames < 2
+            and not dynamic_sequence
+        )
         consensus_value = number
-        if values:
-            median = statistics.median(values)
-            tolerance = max(1e-6, max(abs(median), 1.0) * 0.002)
-            for old in reversed(values):
-                if abs(old - median) <= tolerance:
-                    stable_frames += 1
-                else:
-                    break
-            consensus_value = median if stable_frames >= 3 else number
+        if number is None and winner is not None:
+            consensus_value = winner["center"]
+        elif number is not None and quality < 0.52 and winner is not None and len(winner["records"]) >= 2:
+            consensus_value = winner["center"]
         text_counts = Counter(normalized)
         consensus_text = text_counts.most_common(1)[0][0] if text_counts else str(text or "")
-        distinct_values = []
-        for item in values:
-            if not any(abs(item - old) <= max(1e-6, abs(old) * 0.002) for old in distinct_values):
-                distinct_values.append(item)
-        conflict = len(distinct_values) >= 3 and stable_frames < 2
-        average_confidence = statistics.fmean(item["confidence"] for item in list(self.history[token]))
-        adjusted = max(
-            0.0,
-            min(
-                1.0,
-                average_confidence
-                + min(0.24, stable_frames * 0.06)
-                - (0.28 if conflict else 0.0),
-            ),
-        )
+        temporal_support = min(1.0, stable_frames / 3.0) if stable_frames else 0.55 if dynamic_sequence else winner_support
+        adjusted = quality * 0.62 + winner_support * 0.18 + format_consistency * 0.10 + temporal_support * 0.10
+        if conflict:
+            adjusted *= 0.48
+        if number is None:
+            adjusted *= 0.72
+        adjusted = max(0.0, min(0.995, adjusted))
         return {
             "text": consensus_text,
             "value": consensus_value,
             "confidence": adjusted,
+            "observation_quality": quality,
             "stable_frames": stable_frames,
             "conflict": conflict,
+            "dynamic_sequence": dynamic_sequence,
+            "winner_support": winner_support,
+            "format_consistency": format_consistency,
             "history_size": len(self.history[token]),
+            "format_profile": profile_snapshot,
         }
 
 
@@ -39204,7 +39464,7 @@ class OCRSemanticEngine:
             "semantic_version": OCR_SEMANTIC_VERSION,
             "numeric_preference": normalize_numeric_preference(
                 normalize_relation_config(definition.get("relation_config", {})).get(
-                    "preference", definition.get("goal_relation", NumericPreference.KEEP_SAME.value)
+                    "preference", definition.get("goal_relation", DEFAULT_NUMERIC_PREFERENCE)
                 )
             ),
         }
@@ -39340,6 +39600,8 @@ class OCRMonitor:
                 region_id = str(item["id"])
                 norm = _clamp_region_norm(item.get("region_norm"))
                 templates = _decode_tracking_templates(item)
+                config = normalize_relation_config(item.get("relation_config", {}))
+                stored_profile = config.get("numeric_visual_profile") if isinstance(config.get("numeric_visual_profile"), dict) else {}
                 states[region_id] = {
                     "norm": norm,
                     "templates": templates,
@@ -39351,6 +39613,9 @@ class OCRMonitor:
                     "stable_tracking_frames": 0,
                     "persisted_norm": list(norm),
                     "last_persisted": 0.0,
+                    "last_profile_persisted": 0.0,
+                    "profile_checksum": hashlib.sha256(canonical_bytes(stored_profile)).hexdigest() if stored_profile else "",
+                    "prediction": NumericPredictionState(),
                 }
             while not self.stop_event.is_set() and not self.app.should_stop():
                 frame = self.frame_buffer.latest(None, 1.0)
@@ -39360,29 +39625,125 @@ class OCRMonitor:
                 self.last_stamp = frame.get("time")
                 frame_sequence += 1
                 frame_started = time.monotonic()
-                frame_deadline = frame_started + (0.12 if self.purpose == "training" else 0.08)
+                frame_budget = min(1.25, 0.34 + len(definitions) * (0.09 if self.purpose == "training" else 0.065))
+                frame_deadline = frame_started + frame_budget
+                frame_id = str(
+                    frame.get("frame_id")
+                    or (str(game["id"]) + "|" + format(safe_float(frame.get("time"), time.time()), ".9f"))
+                )
                 observations = {}
                 eligible = []
-                ranked_by_region = {}
+                request_contexts = {}
                 for definition in definitions:
                     region_id = str(definition["id"])
                     state = states[region_id]
                     priority = safe_int(definition.get("priority"), 0, 0)
                     stable = safe_int(state.get("stable_tracking_frames"), 0, 0)
-                    divisor = 1 if priority <= 1 else min(6, 1 + priority // 2 + (1 if stable >= 12 else 0))
+                    divisor = 1 if priority <= 1 else min(5, 1 + priority // 2 + (1 if stable >= 16 else 0))
                     if divisor > 1 and frame_sequence % divisor:
                         continue
-                    ranked = _adaptive_region_candidates(frame, definition, state)
-                    candidate_budget = 6 if state.get("lost", 0) else 2 if stable >= 12 else 4 if priority <= 1 else 3
-                    ranked_by_region[region_id] = ranked[:candidate_budget]
-                    if ranked_by_region[region_id]:
-                        eligible.append(definition)
+                    context = {
+                        "game_id": str(game["id"]),
+                        "region_id": region_id,
+                        "definition": dict(definition),
+                        "lost_frames": safe_int(state.get("lost"), 0, 0),
+                        "purpose": self.purpose,
+                        "frame_id": frame_id,
+                        "commit_tracking_feedback": False,
+                    }
+                    request_contexts[region_id] = context
+                    eligible.append(definition)
+                tracked_results = {}
+                if eligible and time.monotonic() < frame_deadline:
+                    tracking_requests = [
+                        {
+                            "norm": list(states[str(definition["id"])]["norm"]),
+                            "region_id": str(definition["id"]),
+                            "context": request_contexts[str(definition["id"])],
+                        }
+                        for definition in eligible
+                    ]
+                    try:
+                        values = self.app.ocr_runtime.track_numeric_regions(frame, tracking_requests)
+                        for value in values or []:
+                            if isinstance(value, dict) and value.get("region_id"):
+                                tracked_results[str(value.get("region_id"))] = value
+                    except RECOVERABLE_ERRORS as error:
+                        self.app.store.log_error(
+                            "OCR_AI_TRACKING_FAILED",
+                            error,
+                            mode=self.app.mode,
+                            game_id=game["id"],
+                        )
+                ranked_by_region = {}
+                for definition in eligible:
+                    region_id = str(definition["id"])
+                    state = states[region_id]
+                    stable = safe_int(state.get("stable_tracking_frames"), 0, 0)
+                    candidate_budget = 7 if state.get("lost", 0) else 3 if stable >= 16 else 5
+                    ranked = []
+                    tracked = tracked_results.get(region_id, {})
+                    for candidate in list(tracked.get("candidates", []))[:candidate_budget]:
+                        if not isinstance(candidate, dict):
+                            continue
+                        norm = _clamp_region_norm(candidate.get("norm"))
+                        metadata = dict(candidate)
+                        metadata["tracking_model"] = str(tracked.get("tracking_model", ""))
+                        metadata["box_regression_updates"] = safe_int(tracked.get("box_regression_updates"), 0, 0)
+                        metadata["box_regression_error"] = safe_float(tracked.get("box_regression_error"), 1.0)
+                        ranked.append(
+                            {
+                                "norm": norm,
+                                "distance": safe_float(candidate.get("distance"), 1.0, 0.0, 2.0),
+                                "score": safe_float(candidate.get("score"), 0.0, 0.0, 1.0),
+                                "source": str(candidate.get("source", "learned_multi_hypothesis")),
+                                "descriptor": _region_descriptor(
+                                    preview_rgb_bytes(frame.get("preview_rgb")),
+                                    safe_int(frame.get("preview_width"), PREVIEW_W, 1, 8192),
+                                    safe_int(frame.get("preview_height"), PREVIEW_H, 1, 8192),
+                                    norm,
+                                ),
+                                "metadata": metadata,
+                            }
+                        )
+                    if not ranked:
+                        for distance, norm, descriptor in _adaptive_region_candidates(frame, definition, state)[:candidate_budget]:
+                            ranked.append(
+                                {
+                                    "norm": _clamp_region_norm(norm),
+                                    "distance": safe_float(distance, 1.0, 0.0, 2.0),
+                                    "score": max(0.0, min(1.0, 1.0 - safe_float(distance, 1.0))),
+                                    "source": "stable_anchor_template_fallback",
+                                    "descriptor": descriptor,
+                                    "metadata": {
+                                        "tracking_model": "stable_ui_anchor_template_fallback",
+                                        "anchor_similarity": max(0.0, 1.0 - safe_float(distance, 1.0)),
+                                    },
+                                }
+                            )
+                    unique = []
+                    for candidate in sorted(ranked, key=lambda item: item.get("score", 0.0), reverse=True):
+                        if any(_rect_iou(candidate["norm"], old["norm"]) >= 0.96 for old in unique):
+                            continue
+                        unique.append(candidate)
+                    ranked_by_region[region_id] = unique[:candidate_budget]
                 batch_results = {}
                 if eligible and time.monotonic() < frame_deadline:
-                    first_norms = [ranked_by_region[str(item["id"])][0][1] for item in eligible]
+                    batch_definitions = [definition for definition in eligible if ranked_by_region.get(str(definition["id"]))]
+                    requests = [
+                        {
+                            "norm": list(ranked_by_region[str(definition["id"])][0]["norm"]),
+                            "context": {
+                                **request_contexts[str(definition["id"])],
+                                "tracking_candidate": dict(ranked_by_region[str(definition["id"])][0].get("metadata", {})),
+                                "tracking_source": str(ranked_by_region[str(definition["id"])][0].get("source", "")),
+                            },
+                        }
+                        for definition in batch_definitions
+                    ]
                     try:
-                        values = self.app.ocr_runtime.recognize_regions(frame, first_norms)
-                        for definition, value in zip(eligible, values):
+                        values = self.app.ocr_runtime.recognize_regions(frame, requests)
+                        for definition, value in zip(batch_definitions, values):
                             batch_results[str(definition["id"])] = value
                     except RECOVERABLE_ERRORS as error:
                         self.app.store.log_error(
@@ -39400,13 +39761,19 @@ class OCRMonitor:
                     ranked = ranked_by_region.get(region_id, [])
                     best_payload = None
                     best_quality = -10.0
-                    for rank, (distance, candidate_norm, descriptor) in enumerate(ranked):
+                    for rank, candidate in enumerate(ranked):
                         if time.monotonic() >= frame_deadline:
                             break
+                        candidate_norm = candidate["norm"]
+                        context = {
+                            **request_contexts[region_id],
+                            "tracking_candidate": dict(candidate.get("metadata", {})),
+                            "tracking_source": str(candidate.get("source", "")),
+                        }
                         try:
                             recognized = batch_results.get(region_id) if rank == 0 else None
                             if recognized is None:
-                                recognized = self.app.ocr_runtime.recognize_region(frame, candidate_norm)
+                                recognized = self.app.ocr_runtime.recognize_region(frame, candidate_norm, context)
                         except RECOVERABLE_ERRORS as error:
                             if rank == 0:
                                 self.app.store.log_error(
@@ -39416,22 +39783,43 @@ class OCRMonitor:
                                     game_id=game["id"],
                                 )
                             continue
-                        parsed = (
-                            parse_ocr_number(recognized.get("text"), definition.get("number_format", "auto"))
-                            if definition.get("region_type") == "number"
-                            else {"valid": False}
-                        )
-                        confidence = safe_float(recognized.get("confidence", 0.0), 0.0, 0.0, 1.0)
+                        worker_parsed = recognized.get("parsed") if isinstance(recognized, dict) and isinstance(recognized.get("parsed"), dict) else {}
+                        if definition.get("region_type") == "number":
+                            parsed = dict(worker_parsed) if worker_parsed.get("valid") and finite_number(worker_parsed.get("value")) else parse_ocr_number(recognized.get("text"), definition.get("number_format", "auto"))
+                        else:
+                            parsed = {"valid": False}
+                        ocr_confidence = safe_float(recognized.get("confidence"), 0.0, 0.0, 1.0)
+                        parse_confidence = safe_float(parsed.get("confidence"), 0.0, 0.0, 1.0)
+                        agreement = safe_float(recognized.get("ensemble_agreement"), 0.0, 0.0, 1.0)
+                        profile_confidence = safe_float(recognized.get("profile_confidence"), 0.0, 0.0, 1.0)
+                        tracking_score = safe_float(candidate.get("score"), max(0.0, 1.0 - safe_float(candidate.get("distance"), 1.0)), 0.0, 1.0)
+                        token_coverage = safe_float(parsed.get("token_coverage"), 0.0, 0.0, 1.0)
+                        token_count = safe_int(parsed.get("token_count"), 0, 0, 32)
+                        ambiguity_count = len(parsed.get("ambiguities", [])) if isinstance(parsed.get("ambiguities"), list) else 0
                         quality = (
-                            confidence
-                            + (0.72 if parsed.get("valid") else 0.0)
-                            - min(1.2, distance) * 0.42
-                            - rank * 0.018
+                            ocr_confidence * 0.27
+                            + parse_confidence * 0.18
+                            + agreement * 0.22
+                            + profile_confidence * 0.13
+                            + tracking_score * 0.15
+                            + token_coverage * 0.05
+                            + (0.08 if parsed.get("valid") else 0.0)
+                            - max(0, token_count - 1) * 0.045
+                            - ambiguity_count * 0.018
+                            - rank * 0.012
                         )
+                        if candidate.get("source") == "online_neural_box_regression":
+                            quality += 0.015
                         if best_payload is None or quality > best_quality:
                             best_quality = quality
-                            best_payload = (recognized, parsed, candidate_norm, descriptor, distance)
-                        if parsed.get("valid") and confidence >= 0.72 and distance <= 0.72:
+                            best_payload = {
+                                "recognized": recognized,
+                                "parsed": parsed,
+                                "candidate": candidate,
+                                "context": context,
+                                "quality": quality,
+                            }
+                        if parsed.get("valid") and quality >= 0.78 and ocr_confidence >= 0.68 and agreement >= 0.50:
                             break
                     if best_payload is None:
                         state["lost"] = min(1000, state.get("lost", 0) + 1)
@@ -39440,41 +39828,113 @@ class OCRMonitor:
                         state["high_confidence_frames"] = 0
                         state["stable_tracking_frames"] = 0
                         continue
-                    recognized, parsed, candidate_norm, descriptor, distance = best_payload
+                    recognized = best_payload["recognized"]
+                    parsed = best_payload["parsed"]
+                    candidate = best_payload["candidate"]
+                    candidate_norm = list(candidate["norm"])
+                    descriptor = candidate.get("descriptor", b"")
+                    distance = safe_float(candidate.get("distance"), 1.0, 0.0, 2.0)
+                    ocr_confidence = safe_float(recognized.get("confidence"), 0.0, 0.0, 1.0)
+                    parse_confidence = safe_float(parsed.get("confidence"), 0.0, 0.0, 1.0)
+                    agreement = safe_float(recognized.get("ensemble_agreement"), 0.0, 0.0, 1.0)
+                    profile_confidence = safe_float(recognized.get("profile_confidence"), 0.0, 0.0, 1.0)
+                    candidates = recognized.get("candidates", []) if isinstance(recognized.get("candidates"), list) else []
+                    grouped = bool(candidates and isinstance(candidates[0], dict) and candidates[0].get("grouped"))
                     consensus = self.consensus.update(
                         region_id,
                         recognized.get("text", ""),
                         parsed.get("value") if isinstance(parsed, dict) else None,
-                        recognized.get("confidence", 0.0),
+                        ocr_confidence,
+                        parse_confidence,
+                        agreement,
+                        profile_confidence,
+                        parsed.get("format_signature", ""),
+                        parsed.get("digit_count", 0),
+                        parsed.get("decimal_places", 0),
+                        parsed.get("separator", ""),
+                        parsed.get("has_thousands_separator", False),
+                        parsed.get("token_coverage", 0.0),
+                        grouped,
                     )
                     if parsed.get("valid") and finite_number(consensus.get("value")):
                         parsed = dict(parsed)
                         parsed["value"] = safe_float(consensus.get("value"))
-                        parsed["confidence"] = max(
-                            safe_float(parsed.get("confidence", 0.0), 0.0),
-                            safe_float(consensus.get("confidence", 0.0), 0.0),
-                        )
+                        parsed["confidence"] = max(parse_confidence, safe_float(consensus.get("confidence"), 0.0))
                         parsed["consensus_text"] = str(consensus.get("text", ""))
                         parsed["stable_frames"] = safe_int(consensus.get("stable_frames"), 0)
                         parsed["temporal_disagreement"] = bool(consensus.get("conflict"))
+                        parsed["format_consistency"] = safe_float(consensus.get("format_consistency"), 0.0)
                     consensus_confidence = safe_float(consensus.get("confidence"), 0.0, 0.0, 1.0)
-                    confident = bool(parsed.get("valid") and consensus_confidence >= 0.34 and distance <= 1.08)
-                    if confident:
+                    observation_quality = safe_float(consensus.get("observation_quality"), 0.0, 0.0, 1.0)
+                    tracking_score = safe_float(candidate.get("score"), max(0.0, 1.0 - distance), 0.0, 1.0)
+                    branch_support = safe_int(recognized.get("branch_support"), 0, 0)
+                    visual_evidence = bool(
+                        agreement >= 0.25
+                        or branch_support >= 2
+                        or (ocr_confidence >= 0.88 and parse_confidence >= 0.78 and profile_confidence >= 0.52)
+                    )
+                    observed_valid = bool(
+                        parsed.get("valid")
+                        and finite_number(parsed.get("value"))
+                        and consensus_confidence >= NUMERIC_OBSERVATION_MIN_CONFIDENCE
+                        and observation_quality >= 0.58
+                        and ocr_confidence >= 0.50
+                        and parse_confidence >= 0.46
+                        and profile_confidence >= 0.25
+                        and tracking_score >= 0.34
+                        and safe_float(consensus.get("format_consistency"), 0.0) >= 0.24
+                        and not consensus.get("conflict")
+                        and visual_evidence
+                    )
+                    rejection_reasons = []
+                    if not parsed.get("valid") or not finite_number(parsed.get("value")):
+                        rejection_reasons.append("unparseable")
+                    if consensus_confidence < NUMERIC_OBSERVATION_MIN_CONFIDENCE:
+                        rejection_reasons.append("below_minimum_confidence")
+                    if consensus.get("conflict"):
+                        rejection_reasons.append("temporal_conflict")
+                    if not visual_evidence:
+                        rejection_reasons.append("insufficient_model_agreement")
+                    if tracking_score < 0.34:
+                        rejection_reasons.append("tracking_uncertain")
+                    tracking_confident = bool(
+                        parsed.get("valid")
+                        and finite_number(parsed.get("value"))
+                        and consensus_confidence >= 0.57
+                        and tracking_score >= 0.38
+                        and not consensus.get("conflict")
+                        and visual_evidence
+                    )
+                    feedback = {}
+                    if observed_valid and time.monotonic() < frame_deadline:
+                        try:
+                            feedback = self.app.ocr_runtime.commit_tracking_feedback(
+                                frame,
+                                candidate_norm,
+                                best_payload["context"],
+                                recognized,
+                            )
+                        except RECOVERABLE_ERRORS as error:
+                            self.app.store.log_error(
+                                "OCR_TRACKING_FEEDBACK_FAILED",
+                                error,
+                                mode=self.app.mode,
+                                game_id=game["id"],
+                            )
+                    if tracking_confident:
                         pending = state.get("pending_norm")
                         if pending is not None and _rect_iou(pending, candidate_norm) >= 0.58:
                             state["pending_count"] = min(1000, state.get("pending_count", 0) + 1)
                             state["pending_norm"] = _clamp_region_norm(
-                                [
-                                    pending[index] * 0.62 + candidate_norm[index] * 0.38
-                                    for index in range(4)
-                                ]
+                                [pending[index] * 0.58 + candidate_norm[index] * 0.42 for index in range(4)]
                             )
                         else:
                             state["pending_norm"] = _clamp_region_norm(candidate_norm)
                             state["pending_count"] = 1
+                        state["lost"] = 0
                         state["high_confidence_frames"] = (
                             min(1000, state.get("high_confidence_frames", 0) + 1)
-                            if consensus_confidence >= 0.58
+                            if consensus_confidence >= 0.70
                             else 0
                         )
                         if state["pending_count"] >= NUMERIC_TRACKING_CONFIRM_FRAMES:
@@ -39482,32 +39942,21 @@ class OCRMonitor:
                             previous = list(state["norm"])
                             state["norm"] = committed
                             definition["region_norm"] = list(committed)
-                            state["lost"] = 0
                             state["stable_tracking_frames"] = (
                                 min(10000, state.get("stable_tracking_frames", 0) + 1)
                                 if _rect_iou(previous, committed) >= 0.88
                                 else 1
                             )
-                        if (
-                            descriptor
-                            and state["high_confidence_frames"] >= NUMERIC_TRACKING_TEMPLATE_UPDATE_FRAMES
-                            and consensus_confidence >= 0.64
-                        ):
+                        if descriptor and state["high_confidence_frames"] >= NUMERIC_TRACKING_TEMPLATE_UPDATE_FRAMES and consensus_confidence >= 0.72:
                             templates = list(state.get("templates", []))
-                            nearest = min(
-                                (_descriptor_distance(template, descriptor) for template in templates),
-                                default=2.0,
-                            )
+                            nearest = min((_descriptor_distance(template, descriptor) for template in templates), default=2.0)
                             if nearest >= 0.035:
                                 templates.insert(0, bytes(descriptor))
                             elif templates:
-                                closest_index = min(
-                                    range(len(templates)),
-                                    key=lambda index: _descriptor_distance(templates[index], descriptor),
-                                )
+                                closest_index = min(range(len(templates)), key=lambda index: _descriptor_distance(templates[index], descriptor))
                                 old = templates[closest_index]
                                 templates[closest_index] = bytes(
-                                    int(old_value * 0.86 + new_value * 0.14)
+                                    int(old_value * 0.88 + new_value * 0.12)
                                     for old_value, new_value in zip(old, descriptor)
                                 )
                             else:
@@ -39518,81 +39967,116 @@ class OCRMonitor:
                             encoded = [_encode_tracking_template(value) for value in state["templates"] if value]
                             config["tracking_templates"] = encoded
                             config["tracking_template"] = encoded[0] if encoded else ""
+                            config["tracking_anchor_excludes_numeric_content"] = True
+                            config["tracking_model"] = "stable_ui_anchor+pyramidal_lk_ransac+learned_roi_embedding+online_neural_box_regression+multi_hypothesis+ocr_relocalization"
                             definition["relation_config"] = config
                             state["high_confidence_frames"] = 0
-                        config = normalize_relation_config(definition.get("relation_config", {}))
-                        should_persist = bool(config.get("tracking_persist_stable", False))
-                        moved = _rect_iou(state.get("persisted_norm", state["norm"]), state["norm"]) < 0.88
-                        now = time.monotonic()
-                        if (
-                            should_persist
-                            and moved
-                            and state.get("stable_tracking_frames", 0) >= NUMERIC_TRACKING_PERSIST_FRAMES
-                            and now - state.get("last_persisted", 0.0) >= 30.0
-                        ):
-                            persisted = dict(definition)
-                            persisted["region_norm"] = list(state["norm"])
-                            self.app.store.save_ocr_region(game["id"], persisted)
-                            state["persisted_norm"] = list(state["norm"])
-                            state["last_persisted"] = now
                     else:
                         state["lost"] = min(1000, state.get("lost", 0) + 1)
                         state["pending_norm"] = None
                         state["pending_count"] = 0
                         state["high_confidence_frames"] = 0
                         state["stable_tracking_frames"] = 0
+                    profile = {}
+                    if isinstance(feedback, dict) and isinstance(feedback.get("region_profile"), dict):
+                        profile = dict(feedback.get("region_profile"))
+                    elif isinstance(recognized.get("region_profile"), dict):
+                        profile = dict(recognized.get("region_profile"))
+                    now = time.monotonic()
+                    profile_changed = False
+                    if observed_valid and safe_int(profile.get("samples"), 0, 0) >= 3:
+                        profile_checksum = hashlib.sha256(canonical_bytes(profile)).hexdigest()
+                        if profile_checksum != state.get("profile_checksum") and now - state.get("last_profile_persisted", 0.0) >= 20.0:
+                            config = normalize_relation_config(definition.get("relation_config", {}))
+                            config["numeric_visual_profile"] = profile
+                            config["numeric_profile_model"] = "neural_visual_embedding+adaptive_font_color_format_statistics"
+                            config["tracking_model"] = str(candidate.get("metadata", {}).get("tracking_model", config.get("tracking_model", "")))
+                            definition["relation_config"] = config
+                            state["profile_checksum"] = profile_checksum
+                            state["last_profile_persisted"] = now
+                            profile_changed = True
+                    config = normalize_relation_config(definition.get("relation_config", {}))
+                    should_persist_norm = bool(config.get("tracking_persist_stable", False))
+                    moved = _rect_iou(state.get("persisted_norm", state["norm"]), state["norm"]) < 0.88
+                    norm_changed = bool(
+                        should_persist_norm
+                        and moved
+                        and state.get("stable_tracking_frames", 0) >= NUMERIC_TRACKING_PERSIST_FRAMES
+                        and now - state.get("last_persisted", 0.0) >= 30.0
+                    )
+                    if profile_changed or norm_changed:
+                        persisted = dict(definition)
+                        persisted["region_norm"] = list(state["norm"])
+                        self.app.store.save_ocr_region(game["id"], persisted)
+                        if norm_changed:
+                            state["persisted_norm"] = list(state["norm"])
+                            state["last_persisted"] = now
+                    parsed = dict(parsed)
+                    parsed["observed_valid"] = observed_valid
+                    parsed["observation_confidence"] = consensus_confidence
+                    parsed["observation_quality"] = observation_quality
+                    parsed["observation_rejection_reason"] = ",".join(rejection_reasons)
+                    parsed["ensemble_agreement"] = agreement
+                    parsed["profile_confidence"] = profile_confidence
+                    parsed["tracking_score"] = tracking_score
                     observations[region_id] = {
                         "definition": definition,
                         "recognized": recognized,
                         "parsed": parsed,
                         "consensus": consensus,
+                        "observed_valid": observed_valid,
+                        "observation_rejection_reason": ",".join(rejection_reasons),
                         "tracked_norm": list(state["norm"]),
                         "candidate_norm": list(candidate_norm),
                         "candidate_confirm_frames": state.get("pending_count", 0),
                         "lost_frames": state["lost"],
                         "tracking_distance": distance,
-                        "recovered": bool(was_lost and confident),
+                        "tracking_score": tracking_score,
+                        "tracking_source": str(candidate.get("source", "")),
+                        "tracking_model": str(candidate.get("metadata", {}).get("tracking_model", "")),
+                        "tracking_metadata": dict(candidate.get("metadata", {})),
+                        "recovered": bool(was_lost and tracking_confident),
                     }
-                frame_id = str(
-                    frame.get("frame_id")
-                    or (str(game["id"]) + "|" + format(safe_float(frame.get("time"), time.time()), ".9f"))
-                )
                 current_snapshot = {}
+                prediction_time = frame_started
                 for definition in definitions:
                     region_id = str(definition["id"])
+                    state = states[region_id]
                     item = observations.get(region_id)
-                    if item is None:
-                        current_snapshot[region_id] = {
-                            "valid": False,
-                            "value": None,
-                            "stable_frames": 0,
-                            "occluded": True,
-                            "recovered": False,
+                    parsed = item.get("parsed", {}) if isinstance(item, dict) else {}
+                    consensus = item.get("consensus", {}) if isinstance(item, dict) else {}
+                    stable_frames = safe_int(consensus.get("stable_frames"), 0)
+                    conflict = bool(consensus.get("conflict"))
+                    observed_valid = bool(item.get("observed_valid")) if isinstance(item, dict) else False
+                    consensus_value = consensus.get("value") if isinstance(consensus, dict) else None
+                    if not finite_number(consensus_value) and isinstance(parsed, dict) and parsed.get("valid"):
+                        consensus_value = parsed.get("value")
+                    consensus_confidence = safe_float(
+                        consensus.get("confidence", parsed.get("confidence", 0.0)) if isinstance(consensus, dict) else 0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                    )
+                    if conflict:
+                        consensus_confidence *= 0.35
+                    if observed_valid:
+                        snapshot = state["prediction"].observe(parsed.get("value"), prediction_time, consensus_confidence)
+                    else:
+                        visual_value = consensus_value if finite_number(consensus_value) and consensus_confidence >= 0.30 else None
+                        snapshot = state["prediction"].predict(prediction_time, visual_value, consensus_confidence)
+                    snapshot.update(
+                        {
+                            "stable_frames": stable_frames,
+                            "occluded": not isinstance(item, dict) or safe_int(item.get("lost_frames"), 0) > 0,
+                            "recovered": bool(item.get("recovered")) if isinstance(item, dict) else False,
+                            "temporal_disagreement": conflict,
+                            "observed_valid": observed_valid,
+                            "observation_confidence": consensus_confidence,
+                            "observation_rejection_reason": str(item.get("observation_rejection_reason", "not_observed")) if isinstance(item, dict) else "not_observed",
                             "frame_id": frame_id,
                         }
-                        continue
-                    parsed = item.get("parsed", {})
-                    consensus = item.get("consensus", {})
-                    stable_frames = safe_int(consensus.get("stable_frames"), 0)
-                    valid = bool(
-                        isinstance(parsed, dict)
-                        and parsed.get("valid")
-                        and finite_number(parsed.get("value"))
-                        and stable_frames >= NUMERIC_REWARD_STABLE_FRAMES
-                        and not consensus.get("conflict")
-                        and not item.get("recovered")
-                        and safe_int(item.get("lost_frames"), 0) == 0
-                        and safe_int(item.get("candidate_confirm_frames"), 0) >= NUMERIC_TRACKING_CONFIRM_FRAMES
                     )
-                    current_snapshot[region_id] = {
-                        "valid": valid,
-                        "value": safe_float(parsed.get("value")) if valid else None,
-                        "stable_frames": stable_frames,
-                        "occluded": safe_int(item.get("lost_frames"), 0) > 0,
-                        "recovered": bool(item.get("recovered")),
-                        "temporal_disagreement": bool(consensus.get("conflict")),
-                        "frame_id": frame_id,
-                    }
+                    current_snapshot[region_id] = snapshot
                 comparison = (
                     compare_numeric_snapshots_detailed(definitions, previous_snapshot, current_snapshot)
                     if previous_snapshot
@@ -39614,13 +40098,17 @@ class OCRMonitor:
                     region_id = str(definition["id"])
                     item = observations.get(region_id)
                     if item is None:
+                        snapshot_value = current_snapshot.get(region_id, {})
                         event_summaries.append(
                             {
                                 "region_id": region_id,
                                 "priority": safe_int(definition.get("priority"), 0),
-                                "status": "unreadable",
+                                "status": "predicted" if snapshot_value.get("valid") else str(snapshot_value.get("prediction_source", "unreadable")),
                                 "terminal": "",
                                 "reset": "",
+                                "valid": bool(snapshot_value.get("valid")),
+                                "predicted": bool(snapshot_value.get("predicted")),
+                                "confidence": safe_float(snapshot_value.get("confidence"), 0.0, 0.0, 1.0),
                             }
                         )
                         continue
@@ -39637,10 +40125,17 @@ class OCRMonitor:
                         "candidate_confirm_frames": item["candidate_confirm_frames"],
                         "lost_frames": item["lost_frames"],
                         "tracking_distance": item["tracking_distance"],
+                        "tracking_score": item["tracking_score"],
+                        "tracking_source": item["tracking_source"],
+                        "tracking_model": item["tracking_model"],
                         "frame_id": frame_id,
                     }
+                    semantic_parsed = parsed if item.get("observed_valid") else {
+                        "valid": False,
+                        "rejection_reason": item.get("observation_rejection_reason", "low_confidence"),
+                    }
                     event = (
-                        OCR_SEMANTIC_ENGINE.evaluate(definition, parsed, runtime_context)
+                        OCR_SEMANTIC_ENGINE.evaluate(definition, semantic_parsed, runtime_context)
                         if definition.get("region_type") == "number"
                         else {
                             "terminal": "",
@@ -39651,13 +40146,21 @@ class OCRMonitor:
                         }
                     )
                     event["progress"] = 0.0
+                    event["ocr_observed_valid"] = bool(item.get("observed_valid"))
+                    event["ocr_observation_rejection_reason"] = str(item.get("observation_rejection_reason", ""))
                     event["ocr_temporal_disagreement"] = bool(consensus.get("conflict"))
+                    event["ocr_ensemble_agreement"] = safe_float(item["recognized"].get("ensemble_agreement"), 0.0)
+                    event["ocr_profile_confidence"] = safe_float(item["recognized"].get("profile_confidence"), 0.0)
+                    event["ocr_preprocessing_branches"] = list(item["recognized"].get("preprocessing_branches", []))
                     event["stable_frames"] = safe_int(consensus.get("stable_frames"), 0)
                     event["tracked_region_norm"] = item["tracked_norm"]
                     event["tracking_candidate_norm"] = item["candidate_norm"]
                     event["tracking_candidate_confirm_frames"] = item["candidate_confirm_frames"]
                     event["tracking_lost_frames"] = item["lost_frames"]
                     event["tracking_template_distance"] = item["tracking_distance"]
+                    event["tracking_score"] = item["tracking_score"]
+                    event["tracking_source"] = item["tracking_source"]
+                    event["tracking_model"] = item["tracking_model"]
                     event["tracking_recovered"] = bool(item.get("recovered"))
                     event["frame_id"] = frame_id
                     event["priority"] = safe_int(definition.get("priority"), 0)
@@ -39665,6 +40168,10 @@ class OCRMonitor:
                     event["snapshot_status"] = str(comparison.get("status", "neutral"))
                     event["snapshot_winning_region_id"] = str(comparison.get("winning_region_id", ""))
                     event["snapshot_value"] = dict(current_snapshot.get(region_id, {}))
+                    event["numeric_predicted"] = bool(event["snapshot_value"].get("predicted"))
+                    event["numeric_prediction_confidence"] = safe_float(event["snapshot_value"].get("confidence"), 0.0, 0.0, 1.0)
+                    event["numeric_prediction_error"] = event["snapshot_value"].get("prediction_error")
+                    event["numeric_prediction_source"] = str(event["snapshot_value"].get("prediction_source", ""))
                     if not terminal and event.get("terminal") in {"success", "failure"}:
                         terminal = str(event.get("terminal"))
                     event_summaries.append(
@@ -39675,6 +40182,9 @@ class OCRMonitor:
                             "terminal": str(event.get("terminal", "")),
                             "reset": str(event.get("reset", "")),
                             "valid": bool(current_snapshot.get(region_id, {}).get("valid")),
+                            "predicted": bool(current_snapshot.get(region_id, {}).get("predicted")),
+                            "confidence": safe_float(current_snapshot.get(region_id, {}).get("confidence"), 0.0, 0.0, 1.0),
+                            "observed_valid": bool(item.get("observed_valid")),
                         }
                     )
                     saved_at = time.monotonic()
@@ -39696,6 +40206,7 @@ class OCRMonitor:
                     "status": str(comparison.get("status", "neutral")),
                     "winning_region_id": str(comparison.get("winning_region_id", "")),
                     "winning_priority": comparison.get("priority"),
+                    "used_prediction": bool(comparison.get("used_prediction")),
                     "events": event_summaries,
                     "before_snapshot": previous_snapshot,
                     "now_snapshot": current_snapshot,
@@ -39704,7 +40215,7 @@ class OCRMonitor:
                 SEMANTIC_EVENT_HUB.publish_snapshot(game["id"], frame_id, snapshot_event)
                 previous_snapshot = current_snapshot
                 elapsed = time.monotonic() - frame_started
-                target_interval = 0.18 if self.purpose == "training" else 0.3
+                target_interval = 0.20 if self.purpose == "training" else 0.32
                 self.stop_event.wait(max(0.0, target_interval - elapsed))
         finally:
             if self.app.store is not None:
@@ -39721,80 +40232,12 @@ class OCRMonitor:
 
 
 
-class ScreenNumericKeypad:
-    def __init__(self, parent, title, initial=""):
-        self.value = tk.StringVar(value=str(initial))
-        self.frame = ttk.LabelFrame(parent, text=title, padding=8)
-        self.entry = ttk.Entry(
-            self.frame, textvariable=self.value, state="readonly", justify="right", font=("Consolas", 14)
-        )
-        self.entry.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 6))
-        keys = [
-            ("7", "7"),
-            ("8", "8"),
-            ("9", "9"),
-            ("←", "back"),
-            ("4", "4"),
-            ("5", "5"),
-            ("6", "6"),
-            ("清空", "clear"),
-            ("1", "1"),
-            ("2", "2"),
-            ("3", "3"),
-            ("-", "-"),
-            ("0", "0"),
-            (".", "."),
-            ("K", "K"),
-            ("M", "M"),
-        ]
-        for index, (label, token) in enumerate(keys):
-            ttk.Button(self.frame, text=label, command=lambda token=token: self.press(token)).grid(
-                row=1 + index // 4, column=index % 4, sticky="nsew", padx=2, pady=2, ipady=4
-            )
-        for column in range(4):
-            self.frame.columnconfigure(column, weight=1)
-
-    def press(self, token):
-        text = self.value.get()
-        if token == "back":
-            self.value.set(text[:-1])
-        elif token == "clear":
-            self.value.set("")
-        elif len(text) < 32:
-            self.value.set(text + token)
-
-    def get_number(self):
-        parsed = parse_ocr_number(self.value.get())
-        if not parsed.get("valid"):
-            raise ValueError("请输入有效数字")
-        return parsed.get("value")
 
 
-def ocr_can_authorize_action(text, action):
-    return False
 
 
-def _pid_alive(pid):
-    try:
-        value = int(pid)
-        if os.name == "nt":
-            handle = ctypes.WinDLL("kernel32", use_last_error=True).OpenProcess(0x1000, False, value)
-            if not handle:
-                return False
-            ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(handle)
-            return True
-        os.kill(value, 0)
-        return True
-    except RECOVERABLE_ERRORS:
-        return False
 
 
-def _tk_top_level_hwnd(widget):
-    try:
-        value = str(widget.wm_frame())
-        return int(value, 0)
-    except RECOVERABLE_ERRORS:
-        return int(widget.winfo_id())
 
 
 
@@ -39827,58 +40270,21 @@ def show_acknowledge_only_startup(message):
         record_cleanup_error("BEST_EFFORT_EXCEPTION", error)
 
 
-class BootstrapNamespace:
-    load_gui_runtime = staticmethod(load_gui_runtime)
-    configure_data_directory = staticmethod(configure_data_directory)
-    prepare_data_directory = staticmethod(prepare_data_directory)
-
-
-class RuntimeNamespace:
-    embedded_runtime_lock = staticmethod(embedded_runtime_lock)
-    validate_runtime_manifest = staticmethod(validate_runtime_manifest)
-    runtime_install_worker = staticmethod(runtime_install_worker)
-    ai_worker_main = staticmethod(ai_worker_main)
-
-
-class StorageNamespace:
-    DataStore = DataStore
-    ThreadLocalSQLite = ThreadLocalSQLite
-    atomic_write_text = staticmethod(atomic_write_text)
-    atomic_write_bytes = staticmethod(atomic_write_bytes)
-    open_data_file = staticmethod(open_data_file)
-    replace_data_path = staticmethod(replace_data_path)
-    remove_data_path = staticmethod(remove_data_path)
-    make_data_directory = staticmethod(make_data_directory)
-
-
-class WindowsNamespace:
-    WinBridge = WinBridge
-    PreviewCoordinateMapper = PreviewCoordinateMapper
-    window_descriptor_score = staticmethod(window_descriptor_score)
-
-
-class LearningNamespace:
-    LearningController = LearningController
-    normalize_action = staticmethod(normalize_action)
-    action_signature = staticmethod(action_signature)
-
-
-class SleepNamespace:
-    ReviewController = ReviewController
-    ReviewProcessWorker = ReviewProcessWorker
-    deterministic_sleep_seed = staticmethod(deterministic_sleep_seed)
-
-
-class TrainingNamespace:
-    TrainingController = TrainingController
-    TaskAgentPolicy = TaskAgentPolicy
 
 
 
-class GuiNamespace:
-    App = App
-    load_gui_runtime = staticmethod(load_gui_runtime)
-    scrollable_frame = staticmethod(scrollable_frame)
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -45421,139 +45827,6 @@ class SafetyLeaseBroker:
         return bool(self.process is not None and self.process.is_alive())
 
 
-def active_learning_alternatives(frame, ranked, existing):
-    values = list(existing)
-    signatures = {semantic_action_signature(value.get("a")) for value in values if isinstance(value, dict)}
-    targets = (
-        [
-            value
-            for value in frame.get("semantic_targets", [])
-            if isinstance(value, dict) and str(value.get("source")) != "compatibility_alias"
-        ]
-        if isinstance(frame, dict)
-        else []
-    )
-    additions = []
-    wait_action = normalize_semantic_action({"action_type": "no_op", "parameters": {"duration": 0.6}})
-    additions.append(
-        {
-            "a": wait_action,
-            "coordinate_action": {"kind": "no_op", "duration": 0.6},
-            "repeat_policy": "hold_until_change",
-            "cluster_id": "active|wait",
-            "risk_class": "safe",
-            "guidance_label": "等待动画或回合变化",
-            "active_learning_label": "wait",
-        }
-    )
-    scroll_target = next((value for value in targets if value.get("class") == "scroll_area"), None)
-    if scroll_target is not None or not targets:
-        target_descriptor = (
-            _target_descriptor_for_action(scroll_target)
-            if scroll_target is not None
-            else {"class": "coordinate_fallback", "instance": "scroll_area"}
-        )
-        scroll = normalize_semantic_action(
-            {
-                "action_type": "scroll_v",
-                "target": target_descriptor,
-                "parameters": {"delta": -240, "duration": 0.10},
-                "coordinate_fallback": {"kind": "scroll_v", "delta": -240, "path": [[0.5, 0.72]], "duration": 0.10},
-            }
-        )
-        additions.append(
-            {
-                "a": scroll,
-                "coordinate_action": {"kind": "scroll_v", "delta": -240, "path": [[0.5, 0.72]], "duration": 0.10},
-                "repeat_policy": "repeatable",
-                "cluster_id": "active|scroll",
-                "risk_class": "safe",
-                "guidance_label": "向下滚动寻找目标",
-                "active_learning_label": "scroll",
-            }
-        )
-    complete = normalize_semantic_action({"action_type": "no_op", "parameters": {"duration": 0.2}})
-    additions.append(
-        {
-            "a": complete,
-            "coordinate_action": {"kind": "no_op", "duration": 0.2},
-            "repeat_policy": "one_shot",
-            "cluster_id": "active|task_complete",
-            "risk_class": "safe",
-            "guidance_label": "当前任务已经完成",
-            "active_learning_label": "task_complete",
-        }
-    )
-    failure = normalize_semantic_action({"action_type": "no_op", "parameters": {"duration": 0.2}})
-    additions.append(
-        {
-            "a": failure,
-            "coordinate_action": {"kind": "no_op", "duration": 0.2},
-            "repeat_policy": "one_shot",
-            "cluster_id": "active|failure_state",
-            "risk_class": "safe",
-            "guidance_label": "当前状态表示失败",
-            "active_learning_label": "failure_state",
-        }
-    )
-    changed = normalize_semantic_action({"action_type": "no_op", "parameters": {"duration": 0.2}})
-    additions.append(
-        {
-            "a": changed,
-            "coordinate_action": {"kind": "no_op", "duration": 0.2},
-            "repeat_policy": "one_shot",
-            "cluster_id": "active|object_changed",
-            "risk_class": "safe",
-            "guidance_label": "目标对象刚刚发生了关键变化",
-            "active_learning_label": "object_changed",
-        }
-    )
-    for entry in additions:
-        signature = semantic_action_signature(entry["a"]) + "|" + entry["active_learning_label"]
-        if signature not in signatures:
-            values.append(entry)
-            signatures.add(signature)
-    priority = []
-    if ranked and len(ranked) > 1:
-        gap = abs(safe_float(ranked[1].get("score"), 0.0) - safe_float(ranked[0].get("score"), 0.0))
-    else:
-        gap = float("inf")
-    for value in values:
-        label = str(value.get("active_learning_label", "candidate"))
-        score = 0
-        if label == "candidate":
-            score = 0
-        elif label == "wait":
-            score = 1 if gap < 12 or bool(frame.get("capture_frozen")) else 3
-        elif label == "scroll":
-            score = 2
-        else:
-            score = 4
-        priority.append((score, value))
-    selected = []
-    for _, value in sorted(priority, key=lambda item: item[0]):
-        key = semantic_action_signature(value.get("a")) + "|" + str(value.get("active_learning_label", "candidate"))
-        if any(
-            semantic_action_signature(old.get("a")) + "|" + str(old.get("active_learning_label", "candidate")) == key
-            for old in selected
-        ):
-            continue
-        selected.append(value)
-        if len(selected) >= 4:
-            break
-    candidates = []
-    for entry in selected:
-        candidates.append(
-            {
-                "cluster_id": entry.get("cluster_id", ""),
-                "canonical_action_signature": semantic_action_signature(entry["a"]),
-                "semantic_action": entry["a"],
-                "a": entry.get("coordinate_action") or normalize_action(entry["a"]),
-                "risk_class": entry.get("risk_class", "safe"),
-                "active_learning_label": entry.get("active_learning_label", ""),
-            }
-        )
-    return selected, candidates
 
 
 def active_learning_information_score(decision, temporal=None):
@@ -45742,41 +46015,6 @@ class SemanticEventTrigger:
 SEMANTIC_EVENT_TRIGGER = SemanticEventTrigger()
 
 
-class BoundedLatestQueue:
-    def __init__(self, maximum=4):
-        self.maximum = max(1, int(maximum))
-        self.queue = deque(maxlen=self.maximum)
-        self.lock = threading.RLock()
-        self.condition = threading.Condition(self.lock)
-        self.dropped = 0
-
-    def put_latest(self, value):
-        with self.condition:
-            if len(self.queue) >= self.maximum:
-                self.queue.popleft()
-                self.dropped += 1
-                RUNTIME_METRICS.increment("bounded_queue_dropped_oldest")
-            self.queue.append(value)
-            self.condition.notify()
-
-    def get_latest(self, timeout=None):
-        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
-        with self.condition:
-            while not self.queue:
-                if deadline is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise queue.Empty
-                    self.condition.wait(remaining)
-                else:
-                    self.condition.wait()
-            value = self.queue.pop()
-            self.queue.clear()
-            return value
-
-    def qsize(self):
-        with self.lock:
-            return len(self.queue)
 
 
 def _replay_observation(value):
