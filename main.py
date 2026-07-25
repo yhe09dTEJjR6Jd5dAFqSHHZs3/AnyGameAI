@@ -144,6 +144,7 @@ class ModelValidationError(AppError):
 class DeviceUnavailable(CaptureError):
     pass
 RECOVERABLE_ERRORS = (AppError, OSError, ValueError, RuntimeError, sqlite3.Error, zlib.error, UnicodeError, EOFError, ImportError, subprocess.SubprocessError)
+WORKER_REQUEST_ERRORS = RECOVERABLE_ERRORS + (TypeError, KeyError, MemoryError)
 
 @dataclass(frozen=True)
 class CaptureOptions:
@@ -683,10 +684,10 @@ FIXED_RUNTIME_PIP_MAX_BYTES = 3 * 1024 * 1024
 FIXED_RUNTIME_PIP_SIZE = 1813144
 RUNTIME_ARCH_X64 = 'x64'
 FIXED_RUNTIME_PYTHON_ARTIFACT = {'filename': 'python-3.12.10-embed-amd64.zip', 'url': FIXED_RUNTIME_PYTHON_URL, 'sha256': FIXED_RUNTIME_PYTHON_SHA256, 'size': 11133606, 'max_bytes': FIXED_RUNTIME_PYTHON_MAX_BYTES, 'python_abi': 'cp312', 'architecture': RUNTIME_ARCH_X64, 'backend': 'builtin_cpu'}
-RUNTIME_LOCK_MANIFEST_VERSION = 5
-RUNTIME_LOCK_MANIFEST_SHA256 = '6bb74ae98cb99a10c3d95c03ea40fcbdbf2505213e3c5fa64e8f0904e55f2c9a'
-RUNTIME_LOCK_MANIFEST_B85 = 'c-pO7U2kJIlKn4!Zkfd@e&%go7c;;D`?OdD4U$EsmDrX>a(Cj%&VS!SxozF<ndl=L198hTb?<c@*7+cr-|w_<`;+#k_VTf9o}PE5J@4;+`2FtZ_0!LV=c`@++voMJ<K6$gdn~(OK5zGB^t&Jb@!@Xs*ncYc*!X_j_T{BKKHUBI;qD8rzS(u1@0O?Mhuz_WyRu#DrtQA}T-!Wsb`P7M?mpZ-eSX}&+%4~c*Lc?UWwm{I{<L|*&)fCG!{*od;-x*Tx7)ruyguCf!{Nexk3Z+b-TqVA_J?`7{rWe2fBu_3zCOs?nC~B?@1ECVjiK#R+3oxD>S?okED!6yAMUZ%r-FYz?;al3RSs9$zs%?TzFynM^8D%W`{&KBefs|QWBt${HtiQ&YwY*i-tgjU<xzqD{Oe}-%Y0ruz~}ArX7h0PV_se>^Zc@1KmD}ozdiS-{d)7XKi=oddcN`f-QG(2Ubfd~I(%vt<X?eN9t#Fw#A2dscbhM3?Yl$OzQyE+Z+~8W>O~*=et(B6%s=$-k>7&*zxsLo@VtKd*tVZ>uix(qo@D*p+w<pL$5k){&sR(P1vkad%i$jmWqT@*bKqB?R!ki3!@Z5TvjD88zA8^I_rHFcGvV8@hdDBz?qjLz`Sw;UzfKbN0dFvK)K&|oIVlgHIcBvnu;Qypj7hpW@y=&AEdCo!tTGK}@k;Aqn*AMjv?84HVV>Z!pPrw$`yY&%Prtu^eS}Y&{d3p*&F&|&#UERK>U-0N;bEG0!Fl1HgRe!$;NhBUwn#}be8_Q-#^xw?rKZKXQcBLXI&aNIRrvx053}U%eHdW60gBg7`FQM<mE5~~w>lK~>-S&r$?~YdeFx3I>ax=)m6+S;5>xaeF+27(<&s!L9HDZ#^Z+mb*+8w51EK&&@P6spvp=Fl(TcqmB~im_Z1-KWs#HlNIRhZ?o8lg=25O0$hy{GOeHqc$R&&d?3TNNVpDNf9wZquk5c}HUE5fA$<_O=P=$<z^I0p=RLUYb`_|h7+Vr?E-os+;+W5nxFMIuS}maJ_y)G~Z5qjK`2g?C`si}-7CQEN09LD!%!Tnj>uJGlrviuBOcmLNqurHFR|0V*jLgHvffG-h<qMP)exaTs<x5YW99nvm}8>I@363VDXaH1;GeaRx)BGD5J-Z49E&@<>_&d#~u59@|LhBTd>_hs@d9ayzz%jZUsbA*gBAbZ2uP5?KmGXCv2;z)}f4FhsjcfWtLL-{8(wleJRZ&{jt7=7O3WA$T2g69#Wuj2;xa=Mxw#RQn7?1y_AS-;+zdN%kpcXb0%XqpCK@BrXmX)Px>LPCDf@$b&s{z;E9%$c{2!ivh9GVF<TMWJ4<&Ler@k8BkPKHyS%%yLjyl(jp;Q8q$*15jks0=7O3m`Dl*04TFOTdXp_Wg~6L$I*kCK_iMDtMyNn#8!`l(iVaB^A`yerK0r{mI#G0ouQmCqy|ZQIVvk$|c6ZlHxi`$l0c4HPA<-hJaDaV)R-@@SH?FOR7QD*<rhx)2Ww9+)ZZv8$7nJ0mgq&^yVVYY2ZcowBR|9;y_%Yg&;&2%X*#{^Hv)F=y!|1u$q%MgJ>!>OyD!7=TkHU(n--^Uu-iseCQM!8icN44$Axo;YLRkFd7#IP#wiHEu^>$P{Vv8|5JP`qXOnN_rYV#DUIa!J2#J9Im&#UF1cRI+;9~J#S-;%-UvM1kLcd&t|Ji{AWX<pIxAlKl~<0XYMra3D3Q&Dw-7z|5-c?h=~;=;Z<5Z2Yy&!$+|qmZc8p?<iUhV`X3s~)WwsR0a#e|CT+Vg5@Et{2K#tHt}loU6w-rN2>nkC7JlqkFl;t^W1!ng5<K_^b?v;v?K2gpOM7Vp9X{R;?g{ZlMoaQwU&S%?<ZaPgKN>>X<^Tb|J$sOIMqrQjD*r_6A8oG^ijIbXqGMMf%7f{gUl8q@h3xAQM@7!jFDLtvz+y%~kbT0)w%)0dvUCD|;^|h2U$%J}bpkx#rOm)!N`RN&w-E0pkxNC;+9xDuI!#CJwNzoe=!0`0iUu%10c$1e>oWBPXVdiJGA)h$|Uk4b!2y>T*rJX9#}sq~J!W=)?>jY$PETG;I&el+C$%9BY3Va#QW!mL33kIB7>0YZRyJuc&qfvvNlf8fGFapZC5XV221(1hFkH!UaK|dnO$fL=bWXWxzlNUI=kOrQEduOhcJXWz>>0_nDy)m0`+k0?xUh3!_ruRNw>}cq$&80D&WsR`9Pg=ZmtO{^3SDdRVMk@jZhAFQBCNwVjhFG&{0~;C2tmqW}w{@F1BSSP0W@#NsgT1q?-02PirtOgEsA9DY-eC|I~wn0vZ9H3u__LB3!_zrYBG6^hHKKd^U5%7i9_D^Tx7M-G5hsF6Tb!!ooBcEMa)n1w5vV{ZcEeGwA(bznB_U)+hVSgu)~1_UjR@C)lPn_VT&f+L(JA^<}jxwzHNJirec2pIuF-XW%(CufwSRwKxz@Mrv~SA$rPTBtCk<mVC=l5wMw9i+Lr0zZbg1-Angr5dG)7X->Q0+`EOTAC#sZ{u#m<gn2A@oRnG78+OX-cIewhiMU4sJr}8&-}qs<#}6M5|0_1v~@s-X$($hfKx0ZNinpZ34SY9%ET=efq0kB2)!V|<NAgpisbCoT;__&WU2^4On`zl#0JD_Y21=mn(L6rm5s=g1#S+Vj0oO_qW3*KE~~krct;@LN8g0w>uU7M@<G@xpt{AX|4GH?>H$$eZ5)I)Dx%0JK1}Zgf`JKD@V*Odq5r{_Iq8wikrZKxfZQ>CFh?u#YLvW5*=XSrGlG!VI3RP0;!t?O;L&0OY)c6=+e2pbnkZ&U!C**WP-`wP%|iV7X7%5$w=3jGdvXy3gU+)X`UKPs!R}pZW1oT>iK!Hixe4#@kvj$^Wg7UR*b&VG_y+Q1eJhKF^n_{du5J`?TlOYYkf^v|JJ63(XVUOF<>-PUfb?opot_sWI7BRZWiGEnCSjG$=~^sE?J(xHvcGL&!Q;6LTj861uao}EcJFdRz7+^+Kuf@C26l57Aqln6QKB-}(49b(W9o<sAxA$W0?8s25-NGM(Bx=hG&&IT5~czpVkhoUHYf`mA0$OZK%0o?q0BX6gcKxm7(Ja<pj0%&73EoaVRvgc9QG4e;nHyUUoZdjAAkMJSwN71Ra^%EVJ=Z+r(m9Ls~d>z0py)i=(fS~#8P=6L$?7|uwjhoVqEkFW-491K%0W80|b?OvfZ`T1(H@_erNQAJCE9Qgn-a4o+BrOBgCGVkepog7WTtjT$trD?X9WsZRZ#!JfBP^?_130fCxmepxyQC0EA<dyQpM0Agk1yRm3rCQ{hQTPJA6PBr3ghf~4~i2$TuP`0GPD8Ad!z8rj?C1zJ;m4M7vY0d-Mr(t*S%y=8zgI9JR7SPv&D&y_-RzADRTl5dPAZ=2?DeBw@u#9|Bn%rXgrU?5l~Fo2X6N(B+athh|*g&|1dh~cv^t!By9HVSin3!1^;Dmsd_Q2a9p3}+g=I8{W9n%Q~a!66J9)-rgA)Km9Jj7eGzc%W!&@N>0xnyq3ksL9d+&oMV)Fc)OzzW-*oU(tPh<->H+?k+xZfn3a88AK32_nL>e`Hg$cbJr+SYZ2;=obHJcDczJ3;sSX`&IbU;%~f$$68#C`?!okyTm%IY+-qV0kB5SMM-K2%8Bc7XPl6aP$+}h>Lc5Q3sMAu-H3eF3<;5H2;&@bJ6+Jw`skN(bj&+=|QXUa`C|nd=JlFuQksZ1#)=Tzw?kK2pVOm(&O;7|Vjk*J16wy@6<nEHEa4jNZn9|L#SqOfrFkpv?5RlYhprbGjlo@>j+a#mldEmBklDW$66cZ(yiz;)3;&sezSiBzlK~GNqc7b*u&k3E0fKJG{>e_&78o7jsPHDZ*lOpgqV@CC;#PIb{)y9bU0a<YFLc46^F<XG}7~$jU+}@^ogNPaggQmT;(D8(Zq&gczQS^bX7!`>Jxnk}(jn)a81_R!p;pXz%EP3lzkGo(02K#2?0sK>^4PMV_ojGU_F$*QzKIfOS$W;ZQ!IuU`iUo=y+M;r-+)*BM2-gnVkKhrSK&uy9+#s@RF{shBZmi1%;-I*_g-~-wnq#=Q9Lh-5N2du42>jI}-RMBHQ?x14p6}*-HI_!!-b_vN;MlyOoODia=gZD0M3vCA1y@IaVpd3IOi;!M6KQ)>#T(oP%oWsQlp+#in0rDT6uO$;iyv%4OI#hV;d(|l$s(y0J1=ibf^&r|IcP#44>1_d&Lw{sWbyD1f#9t;QOW>?iaA%0Z;CHBnx?~9J9HaZ?Gh$>J(_oxhomFG#xyX^nNY^&5n_v?!KqW$kuztAM)t}csao?$s0310%f&8smzY3k0aNvAr5>gh1Cdd(QoXNvXd*lXgLq(|xWg)VG)G2zxZcM+nIpZ!WWzT#4;U}4%#w%vzXOfeQ<888Ojm&N^=#!?a>A4($K0Tib<Axyl`{DnE`IK-YK3=2#*z>{61aq1P_*vLJTVp9f}DJS7rXlOM-yX{L5$2ZS5vhbI&uzNo44xfJer19X*n03d*9AagIh+Pf;Q&)k7BMY($Yoot*3G3fz*||59$8YLi^#^>e-}iLqdS7EFle-nh&-NEs2<5qO#4t+6p-4;Q&gZrsN!B?jF`{wH>Wfi1QHDwLmZ%<O6hHj~>)RMaw+*7S$#tbq%Ue!d&x0=u@$<Q3!X8#*Kjy`VlwGnPMzgWapUM3V%3N{PB3IcrFT`K8y2DA35I~34KuTT_O^dm1e7r0hO_Co{oaIjAb6-Y<-^bL?#nY8j}Wz5RiTp4@AUxHD|eOR7?fT&<v&mOQx_##14~ypjnckR=!5x3(^accy0j}FLv)54+Ii(O_jb`Fu(P1&etR7pv!PCCop+Cntl$6IvDASp(9>&fPfN20vU?gw}L!898xiQL}SJ5L?8#9333RWES07UnnJUrt5;|x8%n0&3&F8Apsy{p2(d!1W+j&bw4_zoYfetapxiPZ3w?wb!_aYawjxX22y^-A?co1<*L5Cd|G6Ljr-$PK`9Izmdf$3DtbQ-nn7$3yZ|c1ij2{<I;{Wmg@47_z'
-RUNTIME_ALLOWED_DOWNLOAD_HOSTS = {'www.python.org', 'files.pythonhosted.org', 'pypi.org', 'download.pytorch.org'}
+RUNTIME_LOCK_MANIFEST_VERSION = 6
+RUNTIME_LOCK_MANIFEST_SHA256 = 'b22b03de0f548b125cd388119e8f2408cf40cfea9198457878071edf5a92cbe6'
+RUNTIME_LOCK_MANIFEST_B85 = 'c-rk;U2hvnlKd|M?&(ZbRc3w8+uq~h7Fb}P4vT?NpJUEQqLz|8*3Qj;zo?cdwmf2!G%aZsXaklhvdC^`RAxj}W%;+WQm^Y(saN^_V_sd|u4BHvIs4(av!9n&KS%11*7cuv%XP)G|2Vsh>tF7!Z(^%wKmPvVY;{?Gig;W5dffH>eZ0Il`|-osXMFl<T}yv9Ufo`-hc~X{^|Gw;`s?@Q)x~OkvHI!k!`ao{<@Np9_!@YOd(EF0*Y~%dR#*7_dU<iN`n5l}&lk(<>$)Bu57+)Md~m(N*ZFXE^C@1}i~eyp%P;tO`_FRua3h;BU*AYw-!9t{L-VJ&zNxp1tJV54UM&ALTw__TBL2BsUtBB`51({%-|zS9cwJw{+fT#mx2tvj^!4j)c~LJ``4@avyScfp84n&Kj|kM;Usvm2`u*Yt?yhfFtBc{w+&@I-_WpW#_0yt$xvf_>%hlD*_BxA#E96^*;j0Ti+{NRl&&&R{?Yka-|LQFpAfAH#@EOCqdKh1VFkVIsz=+ZGx?Zn7FH2nyv3`!^56^#Je5$cr)SH_#d_oV;@Rl!D|6jUWUfeFPKIZE?T<f>9h&x%{;+x*BD?SB7aDOT0UvN?UJ|6yI2=-OH>;oU+U63SuZqJp&l^GCU)kVCzKmYYppFhvX4l}FY-N%@g{po8~^f0x^SUf>QuH+Pv9I{X|fm|rcSt|IG**VX(Xg1me-4y<|%&L%VTH#Si!{q!IuBe#FhhcW%V?W*AUf=v6M8Er+^M_mbw7R*i<$SgNNnGR0#-Hkqs7+84*=VZ`Qw`RnSX!f|v(74V^xTXMuF2xEmaZ0=OVm2X7(z<gC~;6!J_EsFmYh8e1577C@sM91xB0c;bA7HCLx3ND{)%_T%VPCc(7cqJ(<nt3a;xmTGtCoeGRcSNiJ7%T<U*_#U;wg)Sa}UZ0S@E&Sc4(6MM*lv>R6Px2r5EVQ%fj?6MM-a03c&>!8LNSGJDF*3h?3bu{o1+3OT666igN06tFF7!`Rahd(7~K#79}o5jvm9o=rK}2Mltegb-9SF=v^hQlW*SHCvL&IXt$B*-5TONu{!~DK_I`OXN+<_6Zm=%;s2JiW0>NM%ExNbha!tRjD2Dh+J(gDq4<gq<476N<hU?VX%+c*i3}%IVdb!AckS50|B;NAPMEUTI@mLfminwvEr&{?J1x_`Pi&gM7cF7Z4S+sXvvs@ys0iXk31^AR4R@8Y|SBW(?dDU$D&}1$VybLLT&7bqjXw1O4g%FdE`LjQnd#hIur5+S5Cz%#ZkACV+&Or5R)wg4`WWkV8h_ZL6+w<fx(FD_mn8Blkv!VseR2Hj1K|afpTOJRb{ysF0u-x2|3_3R~dYh2Gt{2y!wPe&@#}m7)TPO35iR2sceqL+FUwk1VE9f=$1*FRN0i8K`m^(l8v)3sW}S8dvQQa#`UO=ISqqBI&El6PGPVSS<?te<bHC>D+d-xq-+3z%c!hp0!cWlOKm7nDrqjr4wI5Msnkk}3PrW8MX2ujcq%u7NN9ju9C(OJWJK6PK7gx{bQChBTy3^S2LO{%0+kG`vQLy{OIaKcl0Oi+JPCv@i2=BpDnpO5c{=#cspwtP0Ss9iN)TqTLJ795hOB(ip1CP4Q$dNc+6C|<Q^C~FkzI{X!FNhZfAsXP!YW~HV4qR~v6x<CAOxV=yyIe$Q7x(FvU5S>jwH~>q&JOa%0{{*CL=MP`0BLM^I#PEl?J-m74-k!_=)MTdsB1Okb#IiK^rR0rXcN6T&+fqM{i^6;wa*)BI*)k(3E7%L#SQrM)FmoU>#lhNkj#CWWCI(71MO`O_`XoDh8?OWCj=@|DXYj$NcAHb&WEFk`$h|VqZL-h5kh9-5OzBPoDE3YW1(fd;Z?d^IjUZ(Kx6-5S`4Svho>aH<g4!P!;&0ByTM$a0waLDMrf3x+P80x}-)l46$^y7>ZGtBvQ?w6j+0VqJm7zksNbv0YyIs)di`IpaRfD;Og<KX|AN|tE%Ft_>6(U*wcU+9QQ(<^CS^G8uPtWEEA>Bs+TEcD2-@Qa9V@#hY)0dk|32(kyP<yAzQ12@k?x~$=(;*;$YaSaC9-!EGi3E0yqVBCBUp<I%J)6NWRtp!uLiN)J9Io#DF@OC0iGfwAB*HAoj&$8~b6%NwME7SO9W6DMv>u8`JSGh;~9{rHUYA%tS~&V@!m>whp2QWE-`E3IaXXAWKUq1U4j;3<yX|BO<nlls*=KE+~UYgjiCb+C4O^GDMm3z&S)@p(`?yk5B>`b;=D&K%z#%t>9lR_6KD={q2czbXcre&^e(59#E2=)^;XQ$f^Yc!mS3BCoLpMfd&auqY7c#H5WDJJ)=TNnHoxTfSJxf!E3ydwkRm5R)~9fv}?AaMFD?7uzr?c4igxc5Px8=;gltk5UQXU-70(lq(X8MrK%|ccR?<QLjyBXMSbi^U_32d;<_4@t<=wYA}hu#ozs9I#bJISJ$kYic0J%Qr(Q|`BP)DyPL-&kJ`^kA5kTY>WJ;mejJV}$7&&jhMW31?U<-V<38GY*zJvv5oMj9e)SPvM9>dd&%b^tc<T$fo7)swPDwjAkG-Eh6<4(h5SZMtC7~jo8<3gXS&OKq67H)yK^RArPu~fNV)<#dQ+oqB$pu;pqO(%d86~RdnxSk~RmP;~7$}Td<J63|}MG@StZ)ho<)avM3rlSZ_BxaZx3kJ)u4Y1XmDSK07Ux$RR%u*VufSX1p!-D5lkoyK2mx?$ccv~Q!MxTV^!)o+G(Lihml)BMg!6f5TGJwb;HX20h3am(r#&+$60s|3RQ1`VZ1^%}x_DK(C4yOo71mw2vgUBg%N26qf528eBF2D$}at$=+rE3LR&>EyzL$#G2WwzQt$TcpQDG`G~fwm}dcxXoCPbahg_40ZFAE_o6K`>~4bwi$@bc3*K<&?>ItD7eoqru#S_BZey4U^J0{E@E0np@Nx(33Jbjuz5Arnx>kQBd205jLTSvbL%MeaERg4HJBD+7=j)nv_pn^MV8$vqG-)<#o^`q_UWf#i*zaV@?bEX6p+YPal{H&vwfu^_Qwf2M>SCAXJN#fYh|4`!0fKnQcXgVqZho3{rN!!YbI{Ot%P<N2X9Bl1CFwaKbrJ8f>1&R3KPvPZi7tW`W`Zr4(kAP1tiA`x-G!3Y<BFUg=UGCM3fV;TdaTeQGugyO0Zes5$)G{r~>uum7_b5P0Cix&i>(m#Bg+s616A-C)}-ig)m~stn2FVxk5Qog1oxvaLDo+$c9NQ{~YMwBCx;P@qEfs_L98gVGYjZ?~RM=dR?^tc7W3LykPm5p0k1a85cI1^FQk4$OF&_EcB6*>8pj50lR1X=8dH5LQY^(5h?D074VO9SaBDK&!H5Rba=I@{xK;(ri+5*2`F9m7sLm0)a3A8FRczmx5pqeQ{(|HVm#wCRtlNz(MJfDRTu9E!G?WMx&5010X##`_NYk#r~*_tw}i1nryb(q4-!&lEi4^e$O%qjG&c}OsD`HvyBOb7-B^SiCkz5Ck`9l1CvwWkW`kouWx}f2(?OX$(p7676h6W8CqN>Sd0`%8{k3KHrbRS)FD}ntOkzJb50gF<W#bzuhw?46~zHD87tsE<|GXIf=urgSgmgs^4vYtLq92ZM{hZRF8ZzvEQslQ&5d>cK{bWGYZPS84(tt|ZY04{>P{t+BIq4H9{_AOS6M6e@*9Y|T2Zst4kb`Ry?O%hxGB)LBMS``aK{S##IW(~mCh-{v>TUN(IqBvOn}B)dG18I*fw}9oPj2oTDyAI46;W`8Cc|2prWASQ4R1I-l6KK3<sn7jzZDeb_ol)i4uX5CaVTu(jlqF&Ru&W?XifoCSny$1(wiLkpMeH1fxhb0y+i4K?XveKsIrUxF4vk;JL4|>w<~m#6gkSLh&%>G%OyPg^-h7za7Bc+wP)07ErU)I_cb?np%j~Ayaa#y;B4lr**6DiX`ZIuxch)d<!qwccFDqZtE>j@CfGPXy2YYd!rC#5QgmXR)NPo5>lp~7zIIZ$cmQWc;GAgj#JB3g3}<tGdNrv9-DF9I#uJ|EWbd$DK~&W)ot+5-L<FDz+o10P_@r5t>CL7OoNFT70E>~3YY8(xkMG=L55JOko_<oHZ!<-w8f1=b}R<TiCl%!A%YwVF0Vk;6yW9vDlXXAd@@cKj|vF<i-Ef-4c4w8P2u)T75k$x7P9K(($w3{`UQDXIc>Vq_Ao?Zn@hGjH4DZ}piJk%j1D4F)m#dmpxhv?z#c6|X6J0*6Czu{tNtnYR(Yhv(e@gur&Zw<oLW@<<5l!fuAn6iPO#E|44PJb$sYol4fKPR&{pK74**3*u`eFag3l+4riX4mI!9GIq!Mk~`}Wi!t}w99H%xPq2xB%dv9Tb*WtE|{5Ga5&f+=L+s!M1dk$}s}A*#{t5=j&^i>Z1vQ#X;K0Lc`oI2n^dD_-I*2!#g%iYlanL2?A7hpx5t&K#~4A{)9X8^CyIWX5&Kd=E4px+I|vNFD*oV{hf&;)E$FHBkmfrq;LJ3ddfrq2l|#YDv(p@K|h}fdgk7B7#;;>>X1skBXDA&|*h-e`FTQ3)sleeYH%g*b1Km)n-)Dskf#fRdNWC`rfxTUEszRI-#}R{}IKJK^m(lI<*_8H>57~x%KB$3++SO>RzX<tcQV1#MU?Mv#~0+61^k|5fxN0NhQG1n**e`$$PB{b9Y#`EqN=Qtm{ow#{xkl;17^})fto?8B6SaZ>}g`WYHO{5N%)cg6S))AfsUJ2#M<~!Sus!h&{m=ugLZ>rv-lKMgF+$Med8j)4e!<c+39e@W_LRpX}hM6lax`vxtn+y*mop(#77wnQQOygePMoi}S^@1A){ndB7sNqidE9qOeGS8Js~fLXs88BS{*QK!US4fUQh&rbf6IIPs7zB%Z5AXKFAc;+QBsTQEPhIp?ua9p%!V^8_ZFhW33(q(*R81RgP58VZmHNx(x9nH=GVn}#b!jue+LJ7LIC&KN!fN>;{PMr8`g;*VaT<shUN5r1GDQwI7a`|Lng$kkA!_7+@{6XZ2{&8^9h18xg>1RF!(aj`cdW8ScR`RT_GLks%0vwna7`P10B`TSj*&v)Q3cb@+_JI{B(HMgC=Y1{b(3Ukl-TlAd248YuQ{$>s5I{=uw&EKrs{AC2@R`XYCHGetWbD#OE_nE&O__@jaeVfd8pfY!uzjlZD%YmQU%ipTKd`JA}-tsr^Eq@t_xv~7+8q0S8GIy2#J9U-64C35U{!T6ByWp7n$zQLZd`HaZX7YDzCf|k0+)4iCo#Zb=F}IPwSsVEd0OlU@x9TB(8GyNg{Cyk9cc3zNkH2;I_zocE*75gg9p3@R+&BK}ed9YKKR1oPdeivJk>B)1>+jhyUQ>-uw#JzGy7xRP6n+K&mOzHl0}N+KH>s49smn;{$-*@yQyqwWv{eLl_s$0W@WjXZCFa|+A8yxo^=RqjMU^5))O%gvPv9YSbhh`&CTT0c@vxaKtG<b+EJh*idgCtG2(CMoCJv3&^Tonb!TGp(t+z*?o4)i&edAdljMrlH>3e{SDiozEGaQDIiD0Bvm$1#%q`;mqw`8(0rgo#-*MA*^%>W)=+p1e1jAizx!{(G|Bx=GXKv8|4tBX1idu>B<GW3O%&9V2jCabs@WPjh00lQ?}vk@mm@maU|_+2Mr`qb~P!uLNE0AJYmqI_@qH^wG7!&rO!W(dJH(-#es0@HWP%tnUp*D%+$(lH0}Bl3rjMpZf;M4N`9SPYz?vP6A*ssK~%;7H)6YJ@=w&HJW%V+&{aS5y#~7*|m{qtoKZu#JIJCwa*EjKJ%j5!ey+`GCNm;DEr(*vzK`zT4@5tIx}_jEj7ySRQgh;Mw^3l)$^55}3eZJ}L0$JSi{%*?d~yO-~E#L1I2J@D?Wqc7rgV8hEo)0}~+3CkNi_<iKte=F<bObb4TS$mbITuYQ7Hckt&^1n+x_U;>%>B*AN+B-kDN`82^>ohF#TU_Mds<|hhvqcNW<c(+pp6QIl|3;vx>7VHLcK3(umrwgVanNJwJ-U)+=xX-5y-tm;d6fW~ggEv2Eup5r~w85L5HkbfmK5_6?Ck}RlFrPYj-%|$@$jm1X-umRh1Q_$_gZDXoFagPY0^!w9AWTGm({-<>3)4ZT5UPY>hCB(OkkT-(DH2LHlZUf&AxTq$j@ELgZL740sA7<b1$&}yY+1q*$j0z@=zu371MEgI1~G2M0*43{n{{u}hZ~3K!wtX(nrf_9MfU$n91<MDjt$I>68j?b43Coy#-`ssoXh_lUY<<E%lKt^d3X8ou>rmJ7l4|3tH4ob7g7i=M3-e$(3Dz7Z(Qq*84{(cf2N1*u{ENMMK+k-h^2vPmXxDWWxGwwpn>k=96g7w#fzIiU{_YZUR|tW>G1X29FW8J62tcvqe%P*{n!3jjEmA!^u7Za+yAFse*-3%+AtJWe^Xbx$|`Y$8!sHSD_)VWuK%y~a0F1CA+=VW&s~Z_B;!3W4XIe?RQJ`x&g7<lgq`yGJAv{nB1d8~4&#a7%uVXA+N3@a`MFX3Ptd5o8=tvZ{W~<P|NdcEu2`;X`FOov{R|v#&VKmE(+=zIJ)@^hiD6lMwDR=aaBrx2Ob9=Y?!^B7|GqgdZv'
+RUNTIME_ALLOWED_DOWNLOAD_HOSTS = {'www.python.org', 'files.pythonhosted.org', 'pypi.org', 'download.pytorch.org', 'download-r2.pytorch.org'}
 
 def runtime_lock_manifest():
     with RUNTIME_REPOSITORY.lock:
@@ -2455,18 +2456,22 @@ def runtime_family_lock_key(family):
 def runtime_backend_lock_entries(family):
     key = runtime_family_lock_key(family)
     source = runtime_lock_manifest().get('locks', {}).get(key)
-    if not key or not isinstance(source, list) or (not source):
+    if not key or not isinstance(source, list) or not source:
         return None
     entries = [dict(item) for item in source]
     required = ('name', 'version', 'filename', 'url', 'sha256', 'size', 'python_abi', 'architecture', 'backend')
+    expected_backend = key.split('|', 1)[1]
     seen = set()
     for entry in entries:
-        if any((field not in entry for field in required)):
+        if any(field not in entry for field in required):
             raise RuntimeError('后端wheel锁字段不完整：' + str(family))
         parsed = urllib.parse.urlsplit(str(entry['url']))
         name = str(entry['name']).strip().lower().replace('_', '-')
         digest = str(entry['sha256']).lower()
-        if parsed.scheme.lower() != 'https' or parsed.hostname not in RUNTIME_ALLOWED_DOWNLOAD_HOSTS or name in seen or (len(digest) != 64) or any((value not in '0123456789abcdef' for value in digest)) or (safe_int(entry.get('size'), 0, 1, 1024 * 1024 * 1024) <= 0) or (str(entry.get('python_abi')) != 'cp312') or (str(entry.get('architecture')) != str(RUNTIME_ARCH_X64)):
+        estimated_size = safe_int(entry.get('size'), 0, 1, 8 * 1024 * 1024 * 1024)
+        maximum_size = safe_int(entry.get('maximum_size', estimated_size * 2), estimated_size * 2, estimated_size, 8 * 1024 * 1024 * 1024)
+        filename = str(entry.get('filename', ''))
+        if parsed.scheme.lower() != 'https' or parsed.hostname not in RUNTIME_ALLOWED_DOWNLOAD_HOSTS or name in seen or len(digest) != 64 or any(value not in '0123456789abcdef' for value in digest) or estimated_size <= 0 or maximum_size < estimated_size or str(entry.get('python_abi')) != 'cp312' or str(entry.get('architecture')) != str(RUNTIME_ARCH_X64) or str(entry.get('backend')) != expected_backend or not filename or urllib.parse.unquote(Path(parsed.path).name) != filename or parsed.query or parsed.fragment:
             raise RuntimeError('后端wheel锁无效：' + str(family))
         seen.add(name)
     entries.sort(key=lambda item: (str(item['name']).casefold(), str(item['filename'])))
@@ -2490,7 +2495,7 @@ def runtime_backend_lock_is_complete(entries):
         return False
     for project, contract in runtime_dependency_contracts().items():
         if project not in names:
-            return False
+            continue
         for dependency in contract.get('requires', set()):
             provider = runtime_dependency_providers().get(dependency, dependency)
             if provider not in names:
@@ -2532,6 +2537,41 @@ def runtime_backend_candidates(hardware=None):
         result.append({'family': family, 'lock_key': runtime_family_lock_key(family), 'lock_available': lock is not None, 'hardware_eligible': hardware_eligible, 'reason': reason})
     return result
 
+def runtime_install_plan(base, hardware=None):
+    descriptors = runtime_backend_candidates(hardware)
+    eligible = [item for item in descriptors if item.get('lock_available') and item.get('hardware_eligible')]
+    if not any(item.get('family') == 'windows-x64-cpu' for item in eligible):
+        raise RuntimeError('CPU安全后端锁不可用')
+    unique = {}
+    contains_estimates = False
+    for descriptor in eligible:
+        entries = runtime_backend_lock_entries(descriptor['family']) or []
+        for entry in entries:
+            key = (str(entry.get('filename')), str(entry.get('sha256')))
+            unique[key] = max(safe_int(unique.get(key), 0), safe_int(entry.get('size'), 0, 0))
+            contains_estimates = contains_estimates or not bool(entry.get('size_exact', True))
+    estimated_download = safe_int(FIXED_RUNTIME_PYTHON_ARTIFACT.get('size'), 0, 0) + sum(unique.values())
+    root = Path(base)
+    root.mkdir(parents=True, exist_ok=True)
+    free = int(shutil.disk_usage(root).free)
+    required = required_runtime_space(root, estimated_download)
+    labels = {'windows-x64-cpu': 'CPU', 'windows-x64-nvidia-cu130': 'NVIDIA CUDA 13.0', 'windows-x64-directml': 'DirectML'}
+    eligible_families = [item['family'] for item in eligible]
+    preferred_family = next((family for family in ('windows-x64-nvidia-cu130', 'windows-x64-directml', 'windows-x64-cpu') if family in eligible_families), 'windows-x64-cpu')
+    return {'estimated_download_bytes': estimated_download, 'required_disk_bytes': required, 'free_disk_bytes': free, 'backend_families': eligible_families, 'backend_labels': [labels.get(item['family'], item['family']) for item in eligible], 'preferred_backend_family': preferred_family, 'preferred_backend_label': labels.get(preferred_family, preferred_family), 'resume_supported': True, 'contains_estimates': contains_estimates, 'candidate_details': descriptors}
+
+
+def format_byte_size(value):
+    amount = max(0.0, safe_float(value))
+    units = ('B', 'KB', 'MB', 'GB', 'TB')
+    index = 0
+    while amount >= 1024.0 and index < len(units) - 1:
+        amount /= 1024.0
+        index += 1
+    digits = 0 if index == 0 else 2
+    return str(round(amount, digits)) + ' ' + units[index]
+
+
 def normalized_project_name(value):
     return str(value or '').strip().lower().replace('_', '-')
 
@@ -2551,7 +2591,7 @@ def runtime_lock_dependency_closure_is_complete(entries):
         return False
     for project, contract in runtime_dependency_contracts().items():
         if project not in versions:
-            return False
+            continue
         for dependency in contract.get('requires', set()):
             provider = runtime_dependency_providers().get(dependency, dependency)
             if provider not in versions:
@@ -8319,10 +8359,10 @@ def _capture_process_main(connection):
                 else:
                     raise CaptureUnavailable('未知采集后端')
                 connection.send((True, bytes(result)))
-            except Exception as error:
+            except WORKER_REQUEST_ERRORS as error:
                 try:
                     connection.send((False, str(error)))
-                except Exception:
+                except (OSError, EOFError, BrokenPipeError):
                     break
     finally:
         if bridge is not None:
@@ -16980,7 +17020,11 @@ class DataStoreOCRVisionMixin:
         if relation not in NUMERIC_PREFERENCE_LABELS:
             raise ValueError('不支持的数字偏好类型')
         relation_config['preference'] = relation
-        relation_config['reward_scale'] = _numeric_reward_scale(relation_config)
+        relation_config = normalize_reward_scale_config(relation_config)
+        if not finite_number(relation_config.get('initial_prediction_value')):
+            relation_config['initial_prediction_value'] = _numeric_region_prior({**value, 'relation_config': relation_config})
+        else:
+            relation_config['initial_prediction_value'] = safe_float(relation_config.get('initial_prediction_value'))
         if relation in NUMERIC_FIXED_VALUE_RELATIONS and not finite_number(relation_config.get('fixed_value')):
             raise ValueError('与固定值比较时必须配置有效固定值')
         if relation in NUMERIC_COMPARISON_RELATIONS:
@@ -17028,7 +17072,11 @@ class DataStoreOCRVisionMixin:
             if relation not in NUMERIC_PREFERENCE_LABELS:
                 raise ValueError('不支持的数字偏好类型')
             config['preference'] = relation
-            config['reward_scale'] = _numeric_reward_scale(config)
+            config = normalize_reward_scale_config(config)
+            if not finite_number(config.get('initial_prediction_value')):
+                config['initial_prediction_value'] = _numeric_region_prior({**value, 'relation_config': config})
+            else:
+                config['initial_prediction_value'] = safe_float(config.get('initial_prediction_value'))
             if relation in NUMERIC_FIXED_VALUE_RELATIONS and not finite_number(config.get('fixed_value')):
                 raise ValueError('与固定值比较时必须配置有效固定值')
             compare_id = str(config.get('compare_region_id', ''))
@@ -17784,7 +17832,7 @@ class NumericPreference(str, Enum):
     REGION_ABS_DIFF_HIGHER = 'region_abs_diff_higher'
     REGION_ABS_DIFF_LOWER = 'region_abs_diff_lower'
 DEFAULT_NUMERIC_PREFERENCE = NumericPreference.NOW_HIGHER.value
-NUMERIC_PREFERENCE_OPTIONS = OrderedDict((('now越大越好', NumericPreference.NOW_HIGHER.value), ('now越小越好', NumericPreference.NOW_LOWER.value), ('当now-before>0时：now-before越大越好', NumericPreference.POSITIVE_DELTA_HIGHER.value), ('当now-before>0时：now-before越小越好', NumericPreference.POSITIVE_DELTA_LOWER.value), ('当before-now>0时：before-now越大越好', NumericPreference.NEGATIVE_DELTA_HIGHER.value), ('当before-now>0时：before-now越小越好', NumericPreference.NEGATIVE_DELTA_LOWER.value), ('当|now-before|≠0时：|now-before|越大越好', NumericPreference.ABS_DELTA_HIGHER.value), ('当|now-before|≠0时：|now-before|越小越好', NumericPreference.ABS_DELTA_LOWER.value), ('与固定值比较：|a-b|越大越好', NumericPreference.FIXED_DISTANCE_HIGHER.value), ('与固定值比较：|a-b|越小越好', NumericPreference.FIXED_DISTANCE_LOWER.value), ('与另一个识别区域内的数字比较：a-b越大越好', NumericPreference.REGION_DIFF_HIGHER.value), ('与另一个识别区域内的数字比较：a-b越小越好', NumericPreference.REGION_DIFF_LOWER.value), ('与另一个识别区域内的数字比较：|a-b|越大越好', NumericPreference.REGION_ABS_DIFF_HIGHER.value), ('与另一个识别区域内的数字比较：|a-b|越小越好', NumericPreference.REGION_ABS_DIFF_LOWER.value)))
+NUMERIC_PREFERENCE_OPTIONS = OrderedDict((('now越大越好', NumericPreference.NOW_HIGHER.value), ('now越小越好', NumericPreference.NOW_LOWER.value), ('当now>before时：now-before越大越好', NumericPreference.POSITIVE_DELTA_HIGHER.value), ('当now>before时：now-before越小越好', NumericPreference.POSITIVE_DELTA_LOWER.value), ('当now<before时：before-now越大越好', NumericPreference.NEGATIVE_DELTA_HIGHER.value), ('当now<before时：before-now越小越好', NumericPreference.NEGATIVE_DELTA_LOWER.value), ('当now≠before时：|now-before|越大越好', NumericPreference.ABS_DELTA_HIGHER.value), ('当now≠before时：|now-before|越小越好', NumericPreference.ABS_DELTA_LOWER.value), ('设固定值为a：|now-a|越大越好', NumericPreference.FIXED_DISTANCE_HIGHER.value), ('设固定值为a：|now-a|越小越好', NumericPreference.FIXED_DISTANCE_LOWER.value), ('设另一区域数字为b：now-b越大越好', NumericPreference.REGION_DIFF_HIGHER.value), ('设另一区域数字为b：now-b越小越好', NumericPreference.REGION_DIFF_LOWER.value), ('设另一区域数字为b：|now-b|越大越好', NumericPreference.REGION_ABS_DIFF_HIGHER.value), ('设另一区域数字为b：|now-b|越小越好', NumericPreference.REGION_ABS_DIFF_LOWER.value)))
 NUMERIC_PREFERENCE_LABELS = {value: label for label, value in NUMERIC_PREFERENCE_OPTIONS.items()}
 NUMERIC_LEGACY_PREFERENCE_MAP = {'keep_same': DEFAULT_NUMERIC_PREFERENCE, 'higher_better': NumericPreference.NOW_HIGHER.value, 'lower_better': NumericPreference.NOW_LOWER.value, 'increase_more_better': NumericPreference.POSITIVE_DELTA_HIGHER.value, 'increase_less_better': NumericPreference.POSITIVE_DELTA_LOWER.value, 'decrease_more_better': NumericPreference.NEGATIVE_DELTA_HIGHER.value, 'decrease_less_better': NumericPreference.NEGATIVE_DELTA_LOWER.value, 'greater_than_region': NumericPreference.REGION_DIFF_HIGHER.value, 'less_than_region': NumericPreference.REGION_DIFF_LOWER.value, 'equal_to_region': NumericPreference.REGION_ABS_DIFF_LOWER.value}
 NUMERIC_FIXED_VALUE_RELATIONS = {NumericPreference.FIXED_DISTANCE_HIGHER.value, NumericPreference.FIXED_DISTANCE_LOWER.value}
@@ -17811,8 +17859,10 @@ NUMERIC_NEURAL_MIN_HISTORY = 6
 NUMERIC_NEURAL_MAX_HISTORY = 96
 NUMERIC_REWARD_DEFAULT_SCALE = 1.0
 NUMERIC_REWARD_MIN_SCALE = 1e-06
+NUMERIC_REWARD_MAX_SCALE = 1000000000000.0
+NUMERIC_REWARD_SCALE_MODES = ('auto', 'manual')
 NUMERIC_CONDITION_FAILED_DEFAULT_REWARD = 0.0
-NUMERIC_REWARD_POLICY = 'state_utility_delta_or_conditioned_transition_desirability_v1'
+NUMERIC_REWARD_POLICY = 'confidence_weighted_current_state_utility_v3'
 
 @dataclass(frozen=True, slots=True)
 class NumericValue:
@@ -17943,23 +17993,31 @@ class NumericPredictionState:
     last_prediction_time: float = 0.0
     last_observation_confidence: float = 0.0
     trusted_observations: int = 0
+    initial_prediction_value: float | None = None
+    learned_prior_value: float | None = None
+    game_prior_value: float | None = None
+    deterministic_fallback_value: float = 0.0
+    prior_count: int = 0
+    prior_mean: float = 0.0
+    prior_m2: float = 0.0
+    prediction_sequence: int = 0
     forecaster: OnlineNeuralNumericForecaster = field(default_factory=OnlineNeuralNumericForecaster)
 
-    def _unavailable(self, detail, now):
-        self.predicted_value = None
-        self.prediction_confidence = 0.0
-        self.prediction_source = str(detail)
-        self.last_prediction_time = now
-        return NumericValue(None, 'unavailable', 0.0, False).to_snapshot(detail, now, None, self.last_observed_value, self.last_observed_time, self.trend_or_velocity)
+    def _update_prior(self, observed):
+        self.prior_count += 1
+        delta = observed - self.prior_mean
+        self.prior_mean += delta / max(1, self.prior_count)
+        self.prior_m2 += delta * (observed - self.prior_mean)
+        self.learned_prior_value = self.prior_mean
 
     def observe(self, value, timestamp, confidence):
         observed = safe_float(value)
         now = max(0.0, safe_float(timestamp, time.monotonic()))
         confidence_value = safe_float(confidence, 0.0, 0.0, 1.0)
         if confidence_value < NUMERIC_OBSERVATION_MIN_CONFIDENCE:
-            return self._unavailable('observation_below_confidence_threshold', now)
+            return self.predict(now, observed if finite_number(value) else None, confidence_value)
         correction = observed - self.predicted_value if finite_number(self.predicted_value) else None
-        if finite_number(self.last_observed_value) and self.last_observed_time > 0.0 and (now > self.last_observed_time):
+        if finite_number(self.last_observed_value) and self.last_observed_time > 0.0 and now > self.last_observed_time:
             elapsed = max(1e-06, now - self.last_observed_time)
             instantaneous = (observed - safe_float(self.last_observed_value)) / elapsed
             self.trend_or_velocity = self.trend_or_velocity * 0.72 + instantaneous * 0.28
@@ -17969,6 +18027,7 @@ class NumericPredictionState:
             self.trend_or_velocity = 0.0
             self.stable_count = 1
         self.forecaster.observe(observed, now, confidence_value)
+        self._update_prior(observed)
         self.trusted_observations += 1
         self.last_observed_value = observed
         self.last_observed_time = now
@@ -17979,61 +18038,65 @@ class NumericPredictionState:
         self.last_prediction_time = now
         self.last_observation_confidence = confidence_value
         snapshot = NumericValue(observed, 'observed', confidence_value, True).to_snapshot('trusted_observation', now, correction, self.last_observed_value, self.last_observed_time, self.trend_or_velocity)
-        snapshot['neural_history_size'] = len(self.forecaster.history)
-        snapshot['neural_updates'] = self.forecaster.updates
+        snapshot.update({'neural_history_size': len(self.forecaster.history), 'neural_updates': self.forecaster.updates, 'prediction_fallback': False, 'prediction_evidence': 'trusted_observation', 'low_confidence_prediction': False, 'prior_count': self.prior_count, 'prior_mean': self.prior_mean})
         return snapshot
+
+    def _fallback_candidates(self, now, observation_age):
+        values = []
+        if finite_number(self.last_observed_value):
+            age = observation_age if finite_number(observation_age) else 0.0
+            horizon = min(max(0.0, age), NUMERIC_PREDICTION_VELOCITY_HORIZON_MS / 1000.0)
+            predicted = safe_float(self.last_observed_value) + safe_float(self.trend_or_velocity, 0.0) * horizon
+            confidence = max(0.14, safe_float(self.last_observation_confidence, 0.0, 0.0, 1.0) * math.exp(-max(0.0, age) / 18.0) * 0.58)
+            values.append({'value': predicted, 'confidence': min(0.51, confidence), 'source': 'last_reliable_value', 'evidence': 'persistent_or_stale_trusted_observation', 'rank': 60})
+        if self.prior_count > 0 and finite_number(self.prior_mean):
+            confidence = min(0.49, 0.22 + 0.08 * math.log1p(self.prior_count))
+            values.append({'value': self.prior_mean, 'confidence': confidence, 'source': 'learned_region_prior', 'evidence': 'online_learned_region_distribution', 'rank': 50})
+        if finite_number(self.learned_prior_value):
+            values.append({'value': safe_float(self.learned_prior_value), 'confidence': 0.32, 'source': 'persistent_learned_region_prior', 'evidence': 'stored_region_distribution', 'rank': 40})
+        if finite_number(self.initial_prediction_value):
+            values.append({'value': safe_float(self.initial_prediction_value), 'confidence': 0.24, 'source': 'configured_initial_prediction', 'evidence': 'region_initial_prediction', 'rank': 35})
+        if finite_number(self.game_prior_value):
+            values.append({'value': safe_float(self.game_prior_value), 'confidence': 0.18, 'source': 'game_numeric_prior', 'evidence': 'same_game_numeric_regions', 'rank': 25})
+        fallback = safe_float(self.deterministic_fallback_value, 0.0)
+        values.append({'value': fallback, 'confidence': 0.08, 'source': 'deterministic_numeric_fallback', 'evidence': 'total_prediction_guarantee', 'rank': 1})
+        return values
 
     def predict(self, timestamp, consensus_value=None, consensus_confidence=0.0):
         now = max(0.0, safe_float(timestamp, time.monotonic()))
-        maximum_age = max(0.001, NUMERIC_PREDICTION_MAX_AGE_MS / 1000.0)
+        self.prediction_sequence += 1
         visual_confidence = safe_float(consensus_confidence, 0.0, 0.0, 1.0)
         neural = self.forecaster.predict(now)
         candidates = []
         if neural.get('available') and finite_number(neural.get('value')):
-            neural_confidence = safe_float(neural.get('confidence'), 0.0, 0.0, 1.0)
-            if neural_confidence >= NUMERIC_PREDICTION_MIN_CONFIDENCE:
-                candidates.append({'value': safe_float(neural.get('value')), 'confidence': neural_confidence, 'source': 'online_neural_temporal_ensemble', 'evidence': 'neural_history'})
-        if finite_number(consensus_value) and visual_confidence >= 0.7:
-            model_confidence = min(0.9, visual_confidence * 0.85)
-            if model_confidence >= NUMERIC_PREDICTION_MIN_CONFIDENCE:
-                candidates.append({'value': safe_float(consensus_value), 'confidence': model_confidence, 'source': 'visual_numeric_model_consensus', 'evidence': 'visual_consensus'})
+            candidates.append({'value': safe_float(neural.get('value')), 'confidence': safe_float(neural.get('confidence'), 0.0, 0.0, 1.0), 'source': 'online_neural_temporal_ensemble', 'evidence': 'neural_history', 'rank': 100})
+        if finite_number(consensus_value):
+            candidates.append({'value': safe_float(consensus_value), 'confidence': max(0.1, min(0.9, visual_confidence * 0.85)), 'source': 'visual_numeric_model_consensus', 'evidence': 'visual_consensus', 'rank': 90})
         observation_age = max(0.0, now - self.last_observed_time) if self.last_observed_time > 0.0 else math.inf
-        if self.trusted_observations >= 2 and finite_number(self.last_observed_value) and observation_age <= maximum_age:
-            history_confidence = safe_float(self.last_observation_confidence, 0.0, 0.0, 1.0) * math.exp(-observation_age / 2.4) * 0.82
-            if history_confidence >= NUMERIC_PREDICTION_MIN_CONFIDENCE:
-                horizon = min(observation_age, NUMERIC_PREDICTION_VELOCITY_HORIZON_MS / 1000.0)
-                history_value = safe_float(self.last_observed_value) + safe_float(self.trend_or_velocity, 0.0) * horizon
-                if finite_number(history_value):
-                    candidates.append({'value': history_value, 'confidence': history_confidence, 'source': 'trusted_history_trend', 'evidence': 'trusted_observation_history'})
-        if not candidates:
-            unavailable = self._unavailable('insufficient_prediction_evidence', now)
-            unavailable.update({'reason': 'insufficient_prediction_evidence', 'prediction_age_ms': 0.0 if not finite_number(observation_age) else observation_age * 1000.0, 'minimum_prediction_confidence': NUMERIC_PREDICTION_MIN_CONFIDENCE, 'maximum_prediction_age_ms': NUMERIC_PREDICTION_MAX_AGE_MS, 'neural_history_size': safe_int(neural.get('history_size'), len(self.forecaster.history)), 'neural_updates': safe_int(neural.get('updates'), self.forecaster.updates)})
-            return unavailable
-        candidates.sort(key=lambda item: (safe_float(item.get('confidence'), 0.0), item.get('source') == 'online_neural_temporal_ensemble'), reverse=True)
+        if finite_number(self.last_observed_value) and observation_age <= max(0.001, NUMERIC_PREDICTION_MAX_AGE_MS / 1000.0):
+            horizon = min(observation_age, NUMERIC_PREDICTION_VELOCITY_HORIZON_MS / 1000.0)
+            history_value = safe_float(self.last_observed_value) + safe_float(self.trend_or_velocity, 0.0) * horizon
+            candidates.append({'value': history_value, 'confidence': safe_float(self.last_observation_confidence, 0.0, 0.0, 1.0) * math.exp(-observation_age / 2.4) * 0.82, 'source': 'trusted_history_trend', 'evidence': 'trusted_observation_history', 'rank': 80})
+        candidates.extend(self._fallback_candidates(now, observation_age))
+        candidates = [item for item in candidates if finite_number(item.get('value'))]
+        candidates.sort(key=lambda item: (safe_int(item.get('rank'), 0), safe_float(item.get('confidence'), 0.0)), reverse=True)
         selected = dict(candidates[0])
-        neural_candidate = next((item for item in candidates if item.get('source') == 'online_neural_temporal_ensemble'), None)
-        visual_candidate = next((item for item in candidates if item.get('source') == 'visual_numeric_model_consensus'), None)
+        neural_candidate = next((item for item in candidates if item.get('source') == 'online_neural_temporal_ensemble' and safe_float(item.get('confidence'), 0.0) >= 0.25), None)
+        visual_candidate = next((item for item in candidates if item.get('source') == 'visual_numeric_model_consensus' and safe_float(item.get('confidence'), 0.0) >= 0.25), None)
         if neural_candidate is not None and visual_candidate is not None:
             scale = max(NUMERIC_REWARD_MIN_SCALE, abs(safe_float(neural.get('scale'), 1.0)))
             disagreement = abs(safe_float(neural_candidate['value']) - safe_float(visual_candidate['value'])) / scale
             if disagreement <= 4.0:
-                neural_weight = safe_float(neural_candidate['confidence'], 0.0, 0.0, 1.0)
-                visual_weight = safe_float(visual_candidate['confidence'], 0.0, 0.0, 1.0) * math.exp(-0.35 * disagreement)
+                neural_weight = max(0.01, safe_float(neural_candidate['confidence'], 0.0, 0.0, 1.0))
+                visual_weight = max(0.01, safe_float(visual_candidate['confidence'], 0.0, 0.0, 1.0) * math.exp(-0.35 * disagreement))
                 total_weight = neural_weight + visual_weight
-                if total_weight > 0.0:
-                    selected = {'value': (safe_float(neural_candidate['value']) * neural_weight + safe_float(visual_candidate['value']) * visual_weight) / total_weight, 'confidence': min(0.96, max(neural_candidate['confidence'], visual_candidate['confidence']) * math.exp(-0.08 * disagreement)), 'source': 'neural_temporal_visual_fusion', 'evidence': 'neural_history+visual_consensus'}
-        value = selected.get('value')
-        confidence_value = safe_float(selected.get('confidence'), 0.0, 0.0, 1.0)
-        if not finite_number(value) or confidence_value < NUMERIC_PREDICTION_MIN_CONFIDENCE:
-            unavailable = self._unavailable('prediction_below_reliability_threshold', now)
-            unavailable.update({'reason': 'prediction_below_reliability_threshold', 'minimum_prediction_confidence': NUMERIC_PREDICTION_MIN_CONFIDENCE, 'maximum_prediction_age_ms': NUMERIC_PREDICTION_MAX_AGE_MS})
-            return unavailable
-        self.predicted_value = safe_float(value)
-        self.prediction_confidence = confidence_value
-        self.prediction_source = str(selected.get('source', 'reliable_prediction'))
+                selected = {'value': (safe_float(neural_candidate['value']) * neural_weight + safe_float(visual_candidate['value']) * visual_weight) / total_weight, 'confidence': min(0.96, max(neural_candidate['confidence'], visual_candidate['confidence']) * math.exp(-0.08 * disagreement)), 'source': 'neural_temporal_visual_fusion', 'evidence': 'neural_history+visual_consensus', 'rank': 110}
+        self.predicted_value = safe_float(selected.get('value'), safe_float(self.deterministic_fallback_value, 0.0))
+        self.prediction_confidence = safe_float(selected.get('confidence'), 0.08, 0.0, 1.0)
+        self.prediction_source = str(selected.get('source', 'deterministic_numeric_fallback'))
         self.last_prediction_time = now
-        snapshot = NumericValue(self.predicted_value, 'predicted', confidence_value, True).to_snapshot(self.prediction_source, now, None, self.last_observed_value, self.last_observed_time, self.trend_or_velocity)
-        snapshot.update({'prediction_fallback': self.prediction_source != 'online_neural_temporal_ensemble', 'prediction_evidence': str(selected.get('evidence', '')), 'minimum_prediction_confidence': NUMERIC_PREDICTION_MIN_CONFIDENCE, 'maximum_prediction_age_ms': NUMERIC_PREDICTION_MAX_AGE_MS, 'neural_history_size': safe_int(neural.get('history_size'), len(self.forecaster.history)), 'neural_updates': safe_int(neural.get('updates'), self.forecaster.updates), 'neural_ensemble_disagreement': safe_float(neural.get('ensemble_disagreement'), 0.0), 'neural_normalized_error': safe_float(neural.get('normalized_error'), 0.0)})
+        snapshot = NumericValue(self.predicted_value, 'predicted', self.prediction_confidence, True).to_snapshot(self.prediction_source, now, None, self.last_observed_value, self.last_observed_time, self.trend_or_velocity)
+        snapshot.update({'prediction_fallback': self.prediction_source not in {'online_neural_temporal_ensemble', 'neural_temporal_visual_fusion'}, 'prediction_evidence': str(selected.get('evidence', 'total_prediction_guarantee')), 'minimum_prediction_confidence': NUMERIC_PREDICTION_MIN_CONFIDENCE, 'maximum_prediction_age_ms': NUMERIC_PREDICTION_MAX_AGE_MS, 'low_confidence_prediction': self.prediction_confidence < NUMERIC_PREDICTION_MIN_CONFIDENCE, 'guaranteed_prediction': True, 'neural_history_size': safe_int(neural.get('history_size'), len(self.forecaster.history)), 'neural_updates': safe_int(neural.get('updates'), self.forecaster.updates), 'neural_ensemble_disagreement': safe_float(neural.get('ensemble_disagreement'), 0.0), 'neural_normalized_error': safe_float(neural.get('normalized_error'), 0.0), 'prior_count': self.prior_count, 'prior_mean': self.prior_mean if self.prior_count else self.learned_prior_value, 'prediction_sequence': self.prediction_sequence})
         return snapshot
 
 def normalize_numeric_preference(value):
@@ -18068,41 +18131,104 @@ def numeric_values_equal(first, second):
     b = numeric_decimal_value(second)
     return a is not None and b is not None and (a == b)
 
-def _numeric_reward_scale(config):
-    value = config if isinstance(config, dict) else {}
-    configured = value.get('reward_scale')
-    if finite_number(configured) and abs(safe_float(configured)) >= NUMERIC_REWARD_MIN_SCALE:
-        return abs(safe_float(configured))
-    history = value.get('metric_delta_history')
-    deltas = [safe_float(item) for item in history or [] if finite_number(item)] if isinstance(history, (list, tuple)) else []
-    if len(deltas) >= 5:
-        center = statistics.median(deltas)
-        deviations = [abs(item - center) for item in deltas]
-        mad = statistics.median(deviations)
-        robust = 1.4826 * mad
-        if robust < NUMERIC_REWARD_MIN_SCALE:
-            robust = statistics.median([abs(item) for item in deltas if abs(item) >= NUMERIC_REWARD_MIN_SCALE] or [NUMERIC_REWARD_DEFAULT_SCALE])
-        return max(NUMERIC_REWARD_MIN_SCALE, robust)
-    return NUMERIC_REWARD_DEFAULT_SCALE
+def normalize_reward_scale_config(config):
+    value = normalize_relation_config(config)
+    if value.get('reward_scale_mode') == 'manual':
+        configured = value.get('reward_scale')
+        value['reward_scale'] = max(NUMERIC_REWARD_MIN_SCALE, min(NUMERIC_REWARD_MAX_SCALE, abs(safe_float(configured, NUMERIC_REWARD_DEFAULT_SCALE)))) if finite_number(configured) else NUMERIC_REWARD_DEFAULT_SCALE
+    else:
+        value.pop('reward_scale', None)
+        value['reward_scale_effective'] = _numeric_reward_scale(value)
+    return value
 
-def _metric_delta_reward(before_metric, now_metric, higher_is_better=True, scale=NUMERIC_REWARD_DEFAULT_SCALE):
-    if not finite_number(before_metric) or not finite_number(now_metric):
+
+def numeric_snapshot_metadata(snapshot):
+    value = dict(snapshot) if isinstance(snapshot, dict) else {'value': snapshot, 'valid': finite_number(snapshot), 'predicted': False}
+    predicted = bool(value.get('predicted'))
+    valid = bool(value.get('valid', value.get('available', finite_number(value.get('value'))))) and finite_number(value.get('value'))
+    default_confidence = 0.08 if predicted else (1.0 if valid else 0.0)
+    confidence = safe_float(value.get('confidence', default_confidence), default_confidence, 0.0, 1.0)
+    source = str(value.get('prediction_source') if predicted else value.get('source', 'observed'))
+    if not source:
+        source = 'predicted_fallback' if predicted else 'observed'
+    return {'predicted': predicted, 'observed': valid and not predicted, 'valid': valid, 'source': source, 'age_ms': safe_float(value.get('prediction_age_ms'), 0.0, 0.0), 'confidence': confidence, 'value': numeric_snapshot_value(value)}
+
+
+def numeric_snapshot_equality_state(before_meta, now_meta, equal):
+    before_predicted = bool(before_meta.get('predicted'))
+    now_predicted = bool(now_meta.get('predicted'))
+    suffix = 'equal' if equal else 'difference'
+    if before_predicted and now_predicted:
+        return 'predicted_' + suffix
+    if before_predicted or now_predicted:
+        return 'mixed_' + suffix
+    return 'observed_' + suffix
+
+
+def update_numeric_reward_history(region, evaluation):
+    if not isinstance(region, dict) or not isinstance(evaluation, dict):
+        return
+    config = normalize_relation_config(region.get('relation_config', {}))
+    deltas = list(config.get('metric_delta_history', []))
+    values = list(config.get('metric_value_history', []))
+    delta = evaluation.get('metric_delta')
+    if finite_number(delta) and abs(safe_float(delta)) >= NUMERIC_REWARD_MIN_SCALE:
+        deltas.append(abs(safe_float(delta)))
+    for key in ('before_metric', 'now_metric'):
+        metric = evaluation.get(key)
+        if finite_number(metric) and abs(safe_float(metric)) >= NUMERIC_REWARD_MIN_SCALE:
+            values.append(abs(safe_float(metric)))
+    config['metric_delta_history'] = deltas[-64:]
+    config['metric_value_history'] = values[-64:]
+    if config.get('reward_scale_mode') == 'auto':
+        config.pop('reward_scale', None)
+        config['reward_scale_effective'] = _numeric_reward_scale(config)
+    region['relation_config'] = config
+
+
+def _numeric_reward_scale(config, candidates=None):
+    value = config if isinstance(config, dict) else {}
+    mode = str(value.get('reward_scale_mode', 'auto')).strip().lower()
+    configured = value.get('reward_scale')
+    if mode == 'manual' and finite_number(configured) and abs(safe_float(configured)) >= NUMERIC_REWARD_MIN_SCALE:
+        return min(NUMERIC_REWARD_MAX_SCALE, abs(safe_float(configured)))
+    samples = []
+    for key in ('metric_delta_history', 'metric_value_history'):
+        history = value.get(key)
+        if isinstance(history, (list, tuple)):
+            samples.extend(abs(safe_float(item)) for item in history if finite_number(item) and abs(safe_float(item)) >= NUMERIC_REWARD_MIN_SCALE)
+    samples.extend(abs(safe_float(item)) for item in candidates or [] if finite_number(item) and abs(safe_float(item)) >= NUMERIC_REWARD_MIN_SCALE)
+    if not samples:
+        return NUMERIC_REWARD_DEFAULT_SCALE
+    samples = samples[-128:]
+    center = statistics.median(samples)
+    deviations = [abs(item - center) for item in samples]
+    mad = statistics.median(deviations) if deviations else 0.0
+    ordered = sorted(samples)
+    p75 = ordered[min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * 0.75))))]
+    robust = max(center, p75 * 0.75, 1.4826 * mad, NUMERIC_REWARD_MIN_SCALE)
+    return max(NUMERIC_REWARD_MIN_SCALE, min(NUMERIC_REWARD_MAX_SCALE, robust))
+
+def _metric_delta_reward(before_metric, now_metric, higher_is_better=True, scale=NUMERIC_REWARD_DEFAULT_SCALE, nonnegative_metric=False):
+    if not finite_number(now_metric):
         return {'valid': False, 'observation_valid': False, 'configuration_valid': True, 'preference_applicable': False, 'reward': 0.0, 'status': 'invalid_metric'}
     selected_scale = max(NUMERIC_REWARD_MIN_SCALE, abs(safe_float(scale, NUMERIC_REWARD_DEFAULT_SCALE)))
-    before_decimal = Decimal(str(before_metric))
-    now_decimal = Decimal(str(now_metric))
-    preference_delta_decimal = now_decimal - before_decimal
-    if not higher_is_better:
-        preference_delta_decimal = -preference_delta_decimal
-    try:
-        normalized = float(preference_delta_decimal / Decimal(str(selected_scale)))
-        reward = math.tanh(normalized)
-    except (OverflowError, InvalidOperation, ValueError):
-        reward = 1.0 if preference_delta_decimal > 0 else -1.0 if preference_delta_decimal < 0 else 0.0
-    metric_delta = safe_float(now_metric) - safe_float(before_metric)
-    utility_before = safe_float(before_metric) if higher_is_better else -safe_float(before_metric)
-    utility_now = safe_float(now_metric) if higher_is_better else -safe_float(now_metric)
-    return {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': True, 'reward': max(-1.0, min(1.0, reward)), 'status': 'metric_delta', 'reward_policy': NUMERIC_REWARD_POLICY, 'reward_basis': 'normalized_state_utility_delta', 'utility_before': utility_before, 'utility_now': utility_now, 'utility_delta': utility_now - utility_before, 'before_metric': safe_float(before_metric), 'now_metric': safe_float(now_metric), 'metric_delta': metric_delta if finite_number(metric_delta) else None, 'preference_delta': str(preference_delta_decimal), 'scale': selected_scale}
+    current = safe_float(now_metric)
+    normalized = current / selected_scale
+    if nonnegative_metric:
+        magnitude = max(0.0, normalized)
+        score = math.tanh(magnitude)
+        reward = score if higher_is_better else 1.0 - score
+        reward_definition = 'tanh(current_metric/scale)' if higher_is_better else '1-tanh(current_metric/scale)'
+    else:
+        score = math.tanh(normalized)
+        reward = score if higher_is_better else -score
+        reward_definition = 'tanh(current_metric/scale)' if higher_is_better else '-tanh(current_metric/scale)'
+    utility_now = current if higher_is_better else -current
+    old = safe_float(before_metric) if finite_number(before_metric) else None
+    utility_before = (old if higher_is_better else -old) if old is not None else None
+    metric_delta = current - old if old is not None else None
+    return {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': True, 'reward': max(-1.0, min(1.0, reward)), 'status': 'current_state_utility', 'reward_policy': NUMERIC_REWARD_POLICY, 'reward_basis': 'normalized_current_preference_utility', 'utility_before': utility_before, 'utility_now': utility_now, 'utility_delta': None, 'before_metric': old, 'now_metric': current, 'metric_delta': metric_delta, 'preference_delta': None, 'scale': selected_scale, 'reward_definition': reward_definition, 'before_used_for_reward': False}
 
 def _conditional_magnitude_reward(magnitude, lower_is_better, scale):
     if not finite_number(magnitude):
@@ -18119,17 +18245,17 @@ def evaluate_numeric_preference_detailed(region, old_value, new_value, before_sn
     raw_relation = str(config.get('preference', region.get('goal_relation', DEFAULT_NUMERIC_PREFERENCE)) or '')
     relation_token = NUMERIC_LEGACY_PREFERENCE_MAP.get(raw_relation, raw_relation)
     relation = relation_token if relation_token in NUMERIC_PREFERENCE_LABELS else raw_relation
-    reward_scale = _numeric_reward_scale(config)
+    fallback_scale = _numeric_reward_scale(config)
 
     def observation_unavailable(status):
-        return {'valid': False, 'observation_valid': False, 'configuration_valid': True, 'preference_applicable': False, 'reward': 0.0, 'status': status, 'preference': relation, 'scale': reward_scale}
+        return {'valid': False, 'observation_valid': False, 'configuration_valid': True, 'preference_applicable': False, 'reward': 0.0, 'status': status, 'preference': relation, 'scale': fallback_scale, 'scale_mode': config.get('reward_scale_mode', 'auto')}
 
-    def condition_failed(status):
+    def condition_failed(status, scale=None):
         configured_reward = safe_float(config.get('condition_failed_reward', NUMERIC_CONDITION_FAILED_DEFAULT_REWARD), NUMERIC_CONDITION_FAILED_DEFAULT_REWARD, -1.0, 1.0)
-        return {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': False, 'reward': configured_reward, 'status': status, 'preference': relation, 'scale': reward_scale}
+        return {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': False, 'reward': configured_reward, 'status': status, 'preference': relation, 'scale': fallback_scale if scale is None else scale, 'scale_mode': config.get('reward_scale_mode', 'auto')}
 
     def configuration_error(status):
-        return {'valid': False, 'observation_valid': True, 'configuration_valid': False, 'preference_applicable': False, 'reward': 0.0, 'status': status, 'preference': relation, 'scale': reward_scale}
+        return {'valid': False, 'observation_valid': True, 'configuration_valid': False, 'preference_applicable': False, 'reward': 0.0, 'status': status, 'preference': relation, 'scale': fallback_scale, 'scale_mode': config.get('reward_scale_mode', 'auto')}
 
     if relation_token not in NUMERIC_PREFERENCE_LABELS:
         return configuration_error('unsupported_preference')
@@ -18142,33 +18268,46 @@ def evaluate_numeric_preference_detailed(region, old_value, new_value, before_sn
     relation = relation_token
     delta_decimal = new_decimal - old_decimal
     delta = float(delta_decimal)
-    result = {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': True, 'reward': 0.0, 'status': 'neutral', 'preference': relation, 'scale': reward_scale}
+
+    def result_with_scale(scale):
+        return {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': True, 'reward': 0.0, 'status': 'neutral', 'preference': relation, 'scale': scale, 'scale_mode': config.get('reward_scale_mode', 'auto')}
+
     if relation == NumericPreference.NOW_HIGHER.value:
-        result.update(_metric_delta_reward(old, new, True, reward_scale))
+        scale = _numeric_reward_scale(config, (old, new))
+        result = result_with_scale(scale)
+        result.update(_metric_delta_reward(old, new, True, scale))
         return result
     if relation == NumericPreference.NOW_LOWER.value:
-        result.update(_metric_delta_reward(old, new, False, reward_scale))
+        scale = _numeric_reward_scale(config, (old, new))
+        result = result_with_scale(scale)
+        result.update(_metric_delta_reward(old, new, False, scale))
         return result
     if relation in {NumericPreference.POSITIVE_DELTA_HIGHER.value, NumericPreference.POSITIVE_DELTA_LOWER.value}:
+        scale = _numeric_reward_scale(config, (delta,))
         if delta_decimal <= 0:
-            return condition_failed('positive_delta_condition_failed')
-        result.update(_conditional_magnitude_reward(delta, relation == NumericPreference.POSITIVE_DELTA_LOWER.value, reward_scale))
+            return condition_failed('positive_delta_condition_failed', scale)
+        result = result_with_scale(scale)
+        result.update(_conditional_magnitude_reward(delta, relation == NumericPreference.POSITIVE_DELTA_LOWER.value, scale))
         result['status'] = 'positive_delta'
         return result
     if relation in {NumericPreference.NEGATIVE_DELTA_HIGHER.value, NumericPreference.NEGATIVE_DELTA_LOWER.value}:
         decrease_decimal = old_decimal - new_decimal
-        if decrease_decimal <= 0:
-            return condition_failed('negative_delta_condition_failed')
         decrease = float(decrease_decimal)
-        result.update(_conditional_magnitude_reward(decrease, relation == NumericPreference.NEGATIVE_DELTA_LOWER.value, reward_scale))
+        scale = _numeric_reward_scale(config, (decrease,))
+        if decrease_decimal <= 0:
+            return condition_failed('negative_delta_condition_failed', scale)
+        result = result_with_scale(scale)
+        result.update(_conditional_magnitude_reward(decrease, relation == NumericPreference.NEGATIVE_DELTA_LOWER.value, scale))
         result['status'] = 'negative_delta'
         return result
     if relation in {NumericPreference.ABS_DELTA_HIGHER.value, NumericPreference.ABS_DELTA_LOWER.value}:
         magnitude_decimal = abs(delta_decimal)
-        if magnitude_decimal == 0:
-            return condition_failed('absolute_delta_condition_failed')
         magnitude = float(magnitude_decimal)
-        result.update(_conditional_magnitude_reward(magnitude, relation == NumericPreference.ABS_DELTA_LOWER.value, reward_scale))
+        scale = _numeric_reward_scale(config, (magnitude,))
+        if magnitude_decimal == 0:
+            return condition_failed('absolute_delta_condition_failed', scale)
+        result = result_with_scale(scale)
+        result.update(_conditional_magnitude_reward(magnitude, relation == NumericPreference.ABS_DELTA_LOWER.value, scale))
         result['status'] = 'absolute_delta'
         return result
     if relation in NUMERIC_FIXED_VALUE_RELATIONS:
@@ -18176,7 +18315,11 @@ def evaluate_numeric_preference_detailed(region, old_value, new_value, before_sn
         if not finite_number(fixed_value):
             return configuration_error('fixed_value_missing')
         fixed = safe_float(fixed_value)
-        result.update(_metric_delta_reward(abs(old - fixed), abs(new - fixed), relation == NumericPreference.FIXED_DISTANCE_HIGHER.value, reward_scale))
+        before_metric = abs(old - fixed)
+        now_metric = abs(new - fixed)
+        scale = _numeric_reward_scale(config, (before_metric, now_metric))
+        result = result_with_scale(scale)
+        result.update(_metric_delta_reward(before_metric, now_metric, relation == NumericPreference.FIXED_DISTANCE_HIGHER.value, scale, True))
         result['status'] = 'fixed_distance'
         return result
     if relation in NUMERIC_COMPARISON_RELATIONS:
@@ -18192,62 +18335,101 @@ def evaluate_numeric_preference_detailed(region, old_value, new_value, before_sn
         if relation in {NumericPreference.REGION_ABS_DIFF_HIGHER.value, NumericPreference.REGION_ABS_DIFF_LOWER.value}:
             before_metric = abs(before_metric)
             now_metric = abs(now_metric)
-        result.update(_metric_delta_reward(before_metric, now_metric, relation in {NumericPreference.REGION_DIFF_HIGHER.value, NumericPreference.REGION_ABS_DIFF_HIGHER.value}, reward_scale))
+        scale = _numeric_reward_scale(config, (before_metric, now_metric))
+        result = result_with_scale(scale)
+        result.update(_metric_delta_reward(before_metric, now_metric, relation in {NumericPreference.REGION_DIFF_HIGHER.value, NumericPreference.REGION_ABS_DIFF_HIGHER.value}, scale, relation in {NumericPreference.REGION_ABS_DIFF_HIGHER.value, NumericPreference.REGION_ABS_DIFF_LOWER.value}))
         result['status'] = 'region_comparison'
         result['compare_region_id'] = target_id
         return result
     return configuration_error('unsupported_preference')
 
-def ensure_numeric_prediction_snapshot(value, fallback=None):
+def _numeric_region_prior(region, game_prior=None):
+    value = dict(region) if isinstance(region, dict) else {}
+    config = normalize_relation_config(value.get('relation_config', {}))
+    candidates = (config.get('initial_prediction_value'), config.get('last_reliable_numeric_value'), config.get('learned_numeric_prior_mean'), value.get('last_value'))
+    for candidate in candidates:
+        if finite_number(candidate):
+            return safe_float(candidate)
+    if finite_number(value.get('target_min')) and finite_number(value.get('target_max')):
+        return (safe_float(value.get('target_min')) + safe_float(value.get('target_max'))) * 0.5
+    if finite_number(config.get('fixed_value')):
+        return safe_float(config.get('fixed_value'))
+    if finite_number(value.get('special_value')):
+        return safe_float(value.get('special_value'))
+    if finite_number(game_prior):
+        return safe_float(game_prior)
+    return 0.0
+
+def ensure_numeric_prediction_snapshot(value, fallback=None, region=None, role='current'):
     if numeric_snapshot_value(value) is not None:
         return value
     candidates = []
+    reason = 'recognition_unavailable'
     if isinstance(value, dict):
-        for source, key in (('online_temporal_prediction', 'predicted_value'), ('trusted_history_trend', 'trend_prediction'), ('last_reliable_value', 'last_observed_value'), ('persistent_last_session', 'persistent_value'), ('persistent_last_session', 'last_session_value'), ('fallback_prediction', 'fallback_value')):
+        reason = str(value.get('reason') or value.get('prediction_source') or reason)
+        for rank, source, key in ((100, 'online_temporal_prediction', 'predicted_value'), (90, 'trusted_history_trend', 'trend_prediction'), (80, 'last_reliable_value', 'last_observed_value'), (70, 'persistent_last_session', 'persistent_value'), (65, 'persistent_last_session', 'last_session_value'), (60, 'learned_region_prior', 'prior_mean'), (55, 'learned_region_prior', 'learned_numeric_prior_mean'), (50, 'configured_initial_prediction', 'initial_prediction_value'), (45, 'game_numeric_prior', 'game_numeric_prior'), (40, 'fallback_prediction', 'fallback_value')):
             number = value.get(key)
             if finite_number(number):
-                candidates.append((source, safe_float(number), safe_float(value.get('confidence', value.get('last_observation_confidence', 0.55)), 0.55, 0.0, 1.0)))
+                confidence = safe_float(value.get('confidence', value.get('last_observation_confidence', 0.3)), 0.3, 0.0, 1.0)
+                candidates.append((rank, source, safe_float(number), confidence))
     fallback_number = numeric_snapshot_value(fallback)
     if fallback_number is not None:
-        confidence = safe_float(fallback.get('confidence'), 0.55, 0.0, 1.0) if isinstance(fallback, dict) else 0.55
-        candidates.append(('fallback_prediction', fallback_number, max(0.35, confidence * 0.9)))
-    if candidates:
-        source, number, confidence = candidates[0]
-        return {'value': number, 'numeric_value': number, 'source': source, 'predicted': True, 'valid': True, 'available': True, 'confidence': confidence, 'prediction_source': source, 'prediction_fallback': True, 'reason': ''}
-    reason = 'insufficient_prediction_evidence'
-    if isinstance(value, dict) and value.get('reason'):
-        reason = str(value.get('reason'))
-    return {'value': None, 'numeric_value': None, 'source': 'unavailable', 'predicted': False, 'valid': False, 'available': False, 'confidence': 0.0, 'prediction_source': reason, 'prediction_fallback': False, 'reason': reason}
+        confidence = safe_float(fallback.get('confidence'), 0.3, 0.0, 1.0) if isinstance(fallback, dict) else 0.3
+        candidates.append((30, 'explicit_fallback_prediction', fallback_number, max(0.12, confidence * 0.75)))
+    if isinstance(region, dict):
+        config = normalize_relation_config(region.get('relation_config', {}))
+        region_candidates = ((25, 'configured_initial_prediction', config.get('initial_prediction_value'), 0.24), (22, 'persistent_last_session', config.get('last_reliable_numeric_value'), safe_float(config.get('last_reliable_numeric_confidence'), 0.28, 0.0, 1.0)), (20, 'persistent_learned_region_prior', config.get('learned_numeric_prior_mean'), 0.28), (18, 'database_last_value', region.get('last_value'), safe_float(region.get('last_confidence'), 0.2, 0.0, 1.0)))
+        for rank, source, number, confidence in region_candidates:
+            if finite_number(number):
+                candidates.append((rank, source, safe_float(number), confidence))
+    deterministic = _numeric_region_prior(region)
+    candidates.append((1, 'deterministic_numeric_fallback', deterministic, 0.08))
+    candidates.sort(key=lambda item: (item[0], item[3]), reverse=True)
+    _, source, number, confidence = candidates[0]
+    return {'value': number, 'numeric_value': number, 'source': source, 'predicted': True, 'valid': True, 'available': True, 'confidence': max(0.0, min(1.0, confidence)), 'prediction_source': source, 'prediction_fallback': True, 'low_confidence_prediction': confidence < NUMERIC_PREDICTION_MIN_CONFIDENCE, 'guaranteed_prediction': True, 'reason': reason, 'prediction_role': str(role)}
 
 def select_numeric_priority_difference(regions, before, now):
     before_snapshot = dict(before) if isinstance(before, dict) else {}
     now_snapshot = dict(now) if isinstance(now, dict) else {}
-    ordered = sorted((dict(region) for region in regions or [] if isinstance(region, dict) and region.get('enabled', True)), key=lambda region: (safe_int(region.get('priority'), 0), safe_float(region.get('created'), 0.0), str(region.get('id', ''))))
-    used_prediction = False
+    ordered = sorted((region for region in regions or [] if isinstance(region, dict) and region.get('enabled', True)), key=lambda region: (safe_int(region.get('priority'), 0), safe_float(region.get('created'), 0.0), str(region.get('id', ''))))
+    any_prediction = False
+    checked_regions = []
     for region in ordered:
         region_id = str(region.get('id', ''))
-        raw_old = before_snapshot.get(region_id)
-        raw_new = now_snapshot.get(region_id)
-        old_value = ensure_numeric_prediction_snapshot(raw_old)
-        new_value = ensure_numeric_prediction_snapshot(raw_new, old_value)
+        old_value = ensure_numeric_prediction_snapshot(before_snapshot.get(region_id), region=region, role='before')
+        new_value = ensure_numeric_prediction_snapshot(now_snapshot.get(region_id), region=region, role='now')
         before_snapshot[region_id] = old_value
         now_snapshot[region_id] = new_value
-        used_prediction = used_prediction or bool(isinstance(old_value, dict) and old_value.get('predicted')) or bool(isinstance(new_value, dict) and new_value.get('predicted'))
-        old_number = numeric_snapshot_value(old_value)
-        new_number = numeric_snapshot_value(new_value)
-        if old_number is None or new_number is None:
-            return {'status': 'waiting_for_priority_baseline', 'region': region, 'region_id': region_id, 'priority': safe_int(region.get('priority'), 0), 'old_value': old_value, 'new_value': new_value, 'before': old_number, 'now': new_number, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': False, 'observation_valid': False, 'preference_applicable': False, 'used_prediction': used_prediction}
+        before_meta = numeric_snapshot_metadata(old_value)
+        now_meta = numeric_snapshot_metadata(new_value)
+        any_prediction = any_prediction or before_meta['predicted'] or now_meta['predicted']
+        equality_state = numeric_snapshot_equality_state(before_meta, now_meta, numeric_values_equal(old_value, new_value))
+        checked_regions.append({'region_id': region_id, 'priority': safe_int(region.get('priority'), 0), 'equality_state': equality_state, 'before': before_meta, 'now': now_meta})
+    for index, region in enumerate(ordered):
+        region_id = str(region.get('id', ''))
+        old_value = before_snapshot[region_id]
+        new_value = now_snapshot[region_id]
         if numeric_values_equal(old_value, new_value):
             continue
-        return {'status': 'difference_selected', 'region': region, 'region_id': region_id, 'priority': safe_int(region.get('priority'), 0), 'old_value': old_value, 'new_value': new_value, 'before': old_number, 'now': new_number, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': True, 'observation_valid': True, 'preference_applicable': True, 'used_prediction': used_prediction}
-    return {'status': 'all_equal', 'region': None, 'region_id': '', 'priority': None, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': True, 'observation_valid': True, 'preference_applicable': False, 'used_prediction': used_prediction}
+        before_meta = numeric_snapshot_metadata(old_value)
+        now_meta = numeric_snapshot_metadata(new_value)
+        return {'status': 'difference_selected', 'region': region, 'region_id': region_id, 'priority': safe_int(region.get('priority'), 0), 'old_value': old_value, 'new_value': new_value, 'before': numeric_snapshot_value(old_value), 'now': numeric_snapshot_value(new_value), 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': True, 'observation_valid': True, 'preference_applicable': True, 'used_prediction': before_meta['predicted'] or now_meta['predicted'], 'any_prediction': any_prediction, 'before_meta': before_meta, 'now_meta': now_meta, 'equality_state': checked_regions[index]['equality_state'], 'checked_regions': checked_regions[:index + 1]}
+    equal_states = [item['equality_state'] for item in checked_regions]
+    equality_state = 'mixed_equal' if 'mixed_equal' in equal_states else 'predicted_equal' if 'predicted_equal' in equal_states else 'observed_equal'
+    return {'status': 'all_equal', 'region': None, 'region_id': '', 'priority': None, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': True, 'observation_valid': True, 'preference_applicable': False, 'used_prediction': any_prediction, 'any_prediction': any_prediction, 'equality_state': equality_state, 'checked_regions': checked_regions}
 
 def compare_numeric_snapshots_detailed(regions, before, now):
     selected = select_numeric_priority_difference(regions, before, now)
     if selected.get('status') != 'difference_selected':
-        return {'reward': 0.0, 'winning_region_id': '', 'status': str(selected.get('status', 'all_equal')), 'priority': selected.get('priority'), 'valid': bool(selected.get('valid', True)), 'observation_valid': bool(selected.get('observation_valid', True)), 'configuration_valid': True, 'preference_applicable': False, 'used_prediction': bool(selected.get('used_prediction'))}
+        return {'reward': 0.0, 'raw_reward': 0.0, 'confidence_weight': 0.0, 'winning_region_id': '', 'status': str(selected.get('status', 'all_equal')), 'priority': selected.get('priority'), 'valid': bool(selected.get('valid', True)), 'observation_valid': bool(selected.get('observation_valid', True)), 'configuration_valid': True, 'preference_applicable': False, 'used_prediction': bool(selected.get('used_prediction')), 'any_prediction': bool(selected.get('any_prediction')), 'equality_state': str(selected.get('equality_state', 'observed_equal')), 'checked_regions': list(selected.get('checked_regions', []))}
     evaluation = evaluate_numeric_preference_detailed(selected['region'], selected['old_value'], selected['new_value'], selected['before_snapshot'], selected['now_snapshot'])
-    return {'reward': max(-1.0, min(1.0, safe_float(evaluation.get('reward'), 0.0))), 'winning_region_id': selected['region_id'], 'status': str(evaluation.get('status', 'metric_delta')), 'priority': selected['priority'], 'before': selected['before'], 'now': selected['now'], 'preference': str(evaluation.get('preference', '')), 'valid': bool(evaluation.get('valid')), 'observation_valid': bool(evaluation.get('observation_valid')), 'configuration_valid': bool(evaluation.get('configuration_valid', True)), 'preference_applicable': bool(evaluation.get('preference_applicable')), 'used_prediction': bool(selected.get('used_prediction')), 'utility': evaluation}
+    before_meta = dict(selected.get('before_meta', {}))
+    now_meta = dict(selected.get('now_meta', {}))
+    raw_reward = max(-1.0, min(1.0, safe_float(evaluation.get('reward'), 0.0)))
+    confidence_weight = min(safe_float(before_meta.get('confidence'), 0.0, 0.0, 1.0), safe_float(now_meta.get('confidence'), 0.0, 0.0, 1.0))
+    effective_reward = max(-1.0, min(1.0, raw_reward * confidence_weight))
+    update_numeric_reward_history(selected['region'], evaluation)
+    return {'reward': effective_reward, 'raw_reward': raw_reward, 'confidence_weight': confidence_weight, 'winning_region_id': selected['region_id'], 'status': str(evaluation.get('status', 'metric_delta')), 'priority': selected['priority'], 'before': selected['before'], 'now': selected['now'], 'preference': str(evaluation.get('preference', '')), 'valid': bool(evaluation.get('valid')), 'observation_valid': bool(evaluation.get('observation_valid')), 'configuration_valid': bool(evaluation.get('configuration_valid', True)), 'preference_applicable': bool(evaluation.get('preference_applicable')), 'used_prediction': bool(selected.get('used_prediction')), 'any_prediction': bool(selected.get('any_prediction')), 'before_prediction': before_meta, 'now_prediction': now_meta, 'before_prediction_source': str(before_meta.get('source', '')), 'now_prediction_source': str(now_meta.get('source', '')), 'before_prediction_age_ms': safe_float(before_meta.get('age_ms'), 0.0, 0.0), 'now_prediction_age_ms': safe_float(now_meta.get('age_ms'), 0.0, 0.0), 'before_confidence': safe_float(before_meta.get('confidence'), 0.0, 0.0, 1.0), 'now_confidence': safe_float(now_meta.get('confidence'), 0.0, 0.0, 1.0), 'equality_state': str(selected.get('equality_state', 'observed_difference')), 'checked_regions': list(selected.get('checked_regions', [])), 'reward_scale': safe_float(evaluation.get('scale'), NUMERIC_REWARD_DEFAULT_SCALE, NUMERIC_REWARD_MIN_SCALE), 'reward_scale_mode': str(evaluation.get('scale_mode', 'auto')), 'utility': evaluation}
 
 def reorder_numeric_regions(regions, source_index, target_index):
     values = list(regions or [])
@@ -18551,6 +18733,7 @@ class NumericRegionEditor:
         self.photo = None
         self.closed = False
         self.save_after_id = None
+        self.redraw_after_id = None
         self.persisting = False
         self.win = tk.Toplevel(app.root)
         self.win.title('数字识别区域')
@@ -18574,7 +18757,8 @@ class NumericRegionEditor:
         preference = normalize_numeric_preference(config.get('preference') or value.get('goal_relation') or DEFAULT_NUMERIC_PREFERENCE)
         config['preference'] = preference
         config['compare_region_id'] = str(config.get('compare_region_id', ''))
-        config['reward_scale'] = _numeric_reward_scale(config)
+        config = normalize_reward_scale_config(config)
+        config['initial_prediction_value'] = _numeric_region_prior(value) if not finite_number(config.get('initial_prediction_value')) else safe_float(config.get('initial_prediction_value'))
         value.update({'id': region_id, 'game_id': str(self.game['id']), 'priority': safe_int(value.get('priority'), len(getattr(self, 'regions', ())), 0), 'region_norm': _clamp_region_norm(value.get('region_norm')), 'region_type': 'number', 'number_format': str(value.get('number_format', 'auto')), 'goal_relation': preference, 'relation_config': config, 'enabled': 1})
         return value
 
@@ -18613,7 +18797,10 @@ class NumericRegionEditor:
         self.preference_var = tk.StringVar(value=NUMERIC_PREFERENCE_LABELS[DEFAULT_NUMERIC_PREFERENCE])
         self.compare_var = tk.StringVar()
         self.fixed_value_var = tk.StringVar()
+        self.reward_scale_mode_var = tk.StringVar(value='自动')
         self.reward_scale_var = tk.StringVar(value=str(NUMERIC_REWARD_DEFAULT_SCALE))
+        self.tracking_persist_var = tk.BooleanVar(value=True)
+        self.initial_prediction_var = tk.StringVar(value='0')
         self.opacity_var = tk.DoubleVar(value=50.0)
         self.color_text = tk.StringVar(value=NUMERIC_OVERLAY_DEFAULT_COLOR)
         ttk.Label(form, text='名称').grid(row=0, column=0, sticky='w')
@@ -18638,14 +18825,27 @@ class NumericRegionEditor:
         ttk.Label(color_row, textvariable=self.color_text, width=10).pack(side='left')
         ttk.Button(color_row, text='选择颜色', command=self.choose_color).pack(side='left', padx=(6, 0))
         ttk.Label(form, text='透明度').grid(row=1, column=4, sticky='w', pady=(8, 0))
-        self.opacity_scale = tk.Scale(form, from_=0, to=100, resolution=1, orient='horizontal', variable=self.opacity_var, showvalue=True, command=lambda value: self.apply_form(live=True), length=230)
+        self.opacity_scale = tk.Scale(form, from_=0, to=100, resolution=1, orient='horizontal', variable=self.opacity_var, showvalue=True, command=self._opacity_changed, length=230)
         self.opacity_scale.grid(row=1, column=5, sticky='ew', padx=(6, 0), pady=(8, 0))
-        ttk.Label(form, text='奖励尺度').grid(row=2, column=0, sticky='w', pady=(8, 0))
-        self.reward_scale_entry = ttk.Entry(form, textvariable=self.reward_scale_var, width=22)
-        self.reward_scale_entry.grid(row=2, column=1, sticky='ew', padx=(6, 12), pady=(8, 0))
+        self.opacity_scale.bind('<ButtonPress-1>', self._opacity_pressed, add='+')
+        self.opacity_scale.bind('<ButtonRelease-1>', self._opacity_released, add='+')
+        ttk.Label(form, text='初始预测值').grid(row=2, column=0, sticky='w', pady=(8, 0))
+        self.initial_prediction_entry = ttk.Entry(form, textvariable=self.initial_prediction_var, width=22)
+        self.initial_prediction_entry.grid(row=2, column=1, sticky='ew', padx=(6, 12), pady=(8, 0))
+        self.initial_prediction_entry.bind('<KeyRelease>', lambda event: self.apply_form(live=True))
+        ttk.Label(form, text='奖励尺度').grid(row=2, column=2, sticky='w', pady=(8, 0))
+        scale_row = ttk.Frame(form)
+        scale_row.grid(row=2, column=3, sticky='ew', padx=(6, 12), pady=(8, 0))
+        self.reward_scale_mode_box = ttk.Combobox(scale_row, textvariable=self.reward_scale_mode_var, values=('自动', '手动'), state='readonly', width=7)
+        self.reward_scale_mode_box.pack(side='left')
+        self.reward_scale_mode_box.bind('<<ComboboxSelected>>', lambda event: self._reward_scale_mode_changed())
+        self.reward_scale_entry = ttk.Entry(scale_row, textvariable=self.reward_scale_var, width=14)
+        self.reward_scale_entry.pack(side='left', fill='x', expand=True, padx=(6, 0))
         self.reward_scale_entry.bind('<KeyRelease>', lambda event: self.apply_form(live=True))
-        ttk.Label(form, text='改善量达到该值时奖励约为±0.76；必须大于0').grid(row=2, column=2, columnspan=3, sticky='w', pady=(8, 0))
-        ttk.Button(form, text='应用编辑', command=self.apply_form).grid(row=2, column=5, sticky='e', pady=(8, 0))
+        self.tracking_persist_check = ttk.Checkbutton(form, text='自动保存稳定跟踪位置', variable=self.tracking_persist_var, command=lambda: self.apply_form(live=True))
+        self.tracking_persist_check.grid(row=2, column=4, columnspan=2, sticky='w', pady=(8, 0))
+        ttk.Label(form, text='自动模式按最近指标与变化量的中位数/MAD自适应；手动模式必须大于0。稳定跟踪位置默认永久保存。').grid(row=3, column=0, columnspan=5, sticky='w', pady=(8, 0))
+        ttk.Button(form, text='应用编辑', command=self.apply_form).grid(row=3, column=5, sticky='e', pady=(8, 0))
         for column in (1, 3, 5):
             form.columnconfigure(column, weight=1)
         bottom = ttk.Frame(outer)
@@ -18680,23 +18880,30 @@ class NumericRegionEditor:
 
     def refresh_form(self):
         region = self.current()
-        state = 'normal' if region is not None else 'disabled'
         if region is None:
             self.name_var.set('')
             self.preference_var.set(NUMERIC_PREFERENCE_LABELS[DEFAULT_NUMERIC_PREFERENCE])
             self.compare_var.set('')
             self.fixed_value_var.set('')
+            self.reward_scale_mode_var.set('自动')
             self.reward_scale_var.set(str(NUMERIC_REWARD_DEFAULT_SCALE))
+            self.tracking_persist_var.set(True)
+            self.initial_prediction_var.set('0')
             self.color_text.set(NUMERIC_OVERLAY_DEFAULT_COLOR)
             self.opacity_var.set(50.0)
             self.compare_box.configure(values=(), state='disabled')
+            self.reward_scale_entry.configure(state='disabled')
             return
         config = normalize_relation_config(region.get('relation_config', {}))
         self.name_var.set(str(config.get('display_name', '数字区域')))
         relation = str(config.get('preference', region.get('goal_relation', DEFAULT_NUMERIC_PREFERENCE)))
         self.preference_var.set(NUMERIC_PREFERENCE_LABELS.get(relation, NUMERIC_PREFERENCE_LABELS[DEFAULT_NUMERIC_PREFERENCE]))
         self.fixed_value_var.set(str(config.get('fixed_value')) if finite_number(config.get('fixed_value')) else '')
+        mode = '手动' if config.get('reward_scale_mode') == 'manual' else '自动'
+        self.reward_scale_mode_var.set(mode)
         self.reward_scale_var.set(str(_numeric_reward_scale(config)))
+        self.tracking_persist_var.set(bool(config.get('tracking_persist_stable', True)))
+        self.initial_prediction_var.set(str(config.get('initial_prediction_value')) if finite_number(config.get('initial_prediction_value')) else '0')
         self.color_text.set(_valid_overlay_color(config.get('overlay_color')))
         self.opacity_var.set(safe_float(config.get('overlay_opacity', NUMERIC_OVERLAY_DEFAULT_OPACITY), 0.5, 0.0, 1.0) * 100.0)
         options = []
@@ -18712,6 +18919,7 @@ class NumericRegionEditor:
         target_id = str(config.get('compare_region_id', ''))
         chosen = next((display for display, rid in target_by_display.items() if rid == target_id), '')
         self.compare_var.set(chosen)
+        self._reward_scale_mode_changed(update=False)
         self._preference_changed(update=False)
 
     def refresh_canvas(self):
@@ -18835,10 +19043,12 @@ class NumericRegionEditor:
                 bottom = min(1.0, max(top + minimum, bottom + dy))
             x, y, width, height = (left, top, right - left, bottom - top)
         region['region_norm'] = _clamp_region_norm([x, y, width, height], minimum)
-        self.refresh_canvas()
+        self._schedule_canvas_refresh(16)
 
     def canvas_release(self, event):
         self.drag_state = None
+        self._cancel_pending_redraw()
+        self.refresh_canvas()
         self._refresh_tracking_template(self.current())
         self.refresh_list()
         self.persist_changes()
@@ -18892,7 +19102,7 @@ class NumericRegionEditor:
     def new_region(self):
         index = len(self.regions) + 1
         offset = min(0.24, (index - 1) * 0.025)
-        region = self._normalize_region({'id': uuid.uuid4().hex, 'region_norm': [0.35 + offset, 0.42 + offset, 0.3, 0.16], 'priority': len(self.regions), 'goal_relation': DEFAULT_NUMERIC_PREFERENCE, 'relation_config': {'display_name': '数字区域' + str(index), 'overlay_color': NUMERIC_OVERLAY_DEFAULT_COLOR, 'overlay_opacity': NUMERIC_OVERLAY_DEFAULT_OPACITY, 'preference': DEFAULT_NUMERIC_PREFERENCE, 'compare_region_id': '', 'reward_scale': NUMERIC_REWARD_DEFAULT_SCALE}})
+        region = self._normalize_region({'id': uuid.uuid4().hex, 'region_norm': [0.35 + offset, 0.42 + offset, 0.3, 0.16], 'priority': len(self.regions), 'goal_relation': DEFAULT_NUMERIC_PREFERENCE, 'relation_config': {'display_name': '数字区域' + str(index), 'overlay_color': NUMERIC_OVERLAY_DEFAULT_COLOR, 'overlay_opacity': NUMERIC_OVERLAY_DEFAULT_OPACITY, 'preference': DEFAULT_NUMERIC_PREFERENCE, 'compare_region_id': '', 'reward_scale_mode': 'auto', 'tracking_persist_stable': True, 'initial_prediction_value': 0.0}})
         self.regions.append(region)
         self.selected_id = region['id']
         self._refresh_tracking_template(region)
@@ -18931,6 +19141,12 @@ class NumericRegionEditor:
         if update:
             self.apply_form(live=True)
 
+    def _reward_scale_mode_changed(self, update=True):
+        mode = 'manual' if self.reward_scale_mode_var.get() == '手动' else 'auto'
+        self.reward_scale_entry.configure(state='normal' if mode == 'manual' else 'disabled')
+        if update:
+            self.apply_form(live=True)
+
     def choose_color(self):
         region = self.current()
         if region is None:
@@ -18944,6 +19160,44 @@ class NumericRegionEditor:
             self.color_text.set(_valid_overlay_color(chosen))
             self.apply_form(live=True)
 
+    def _cancel_pending_redraw(self):
+        if self.redraw_after_id is None:
+            return
+        try:
+            self.win.after_cancel(self.redraw_after_id)
+        except tk.TclError:
+            pass
+        self.redraw_after_id = None
+
+    def _schedule_canvas_refresh(self, delay=24):
+        if self.closed or self.redraw_after_id is not None:
+            return
+        try:
+            self.redraw_after_id = self.win.after(max(0, safe_int(delay, 24, 0, 1000)), self._flush_canvas_refresh)
+        except tk.TclError:
+            self.redraw_after_id = None
+
+    def _flush_canvas_refresh(self):
+        self.redraw_after_id = None
+        if not self.closed:
+            self.refresh_canvas()
+
+    def _opacity_pressed(self, event=None):
+        self._cancel_pending_save()
+
+    def _opacity_changed(self, value=None):
+        region = self.current()
+        if region is None:
+            return
+        config = normalize_relation_config(region.get('relation_config', {}))
+        config['overlay_opacity'] = safe_float(self.opacity_var.get(), 50.0, 0.0, 100.0) / 100.0
+        region['relation_config'] = config
+        self._schedule_canvas_refresh(24)
+
+    def _opacity_released(self, event=None):
+        self._opacity_changed()
+        self._schedule_persist()
+
     def apply_form(self, live=False, persist=True):
         region = self.current()
         if region is None:
@@ -18953,24 +19207,28 @@ class NumericRegionEditor:
         config['display_name'] = name[:80]
         config['overlay_color'] = _valid_overlay_color(self.color_text.get())
         config['overlay_opacity'] = safe_float(self.opacity_var.get(), 50.0, 0.0, 100.0) / 100.0
+        config['tracking_persist_stable'] = bool(self.tracking_persist_var.get())
+        config['initial_prediction_value'] = safe_float(self.initial_prediction_var.get(), _numeric_region_prior(region)) if finite_number(self.initial_prediction_var.get()) else _numeric_region_prior(region)
         relation = normalize_numeric_preference(NUMERIC_PREFERENCE_OPTIONS.get(self.preference_var.get(), DEFAULT_NUMERIC_PREFERENCE))
         config['preference'] = relation
         if relation in NUMERIC_COMPARISON_RELATIONS:
-            target = getattr(self, 'compare_target_by_display', {}).get(self.compare_var.get(), '')
-            config['compare_region_id'] = str(target)
+            config['compare_region_id'] = str(getattr(self, 'compare_target_by_display', {}).get(self.compare_var.get(), ''))
         else:
             config['compare_region_id'] = ''
         if relation in NUMERIC_FIXED_VALUE_RELATIONS:
-            if finite_number(self.fixed_value_var.get()):
-                config['fixed_value'] = safe_float(self.fixed_value_var.get())
-            else:
-                config['fixed_value'] = 0.0
+            config['fixed_value'] = safe_float(self.fixed_value_var.get()) if finite_number(self.fixed_value_var.get()) else 0.0
         else:
             config.pop('fixed_value', None)
-        if finite_number(self.reward_scale_var.get()) and safe_float(self.reward_scale_var.get()) > 0.0:
-            config['reward_scale'] = max(NUMERIC_REWARD_MIN_SCALE, safe_float(self.reward_scale_var.get()))
+        mode = 'manual' if self.reward_scale_mode_var.get() == '手动' else 'auto'
+        config['reward_scale_mode'] = mode
+        if mode == 'manual':
+            if finite_number(self.reward_scale_var.get()) and safe_float(self.reward_scale_var.get()) > 0.0:
+                config['reward_scale'] = max(NUMERIC_REWARD_MIN_SCALE, min(NUMERIC_REWARD_MAX_SCALE, safe_float(self.reward_scale_var.get())))
+            else:
+                config['reward_scale'] = NUMERIC_REWARD_DEFAULT_SCALE
         else:
-            config['reward_scale'] = NUMERIC_REWARD_DEFAULT_SCALE
+            config.pop('reward_scale', None)
+            config['reward_scale_effective'] = _numeric_reward_scale(config)
         region['goal_relation'] = relation
         region['relation_config'] = config
         if not live:
@@ -18987,11 +19245,18 @@ class NumericRegionEditor:
             config = normalize_relation_config(region.get('relation_config', {}))
             relation = normalize_numeric_preference(config.get('preference', region.get('goal_relation', DEFAULT_NUMERIC_PREFERENCE)))
             config['preference'] = relation
-            if relation in NUMERIC_FIXED_VALUE_RELATIONS and (not finite_number(config.get('fixed_value'))):
+            if relation in NUMERIC_FIXED_VALUE_RELATIONS and not finite_number(config.get('fixed_value')):
                 raise ValueError(self.display_name(region) + ' 必须设置有效固定值')
-            if not finite_number(config.get('reward_scale')) or safe_float(config.get('reward_scale')) <= 0.0:
-                raise ValueError(self.display_name(region) + ' 的奖励尺度必须大于0')
-            config['reward_scale'] = max(NUMERIC_REWARD_MIN_SCALE, safe_float(config.get('reward_scale')))
+            if not finite_number(config.get('initial_prediction_value')):
+                raise ValueError(self.display_name(region) + ' 必须设置有效初始预测值')
+            config['initial_prediction_value'] = safe_float(config.get('initial_prediction_value'))
+            if config.get('reward_scale_mode') == 'manual':
+                if not finite_number(config.get('reward_scale')) or safe_float(config.get('reward_scale')) <= 0.0:
+                    raise ValueError(self.display_name(region) + ' 的手动奖励尺度必须大于0')
+                config['reward_scale'] = max(NUMERIC_REWARD_MIN_SCALE, min(NUMERIC_REWARD_MAX_SCALE, safe_float(config.get('reward_scale'))))
+            else:
+                config.pop('reward_scale', None)
+                config['reward_scale_effective'] = _numeric_reward_scale(config)
             if relation in NUMERIC_COMPARISON_RELATIONS:
                 target_id = str(config.get('compare_region_id', ''))
                 if not target_id or target_id == str(region.get('id', '')) or target_id not in ids:
@@ -19013,7 +19278,7 @@ class NumericRegionEditor:
                 templates.append(encoded)
             if len(templates) >= NUMERIC_TRACKING_HISTORY_LIMIT:
                 break
-        config.update({'tracking_template': templates[0], 'tracking_templates': templates, 'tracking_template_w': NUMERIC_TRACKING_TEMPLATE_W, 'tracking_template_h': NUMERIC_TRACKING_TEMPLATE_H, 'tracking_search': 'stable_ui_anchor_optical_flow_neural_embedding_multi_hypothesis', 'tracking_independent_scales': True, 'tracking_anchor_excludes_numeric_content': True, 'tracking_uses_learned_roi_embedding': True, 'tracking_uses_online_box_regression': True, 'tracking_occlusion_recovery': True, 'tracking_update_confirmation_frames': NUMERIC_TRACKING_CONFIRM_FRAMES, 'tracking_persist_stable': bool(config.get('tracking_persist_stable', False))})
+        config.update({'tracking_template': templates[0], 'tracking_templates': templates, 'tracking_template_w': NUMERIC_TRACKING_TEMPLATE_W, 'tracking_template_h': NUMERIC_TRACKING_TEMPLATE_H, 'tracking_search': 'stable_ui_anchor_optical_flow_neural_embedding_multi_hypothesis', 'tracking_independent_scales': True, 'tracking_anchor_excludes_numeric_content': True, 'tracking_uses_learned_roi_embedding': True, 'tracking_uses_online_box_regression': True, 'tracking_occlusion_recovery': True, 'tracking_update_confirmation_frames': NUMERIC_TRACKING_CONFIRM_FRAMES, 'tracking_persist_stable': bool(config.get('tracking_persist_stable', True))})
         region['relation_config'] = config
 
     def _cancel_pending_save(self):
@@ -19068,6 +19333,7 @@ class NumericRegionEditor:
         if self.closed:
             return
         self._cancel_pending_save()
+        self._cancel_pending_redraw()
         self.closed = True
         try:
             self.win.grab_release()
@@ -21423,7 +21689,8 @@ class AppStorageService(AppServiceBase):
         value = filedialog.askdirectory(parent=self.root, title='选择通用游戏AI文件夹', mustexist=False, initialdir=initial)
         if not value:
             return
-        selected = Path(value).expanduser().resolve()
+        selected_root = Path(value).expanduser().resolve()
+        selected = resolve_user_data_directory(selected_root, self.data_directory)
         try:
             validate_data_directory_selection(selected, self.store, self.data_directory)
         except RECOVERABLE_ERRORS as error:
@@ -21434,7 +21701,7 @@ class AppStorageService(AppServiceBase):
         self.directory_prepare_candidate = None
         self.data_dir_text.set(str(selected))
         self.progress_value.set(0.0)
-        self.status.set('目录检查通过，请点击“确认”后写入')
+        self.status.set('目录检查通过，将写入专用目录：' + str(selected) + '；请点击“确认”')
         self.lifecycle.set_directory_phase('prepared')
         if button is not None:
             button.configure(text='确认', state='normal')
@@ -21791,6 +22058,19 @@ class AppStorageService(AppServiceBase):
         if not self.lifecycle.data_ready or self.store is None:
             self.show_error('请先选择并确认文件夹')
             return False
+        try:
+            existing = validate_runtime_manifest(self.data_directory, True, True)
+        except RECOVERABLE_ERRORS:
+            existing = None
+        if not isinstance(existing, dict):
+            plan = self.runtime_installer.install_plan()
+            backend_text = '、'.join(plan.get('backend_labels', [])) or 'CPU'
+            selected_backend = str(plan.get('preferred_backend_label', 'CPU'))
+            estimate_mark = '（估算）' if plan.get('contains_estimates') else ''
+            message = '首次安装计划\n预计下载量' + estimate_mark + '：' + format_byte_size(plan.get('estimated_download_bytes', 0)) + '\n预计磁盘占用：' + format_byte_size(plan.get('required_disk_bytes', 0)) + '\n当前可用空间：' + format_byte_size(plan.get('free_disk_bytes', 0)) + '\n当前选中的后端（安装前预选）：' + selected_backend + '\n将实测的候选后端：' + backend_text + '\n最终选择规则：完整端到端实测后选择最快且稳定的后端\n下载支持断点续传：是\n\n确认后开始检查、下载、校验和安装；按ESC可提前结束。'
+            if not self.confirm_dialog('文件安装确认', message):
+                self.status.set('已取消文件安装')
+                return False
         return self._start_mode_transaction('文件', self.integrity_check_worker, False, False, '正在自动检查、下载、修复并删除无效文件；按ESC可提前结束')
 
     def integrity_check_worker(self):
@@ -22830,11 +23110,27 @@ def materialized_entry_manifest(base):
     ast.parse(target.read_text(encoding='utf-8'), filename=str(target))
     return value
 
+USER_DATA_SUBDIRECTORY = 'UniversalGameAI'
+
+
+def resolve_user_data_directory(path, source_base=None):
+    selected = Path(path).expanduser().resolve()
+    source = Path(source_base).expanduser().resolve() if source_base is not None else None
+    if source is not None and same_directory(selected, source):
+        return selected
+    if selected.name.casefold() == USER_DATA_SUBDIRECTORY.casefold():
+        return selected
+    if selected.exists() and selected.is_dir():
+        valid_existing, _ = existing_data_directory_status(selected)
+        if valid_existing:
+            return selected
+    return selected / USER_DATA_SUBDIRECTORY
+
+
 def validate_data_directory_selection(path, source_store=None, source_base=None):
-    destination = Path(path).expanduser().resolve()
+    destination = resolve_user_data_directory(path, source_base)
     if '\x00' in str(destination):
         raise RuntimeError('目录路径无效')
-    initial_entry_directory = source_store is None and same_directory(destination, Path(__file__).resolve().parent)
     existing_parent = destination
     while not existing_parent.exists() and existing_parent != existing_parent.parent:
         existing_parent = existing_parent.parent
@@ -22847,11 +23143,11 @@ def validate_data_directory_selection(path, source_store=None, source_base=None)
             raise RuntimeError('所选路径不是文件夹')
         reject_reparse_points(destination)
         if not same_directory(destination, source_path):
-            existing = [item for item in destination.iterdir() if item.name != '.ugai.lock' and (not (initial_entry_directory and item.name == 'main.py' and item.is_file()))]
+            existing = [item for item in destination.iterdir() if item.name != '.ugai.lock']
             if existing:
                 valid_existing, reason = existing_data_directory_status(destination)
-                if source_store is not None or not valid_existing:
-                    raise RuntimeError('目标目录不是空目录或合法既有数据目录：' + str(reason))
+                if not valid_existing:
+                    raise RuntimeError('专用数据子目录已存在但不是合法数据目录：' + str(reason))
         probe_root = destination
     else:
         probe_root = existing_parent
@@ -22860,7 +23156,7 @@ def validate_data_directory_selection(path, source_store=None, source_base=None)
     if free < required:
         raise RuntimeError('可用空间不足，需要约' + str(round(required / 1024 / 1024 / 1024, 2)) + 'GB')
     _filesystem_capability_check(probe_root)
-    return {'path': str(destination), 'free': free, 'required': required}
+    return {'path': str(destination), 'selected_root': str(Path(path).expanduser().resolve()), 'free': free, 'required': required}
 
 def _stage_directory_source(staging, source_store, source_path, reopening, stop_event, progress):
     if source_store is not None and source_path is not None:
@@ -22951,7 +23247,7 @@ def _write_directory_migration_manifest(staging, source_path, destination, targe
     (staging / '.ugai_migration_manifest.json').write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')), encoding='utf-8')
 
 def prepare_data_directory(path, stop_event=None, progress=None, source_store=None, source_base=None, destination_existed=None):
-    destination = Path(path).expanduser().resolve()
+    destination = resolve_user_data_directory(path, source_base)
     source_path = Path(source_base).expanduser().resolve() if source_base is not None else None
     if stop_event is not None and stop_event.is_set():
         raise InputStopped('文件夹准备已停止')
@@ -22970,14 +23266,13 @@ def prepare_data_directory(path, stop_event=None, progress=None, source_store=No
     for stale in list(destination.glob('.ugai_migration_*')) + list(destination.glob('.ugai_prepare_*')) + list(destination.glob('.ugai_rollback_*')):
         if stale.is_dir():
             shutil.rmtree(stale, ignore_errors=True)
-    initial_entry_directory = source_store is None and same_directory(destination, Path(__file__).resolve().parent)
-    existing = [item for item in destination.iterdir() if item.name != '.ugai.lock' and (not (initial_entry_directory and item.name == 'main.py' and item.is_file()))]
+    existing = [item for item in destination.iterdir() if item.name != '.ugai.lock']
     reopening = False
     if existing:
         valid_existing, existing_reason = existing_data_directory_status(destination)
-        reopening = bool(source_store is None and valid_existing)
+        reopening = bool(valid_existing)
         if not reopening:
-            raise RuntimeError('目标目录已含有另一套数据或其他文件；' + existing_reason + '；为避免静默合并，请选择空目录、当前原文件夹或合法既有目录')
+            raise RuntimeError('专用数据子目录已含有损坏或不兼容的数据：' + existing_reason)
         source_path = destination
     ensure_free_space(destination, required_migration_space(source_path), '文件夹迁移')
     staging = destination / ('.ugai_migration_' + uuid.uuid4().hex if source_store is not None else '.ugai_prepare_' + uuid.uuid4().hex)
@@ -23009,7 +23304,7 @@ def prepare_data_directory(path, stop_event=None, progress=None, source_store=No
             source_store.resume_sample_writes()
         if created:
             try:
-                if destination.exists() and (not any(destination.iterdir())):
+                if destination.exists() and not any(destination.iterdir()):
                     destination.rmdir()
             except OSError:
                 pass
@@ -23168,6 +23463,7 @@ def _runtime_download_locked_wheels(entries, wheelhouse, env, cache_root):
     cache = Path(cache_root) / 'wheels'
     cache.mkdir(parents=True, exist_ok=True)
     results = []
+    verified_sizes = {}
     total_retries = 0
     total_resumed = 0
     for index, source in enumerate(entries):
@@ -23176,16 +23472,21 @@ def _runtime_download_locked_wheels(entries, wheelhouse, env, cache_root):
         if parsed.scheme.lower() != 'https' or parsed.hostname not in RUNTIME_ALLOWED_DOWNLOAD_HOSTS:
             raise RuntimeError('wheel URL不在允许域名锁内：' + str(entry['url']))
         target = cache / str(entry['filename'])
+        estimated_size = safe_int(entry.get('size'), 1, 1, 8 * 1024 * 1024 * 1024)
+        maximum_size = safe_int(entry.get('maximum_size', max(FIXED_RUNTIME_PIP_MAX_BYTES, estimated_size * 2)), max(FIXED_RUNTIME_PIP_MAX_BYTES, estimated_size * 2), estimated_size, 8 * 1024 * 1024 * 1024)
+        exact_size = estimated_size if bool(entry.get('size_exact', True)) else None
         _runtime_emit('progress', value=10.0 + 42.0 * (index / max(1, len(entries))), message='下载锁定wheel ' + str(entry['filename']))
-        result = _validated_download(entry['url'], target, entry['sha256'], max(FIXED_RUNTIME_PIP_MAX_BYTES, safe_int(entry['size'], 1, 1) * 2), expected_size=entry['size'], retries=3)
+        result = _validated_download(entry['url'], target, entry['sha256'], maximum_size, expected_size=exact_size, retries=3)
         total_retries += safe_int(result.get('retries'), 0, 0)
         total_resumed += safe_int(result.get('resumed_bytes'), 0, 0)
         installed = destination_root / str(entry['filename'])
         shutil.copy2(target, installed)
-        if installed.stat().st_size != safe_int(entry['size'], 0) or sha256_file(installed) != str(entry['sha256']):
+        actual_size = installed.stat().st_size
+        if (exact_size is not None and actual_size != exact_size) or sha256_file(installed) != str(entry['sha256']):
             raise RuntimeError('wheel缓存复制校验失败：' + str(entry['filename']))
+        verified_sizes[str(entry['filename'])] = int(actual_size)
         results.append(entry)
-    return (results, {'files': len(results), 'retries': total_retries, 'resumed_bytes': total_resumed})
+    return (results, {'files': len(results), 'retries': total_retries, 'resumed_bytes': total_resumed, 'verified_sizes': verified_sizes})
 
 def _runtime_write_require_hashes_lock(path, entries, wheelhouse):
     if not runtime_backend_lock_is_complete(entries):
@@ -23257,8 +23558,8 @@ def runtime_install_worker(request_path):
     if not runtime_lock_is_complete(wheels):
         raise RuntimeError('内嵌运行库wheel锁不完整')
     install_write_boundary_guard(base)
-    wheel_bytes = sum((safe_int(item.get('size'), 0, 0) for item in wheels))
-    ensure_free_space(base, required_runtime_space(base, wheel_bytes + FIXED_RUNTIME_PYTHON_ARTIFACT['size']), '运行库下载与安装')
+    install_plan = runtime_install_plan(base, hardware)
+    ensure_free_space(base, install_plan['required_disk_bytes'], '运行库下载与安装')
     if staging.exists():
         shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
@@ -23306,7 +23607,7 @@ def runtime_install_worker(request_path):
                 candidate = _runtime_install_backend_candidate(base, family, cache_root)
                 candidate_records.append(candidate)
                 candidate_evidence.append({**descriptor, 'installed': True, 'stable': True, 'benchmark': candidate['validation']})
-            except Exception as error:
+            except RECOVERABLE_ERRORS as error:
                 candidate_evidence.append({**descriptor, 'installed': False, 'stable': False, 'reason': type(error).__name__ + ':' + str(error)})
         selected = min((item for item in candidate_records if item.get('stable')), key=lambda item: safe_float(item.get('score_ms'), float('inf')))
         retained_staging = base / 'temp' / ('runtime.retained.' + uuid.uuid4().hex)
@@ -23398,7 +23699,7 @@ def runtime_install_worker(request_path):
             raise
         if retained_backup.exists():
             delete_owned_paths(base, [retained_backup], 'runtime_replaced_retained_rollback')
-        _runtime_emit('progress', value=100.0, message='下载与离线验证完成，CPU安全后端已保留')
+        _runtime_emit('progress', value=100.0, message='下载与离线验证完成，已选择' + selected_backend + '，全部稳定候选后端已保留')
         _runtime_emit('result', manifest=manifest)
         return 0
     except Exception as error:
@@ -23927,16 +24228,19 @@ class RuntimeInstaller:
             on_progress(100.0)
         return dict(existing)
 
+    def install_plan(self):
+        return runtime_install_plan(self.base, self._hardware_probe())
+
     def _prepare_install_request(self):
-        wheels, _, _ = embedded_runtime_lock()
-        locked_bytes = sum((safe_int(item.get('size'), 0, 0) for item in wheels)) + safe_int(FIXED_RUNTIME_PYTHON_ARTIFACT.get('size'), 0, 0)
-        ensure_free_space(self.base, required_runtime_space(self.base, locked_bytes), '运行库下载与安装')
+        hardware = self._hardware_probe()
+        plan = runtime_install_plan(self.base, hardware)
+        ensure_free_space(self.base, plan['required_disk_bytes'], '运行库下载与安装')
         self._cleanup_staging()
         staging = self.base / 'temp' / ('runtime.staging.' + uuid.uuid4().hex)
         self.staging = staging
         request_path = self.base / 'temp' / ('runtime_request_' + uuid.uuid4().hex + '.json')
         request_path.parent.mkdir(parents=True, exist_ok=True)
-        request_path.write_text(json.dumps({'base': str(self.base), 'staging': str(staging), 'hardware': self._hardware_probe(), 'vendor': self._gpu_vendor(), 'protocol_version': RUNTIME_INSTALL_PROTOCOL_VERSION, 'stage': WorkerStage.STARTING.value}, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
+        request_path.write_text(json.dumps({'base': str(self.base), 'staging': str(staging), 'hardware': hardware, 'vendor': self._gpu_vendor(), 'protocol_version': RUNTIME_INSTALL_PROTOCOL_VERSION, 'stage': WorkerStage.STARTING.value, 'install_plan': plan}, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
         env = os.environ.copy()
         env['PYTHONNOUSERSITE'] = '1'
         command = [sys.executable, str(self.base / 'main.py'), 'runtime-install-worker', str(request_path)]
@@ -26035,7 +26339,7 @@ def ai_worker_main(base, address, auth_text, family, protocol_version=None):
                 connection.send({'kind': WorkerMessageKind.RESULT.value, 'id': request_id, 'value': value})
             except (KeyboardInterrupt, SystemExit):
                 raise
-            except Exception as error:
+            except WORKER_REQUEST_ERRORS as error:
                 connection.send({'kind': WorkerMessageKind.ERROR.value, 'id': request_id, 'message': str(error), 'traceback': traceback.format_exc()[-10000:]})
     finally:
         try:
@@ -26405,14 +26709,25 @@ class OCRRuntimeProxy:
 
 def normalize_relation_config(value):
     if isinstance(value, dict):
-        return dict(value)
-    if isinstance(value, str):
+        result = dict(value)
+    elif isinstance(value, str):
         try:
             parsed = json.loads(value or '{}')
-            return dict(parsed) if isinstance(parsed, dict) else {}
+            result = dict(parsed) if isinstance(parsed, dict) else {}
         except (json.JSONDecodeError, TypeError, ValueError):
-            return {}
-    return {}
+            result = {}
+    else:
+        result = {}
+    mode = str(result.get('reward_scale_mode', 'auto')).strip().lower()
+    result['reward_scale_mode'] = 'manual' if mode == 'manual' else 'auto'
+    result['tracking_persist_stable'] = bool(result.get('tracking_persist_stable', True))
+    for key in ('metric_delta_history', 'metric_value_history'):
+        history = result.get(key)
+        if isinstance(history, (list, tuple)):
+            result[key] = [safe_float(item) for item in history[-64:] if finite_number(item)]
+        else:
+            result[key] = []
+    return result
 
 def ocr_region_checksum_payload(item):
     value = dict(item) if isinstance(item, dict) else {}
@@ -26917,10 +27232,18 @@ class OCRMonitor:
         for priority, definition in enumerate(definitions):
             definition['priority'] = priority
         if not definitions:
-            return
+            return ([], {})
         previous_snapshot = {}
         frame_sequence = 0
         states = {}
+        game_prior_values = []
+        for item in definitions:
+            config = normalize_relation_config(item.get('relation_config', {}))
+            for candidate in (config.get('last_reliable_numeric_value'), config.get('learned_numeric_prior_mean'), item.get('last_value')):
+                if finite_number(candidate):
+                    game_prior_values.append(safe_float(candidate))
+                    break
+        game_prior = statistics.median(game_prior_values) if game_prior_values else 0.0
         for item in definitions:
             region_id = str(item['id'])
             norm = _clamp_region_norm(item.get('region_norm'))
@@ -26928,15 +27251,19 @@ class OCRMonitor:
             config = normalize_relation_config(item.get('relation_config', {}))
             stored_profile = config.get('numeric_visual_profile') if isinstance(config.get('numeric_visual_profile'), dict) else {}
             persistent_value = config.get('last_reliable_numeric_value')
-            prediction = NumericPredictionState()
+            initial_value = _numeric_region_prior(item, game_prior)
+            prediction = NumericPredictionState(initial_prediction_value=initial_value, learned_prior_value=safe_float(config.get('learned_numeric_prior_mean')) if finite_number(config.get('learned_numeric_prior_mean')) else None, game_prior_value=game_prior, deterministic_fallback_value=initial_value)
+            prediction.prior_count = safe_int(config.get('learned_numeric_prior_count'), 0, 0)
+            prediction.prior_mean = safe_float(config.get('learned_numeric_prior_mean'), initial_value) if prediction.prior_count else 0.0
+            prediction.prior_m2 = max(0.0, safe_float(config.get('learned_numeric_prior_m2'), 0.0))
             if finite_number(persistent_value):
                 prediction.last_observed_value = safe_float(persistent_value)
                 prediction.predicted_value = safe_float(persistent_value)
                 prediction.prediction_confidence = safe_float(config.get('last_reliable_numeric_confidence'), 0.55, 0.0, 1.0)
                 prediction.last_observation_confidence = prediction.prediction_confidence
-                prediction.trusted_observations = 1
+                prediction.trusted_observations = max(1, prediction.prior_count)
                 prediction.prediction_source = 'persistent_last_session'
-            states[region_id] = {'norm': norm, 'templates': templates, 'template': templates[0] if templates else b'', 'lost': 0, 'pending_norm': None, 'pending_count': 0, 'high_confidence_frames': 0, 'stable_tracking_frames': 0, 'persisted_norm': list(norm), 'last_persisted': 0.0, 'last_profile_persisted': 0.0, 'last_value_persisted': 0.0, 'persistent_value': safe_float(persistent_value) if finite_number(persistent_value) else None, 'profile_checksum': hashlib.sha256(canonical_bytes(stored_profile)).hexdigest() if stored_profile else '', 'prediction': prediction}
+            states[region_id] = {'norm': norm, 'templates': templates, 'template': templates[0] if templates else b'', 'lost': 0, 'pending_norm': None, 'pending_count': 0, 'high_confidence_frames': 0, 'stable_tracking_frames': 0, 'persisted_norm': list(norm), 'last_persisted': 0.0, 'last_profile_persisted': 0.0, 'last_value_persisted': 0.0, 'persistent_value': safe_float(persistent_value) if finite_number(persistent_value) else None, 'game_prior_value': game_prior, 'profile_checksum': hashlib.sha256(canonical_bytes(stored_profile)).hexdigest() if stored_profile else '', 'prediction': prediction}
 
         return definitions, states
 
@@ -27076,7 +27403,7 @@ class OCRMonitor:
                 state['last_profile_persisted'] = now
                 profile_changed = True
         config = normalize_relation_config(definition.get('relation_config', {}))
-        should_persist_norm = bool(config.get('tracking_persist_stable', False))
+        should_persist_norm = bool(config.get('tracking_persist_stable', True))
         moved = _rect_iou(state.get('persisted_norm', state['norm']), state['norm']) < 0.88
         norm_changed = bool(should_persist_norm and moved and (state.get('stable_tracking_frames', 0) >= NUMERIC_TRACKING_PERSIST_FRAMES) and (now - state.get('last_persisted', 0.0) >= 30.0))
         value_changed = bool(observed_valid and finite_number(parsed.get('value')) and (now - state.get('last_value_persisted', 0.0) >= 5.0) and (not finite_number(state.get('persistent_value')) or not numeric_values_equal(state.get('persistent_value'), parsed.get('value'))))
@@ -27085,6 +27412,11 @@ class OCRMonitor:
             config['last_reliable_numeric_value'] = safe_float(parsed.get('value'))
             config['last_reliable_numeric_confidence'] = consensus_confidence
             config['last_reliable_numeric_updated'] = time.time()
+            prediction = state.get('prediction')
+            if isinstance(prediction, NumericPredictionState):
+                config['learned_numeric_prior_count'] = prediction.prior_count
+                config['learned_numeric_prior_mean'] = prediction.prior_mean if prediction.prior_count else safe_float(parsed.get('value'))
+                config['learned_numeric_prior_m2'] = prediction.prior_m2
             definition['relation_config'] = config
             state['persistent_value'] = safe_float(parsed.get('value'))
             state['last_value_persisted'] = now
@@ -27223,7 +27555,7 @@ class OCRMonitor:
             else:
                 visual_value = consensus_value if finite_number(consensus_value) and consensus_confidence >= 0.3 else None
                 snapshot = state['prediction'].predict(prediction_time, visual_value, consensus_confidence)
-            snapshot.update({'stable_frames': stable_frames, 'occluded': not isinstance(item, dict) or safe_int(item.get('lost_frames'), 0) > 0, 'recovered': bool(item.get('recovered')) if isinstance(item, dict) else False, 'temporal_disagreement': conflict, 'observed_valid': observed_valid, 'observation_confidence': consensus_confidence, 'observation_rejection_reason': str(item.get('observation_rejection_reason', 'not_observed')) if isinstance(item, dict) else 'not_observed', 'persistent_value': state.get('persistent_value'), 'last_session_value': state.get('persistent_value'), 'frame_id': frame_id})
+            snapshot.update({'stable_frames': stable_frames, 'occluded': not isinstance(item, dict) or safe_int(item.get('lost_frames'), 0) > 0, 'recovered': bool(item.get('recovered')) if isinstance(item, dict) else False, 'temporal_disagreement': conflict, 'observed_valid': observed_valid, 'observation_confidence': consensus_confidence, 'observation_rejection_reason': str(item.get('observation_rejection_reason', 'not_observed')) if isinstance(item, dict) else 'not_observed', 'persistent_value': state.get('persistent_value'), 'last_session_value': state.get('persistent_value'), 'initial_prediction_value': state['prediction'].initial_prediction_value, 'learned_numeric_prior_mean': state['prediction'].prior_mean if state['prediction'].prior_count else state['prediction'].learned_prior_value, 'game_numeric_prior': state.get('game_prior_value'), 'fallback_value': state['prediction'].deterministic_fallback_value, 'frame_id': frame_id})
             current_snapshot[region_id] = snapshot
         comparison = compare_numeric_snapshots_detailed(definitions, previous_snapshot, current_snapshot) if previous_snapshot else {'reward': 0.0, 'winning_region_id': '', 'status': 'initial_snapshot', 'priority': None}
 
@@ -27233,12 +27565,13 @@ class OCRMonitor:
         region_values = {region_id: snapshot.get('value') for region_id, snapshot in current_snapshot.items() if snapshot.get('valid') and finite_number(snapshot.get('value'))}
         event_summaries = []
         terminal = ''
+        comparison_fields = {'snapshot_reward': safe_float(comparison.get('reward'), 0.0, -1.0, 1.0), 'snapshot_raw_reward': safe_float(comparison.get('raw_reward'), 0.0, -1.0, 1.0), 'snapshot_confidence_weight': safe_float(comparison.get('confidence_weight'), 0.0, 0.0, 1.0), 'snapshot_status': str(comparison.get('status', 'neutral')), 'snapshot_winning_region_id': str(comparison.get('winning_region_id', '')), 'snapshot_used_prediction': bool(comparison.get('used_prediction')), 'snapshot_equality_state': str(comparison.get('equality_state', '')), 'snapshot_reward_scale': safe_float(comparison.get('reward_scale'), NUMERIC_REWARD_DEFAULT_SCALE, NUMERIC_REWARD_MIN_SCALE), 'snapshot_reward_scale_mode': str(comparison.get('reward_scale_mode', 'auto')), 'snapshot_before_prediction_source': str(comparison.get('before_prediction_source', '')), 'snapshot_now_prediction_source': str(comparison.get('now_prediction_source', '')), 'snapshot_before_prediction_age_ms': safe_float(comparison.get('before_prediction_age_ms'), 0.0, 0.0), 'snapshot_now_prediction_age_ms': safe_float(comparison.get('now_prediction_age_ms'), 0.0, 0.0), 'snapshot_before_confidence': safe_float(comparison.get('before_confidence'), 0.0, 0.0, 1.0), 'snapshot_now_confidence': safe_float(comparison.get('now_confidence'), 0.0, 0.0, 1.0)}
         for definition in definitions:
             region_id = str(definition['id'])
             item = observations.get(region_id)
             if item is None:
                 snapshot_value = current_snapshot.get(region_id, {})
-                event_summaries.append({'region_id': region_id, 'priority': safe_int(definition.get('priority'), 0), 'status': 'predicted' if snapshot_value.get('valid') else str(snapshot_value.get('prediction_source', 'unreadable')), 'terminal': '', 'reset': '', 'valid': bool(snapshot_value.get('valid')), 'predicted': bool(snapshot_value.get('predicted')), 'confidence': safe_float(snapshot_value.get('confidence'), 0.0, 0.0, 1.0)})
+                event_summaries.append({'region_id': region_id, 'priority': safe_int(definition.get('priority'), 0), 'status': 'predicted' if snapshot_value.get('valid') else str(snapshot_value.get('prediction_source', 'unreadable')), 'terminal': '', 'reset': '', 'valid': bool(snapshot_value.get('valid')), 'predicted': bool(snapshot_value.get('predicted')), 'confidence': safe_float(snapshot_value.get('confidence'), 0.0, 0.0, 1.0), 'prediction_source': str(snapshot_value.get('prediction_source', '')), 'prediction_age_ms': safe_float(snapshot_value.get('prediction_age_ms'), 0.0, 0.0)})
                 continue
             parsed = item['parsed']
             consensus = item['consensus']
@@ -27264,22 +27597,21 @@ class OCRMonitor:
             event['tracking_recovered'] = bool(item.get('recovered'))
             event['frame_id'] = frame_id
             event['priority'] = safe_int(definition.get('priority'), 0)
-            event['snapshot_reward'] = safe_float(comparison.get('reward'), 0.0, -1.0, 1.0)
-            event['snapshot_status'] = str(comparison.get('status', 'neutral'))
-            event['snapshot_winning_region_id'] = str(comparison.get('winning_region_id', ''))
+            event.update(comparison_fields)
             event['snapshot_value'] = dict(current_snapshot.get(region_id, {}))
             event['numeric_predicted'] = bool(event['snapshot_value'].get('predicted'))
             event['numeric_prediction_confidence'] = safe_float(event['snapshot_value'].get('confidence'), 0.0, 0.0, 1.0)
+            event['numeric_prediction_age_ms'] = safe_float(event['snapshot_value'].get('prediction_age_ms'), 0.0, 0.0)
             event['numeric_prediction_error'] = event['snapshot_value'].get('prediction_error')
             event['numeric_prediction_source'] = str(event['snapshot_value'].get('prediction_source', ''))
             if not terminal and event.get('terminal') in {'success', 'failure'}:
                 terminal = str(event.get('terminal'))
-            event_summaries.append({'region_id': region_id, 'priority': event['priority'], 'status': str(event.get('status', 'neutral')), 'terminal': str(event.get('terminal', '')), 'reset': str(event.get('reset', '')), 'valid': bool(current_snapshot.get(region_id, {}).get('valid')), 'predicted': bool(current_snapshot.get(region_id, {}).get('predicted')), 'confidence': safe_float(current_snapshot.get(region_id, {}).get('confidence'), 0.0, 0.0, 1.0), 'observed_valid': bool(item.get('observed_valid'))})
+            event_summaries.append({'region_id': region_id, 'priority': event['priority'], 'status': str(event.get('status', 'neutral')), 'terminal': str(event.get('terminal', '')), 'reset': str(event.get('reset', '')), 'valid': bool(current_snapshot.get(region_id, {}).get('valid')), 'predicted': bool(current_snapshot.get(region_id, {}).get('predicted')), 'confidence': safe_float(current_snapshot.get(region_id, {}).get('confidence'), 0.0, 0.0, 1.0), 'prediction_source': str(current_snapshot.get(region_id, {}).get('prediction_source', '')), 'prediction_age_ms': safe_float(current_snapshot.get(region_id, {}).get('prediction_age_ms'), 0.0, 0.0), 'observed_valid': bool(item.get('observed_valid'))})
             saved_at = time.monotonic()
             if saved_at - self.last_saved[region_id] >= 0.8:
                 self.last_saved[region_id] = saved_at
                 self.app.store.append_ocr_observation(game['id'], region_id, item['recognized'].get('text', ''), parsed, consensus.get('confidence', item['recognized'].get('confidence', 0.0)), consensus.get('stable_frames', 0), event)
-        snapshot_event = {'terminal': terminal, 'progress': safe_float(comparison.get('reward'), 0.0, -1.0, 1.0), 'numeric_progress': safe_float(comparison.get('reward'), 0.0, -1.0, 1.0), 'status': str(comparison.get('status', 'neutral')), 'winning_region_id': str(comparison.get('winning_region_id', '')), 'winning_priority': comparison.get('priority'), 'used_prediction': bool(comparison.get('used_prediction')), 'events': event_summaries, 'before_snapshot': previous_snapshot, 'now_snapshot': current_snapshot, 'frame_id': frame_id}
+        snapshot_event = {'terminal': terminal, 'progress': safe_float(comparison.get('reward'), 0.0, -1.0, 1.0), 'numeric_progress': safe_float(comparison.get('reward'), 0.0, -1.0, 1.0), 'raw_numeric_progress': safe_float(comparison.get('raw_reward'), 0.0, -1.0, 1.0), 'confidence_weight': safe_float(comparison.get('confidence_weight'), 0.0, 0.0, 1.0), 'status': str(comparison.get('status', 'neutral')), 'equality_state': str(comparison.get('equality_state', '')), 'winning_region_id': str(comparison.get('winning_region_id', '')), 'winning_priority': comparison.get('priority'), 'used_prediction': bool(comparison.get('used_prediction')), 'before_prediction': dict(comparison.get('before_prediction', {})), 'now_prediction': dict(comparison.get('now_prediction', {})), 'checked_regions': list(comparison.get('checked_regions', [])), 'reward_scale': comparison.get('reward_scale'), 'reward_scale_mode': comparison.get('reward_scale_mode'), 'events': event_summaries, 'before_snapshot': previous_snapshot, 'now_snapshot': current_snapshot, 'frame_id': frame_id}
         SEMANTIC_EVENT_HUB.publish_snapshot(game['id'], frame_id, snapshot_event)
 
     def _run(self):
@@ -27375,6 +27707,7 @@ def build_cli_parser():
     parser = StrictArgumentParser(prog='main.py', add_help=True)
     commands = parser.add_subparsers(dest='command')
     commands.add_parser('gui')
+    commands.add_parser('self-test')
     ai = commands.add_parser('ai-worker')
     ai.add_argument('base')
     ai.add_argument('address')
@@ -32346,9 +32679,60 @@ def dispatch_cli(arguments):
     if command == 'runtime-install-worker':
         request = _validated_worker_path(arguments.request, '运行库请求文件', True)
         return runtime_install_worker(str(request))
+    if command == 'self-test':
+        return run_strict_self_tests()
     if command != 'gui':
         raise CommandLineProtocolError('未知命令：' + command)
     return None
+
+def run_strict_self_tests():
+    failures = []
+
+    def check(name, condition):
+        if not condition:
+            failures.append(name)
+
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        (root / 'notes.txt').write_text('existing user file', encoding='utf-8')
+        resolved = resolve_user_data_directory(root)
+        check('ordinary_nonempty_folder_uses_dedicated_child', resolved == root / USER_DATA_SUBDIRECTORY)
+        check('ordinary_file_preserved', (root / 'notes.txt').read_text(encoding='utf-8') == 'existing user file')
+        child = root / USER_DATA_SUBDIRECTORY
+        check('dedicated_child_is_idempotent', resolve_user_data_directory(child) == child)
+    locks = {}
+    for family in RUNTIME_BACKEND_FAMILIES:
+        entries = runtime_backend_lock_entries(family)
+        check('lock_present_' + family, bool(entries))
+        check('lock_complete_' + family, runtime_backend_lock_is_complete(entries))
+        check('lock_matches_manifest_' + family, runtime_lock_matches_key(entries, runtime_family_lock_key(family)))
+        locks[family] = len(entries or [])
+    cpu_entries, cpu_checksum, cpu_key = embedded_runtime_lock()
+    check('cpu_embedded_lock_complete', runtime_lock_is_complete(cpu_entries))
+    check('cpu_embedded_lock_key', cpu_key == runtime_family_lock_key('windows-x64-cpu'))
+    check('cpu_embedded_lock_checksum', cpu_checksum == hashlib.sha256(canonical_bytes(cpu_entries)).hexdigest())
+    cuda_versions = {normalized_project_name(item.get('name')): str(item.get('version')) for item in runtime_backend_lock_entries('windows-x64-nvidia-cu130') or []}
+    check('cuda_sympy_compatible', cuda_versions.get('sympy') == '1.14.0')
+    auto_config = normalize_relation_config({'metric_delta_history': [90, 100, 110, 105, 95]})
+    auto_scale = _numeric_reward_scale(auto_config, (1000, 1100))
+    check('automatic_reward_scale_not_default_saturated', auto_scale > 10.0)
+    region = {'id': 'r1', 'priority': 0, 'enabled': True, 'goal_relation': NumericPreference.NOW_HIGHER.value, 'relation_config': {'reward_scale_mode': 'auto', 'initial_prediction_value': 0.0}}
+    before = {'r1': {'value': 100.0, 'valid': True, 'predicted': True, 'confidence': 0.4, 'prediction_source': 'test_before', 'prediction_age_ms': 50}}
+    now = {'r1': {'value': 110.0, 'valid': True, 'predicted': True, 'confidence': 0.8, 'prediction_source': 'test_now', 'prediction_age_ms': 80}}
+    compared = compare_numeric_snapshots_detailed([region], before, now)
+    check('confidence_weight', abs(compared.get('confidence_weight', 0.0) - 0.4) < 1e-9)
+    check('effective_reward_weighted', abs(compared.get('reward', 0.0) - compared.get('raw_reward', 0.0) * 0.4) < 1e-9)
+    check('prediction_metadata_recorded', compared.get('before_prediction_source') == 'test_before' and compared.get('now_prediction_source') == 'test_now')
+    equal = compare_numeric_snapshots_detailed([region], before, {'r1': dict(before['r1'])})
+    check('predicted_equal_state', equal.get('equality_state') == 'predicted_equal')
+    observed_equal = compare_numeric_snapshots_detailed([region], {'r1': {'value': 5.0, 'valid': True}}, {'r1': {'value': 5.0, 'valid': True}})
+    mixed_equal = compare_numeric_snapshots_detailed([region], {'r1': {'value': 5.0, 'valid': True}}, {'r1': {'value': 5.0, 'valid': True, 'predicted': True, 'confidence': 0.3}})
+    check('observed_equal_state', observed_equal.get('equality_state') == 'observed_equal')
+    check('mixed_equal_state', mixed_equal.get('equality_state') == 'mixed_equal')
+    result = {'status': 'passed' if not failures else 'failed', 'failures': failures, 'locks': locks, 'auto_scale': auto_scale, 'confidence_weight': compared.get('confidence_weight'), 'raw_reward': compared.get('raw_reward'), 'effective_reward': compared.get('reward')}
+    sys.stdout.write(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n')
+    return 0 if not failures else 1
+
 
 def run_gui():
     try:
