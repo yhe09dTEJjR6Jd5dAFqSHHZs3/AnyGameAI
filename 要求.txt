@@ -36,25 +36,6 @@ main.py中不得包含任何与程序实际运行无关的内容，包括但不�
 
 用户可对每个识别区域内的数字设置偏好。
 
-now越大越好；
-now越小越好；
-当now>before时：now-before越大越好；
-当now>before时：now-before越小越好；
-当now<before时：before-now越大越好；
-当now<before时：before-now越小越好；
-当now≠before时：|now-before|越大越好；
-当now≠before时：|now-before|越小越好；
-
-设用户输入的固定值为a：
-|now-a|越大越好；
-|now-a|越小越好；
-
-设另一个识别区域内的数字为b：
-now-b越大越好；
-now-b越小越好；
-|now-b|越大越好；
-|now-b|越小越好；
-
 按照列表中的排列顺序自上而下检查各数字识别区域：
 识别区域内的数字可识别→使用识别到的数字；
 识别区域内的数字不可识别→使用预测值；
