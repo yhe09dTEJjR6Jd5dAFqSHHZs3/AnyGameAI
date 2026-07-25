@@ -1,0 +1,16 @@
+实现通用游戏AI。
+
+Windows 11 x64，联网，已安装Python 3.12
+
+起初，只有AnyGameAI.py
+
+AnyGameAI.py中不得包含任何与实际运行无关的内容。
+
+所有东西尽量放在桌面上的AnyGameAI文件夹里。
+
+点击“人”按钮→人玩游戏；
+按ESC→结束；
+
+点击“AI”按钮→AI玩游戏；
+按ES
+C→结束；
