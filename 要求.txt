@@ -36,11 +36,8 @@ main.py中不得包含任何与程序实际运行无关的内容，包括但不�
 
 用户可对每个识别区域内的数字设置偏好。
 
-与0比较：
 now越大越好；
 now越小越好；
-
-与自身比较：
 当now>before时：now-before越大越好；
 当now>before时：now-before越小越好；
 当now<before时：before-now越大越好；
@@ -48,7 +45,7 @@ now越小越好；
 当now≠before时：|now-before|越大越好；
 当now≠before时：|now-before|越小越好；
 
-与固定值比较：
+与用户设置的固定值比较：
 |a-b|越大越好；
 |a-b|越小越好；
 
