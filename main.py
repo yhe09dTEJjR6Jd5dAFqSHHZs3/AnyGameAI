@@ -83,7 +83,7 @@ SEMANTIC_EMBEDDING_SIZE = 64
 SEMANTIC_VOCAB_LIMIT = 4096
 LATENT_WORLD_ENSEMBLE_SIZE = 5
 ADAPTER_RANK = 3
-SLEEP_PIPELINE_PHASES = ('integrity_and_leakage', 'perception_and_termination', 'offline_policy_value_risk', 'calibration_and_ood', 'grouped_isolated_acceptance')
+UPGRADE_PIPELINE_PHASES = ('integrity_and_leakage', 'perception_and_termination', 'offline_policy_value_risk', 'calibration_and_ood', 'grouped_isolated_acceptance')
 SEMANTIC_DETECTOR_SCHEMA_VERSION = 1
 REPLAY_BUNDLE_SCHEMA_VERSION = 1
 TASK_INDUCTION_SCHEMA_VERSION = 1
@@ -148,14 +148,14 @@ RECOVERABLE_ERRORS = (AppError, OSError, ValueError, RuntimeError, sqlite3.Error
 @dataclass(frozen=True)
 class CaptureOptions:
     mouse: bool = True
-    keyboard: bool = False
+    keyboard: bool = True
     gamepad: bool = False
     audio: bool = False
 
     @classmethod
     def from_profile(cls, profile=None):
         value = profile if isinstance(profile, dict) else {}
-        return cls(mouse=bool(value.get('mouse_enabled', True)), keyboard=bool(value.get('keyboard_enabled', False)), gamepad=bool(value.get('gamepad_enabled', False)), audio=bool(value.get('sound_enabled', False)))
+        return cls(mouse=bool(value.get('mouse_enabled', True)), keyboard=bool(value.get('keyboard_enabled', True)), gamepad=bool(value.get('gamepad_enabled', False)), audio=bool(value.get('sound_enabled', False)))
 
     def to_dict(self):
         return {'mouse': self.mouse, 'keyboard': self.keyboard, 'gamepad': self.gamepad, 'audio': self.audio}
@@ -178,6 +178,51 @@ class ApplicationContext:
     write_guard: object = None
     program_instance_lock: object = None
 APP_CONTEXT = ApplicationContext()
+
+class LazyRuntimeObject:
+    __slots__ = ('_factory', '_value', '_lock', '_name')
+
+    def __init__(self, factory, name):
+        object.__setattr__(self, '_factory', factory)
+        object.__setattr__(self, '_value', None)
+        object.__setattr__(self, '_lock', threading.RLock())
+        object.__setattr__(self, '_name', str(name))
+
+    def _resolve(self):
+        value = object.__getattribute__(self, '_value')
+        if value is not None:
+            return value
+        lock = object.__getattribute__(self, '_lock')
+        with lock:
+            value = object.__getattribute__(self, '_value')
+            if value is None:
+                value = object.__getattribute__(self, '_factory')()
+                object.__setattr__(self, '_value', value)
+            return value
+
+    def __getattr__(self, name):
+        return getattr(self._resolve(), name)
+
+    def __setattr__(self, name, value):
+        if name in self.__slots__:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._resolve(), name, value)
+
+    def __call__(self, *args, **kwargs):
+        return self._resolve()(*args, **kwargs)
+
+    def __bool__(self):
+        return bool(self._resolve())
+
+    def __repr__(self):
+        value = object.__getattribute__(self, '_value')
+        return repr(value) if value is not None else '<lazy ' + object.__getattribute__(self, '_name') + '>'
+
+_PAUSE_EVENT = threading.Event()
+
+def _pause(duration):
+    _PAUSE_EVENT.wait(max(0.0, float(duration)))
 
 @dataclass(slots=True)
 class RuntimeRepository:
@@ -275,7 +320,7 @@ def interruptible_wait(stop_event, seconds):
     duration = max(0.0, float(seconds))
     if stop_event is None:
         if duration:
-            time.sleep(duration)
+            _pause(duration)
         return False
     return bool(stop_event.wait(duration))
 
@@ -1070,7 +1115,7 @@ class WindowsGpuTelemetry:
         with self.lock:
             self.cache[key] = (now, dict(result))
         return result
-WINDOWS_GPU_TELEMETRY = WindowsGpuTelemetry()
+WINDOWS_GPU_TELEMETRY = LazyRuntimeObject(WindowsGpuTelemetry, 'WindowsGpuTelemetry')
 
 def resource_integer(value, default, minimum, maximum):
     try:
@@ -1370,9 +1415,9 @@ class ResourceGovernor:
 
     def _base_sample_once_strict(self):
         cpu, process_cpu = self._cpu_values()
-        available_ram, process_rss = self._memory_values()
+        memory = _strict_memory_values()
         backend = self._manifest_backend()
-        gpu_utilization, free_vram, dedicated_vram_used, shared_vram_used = self._gpu_values(backend)
+        gpu = WINDOWS_GPU_TELEMETRY.sample(backend, _resource_worker_pid())
         queue_ratio, queue_oldest = self._queue_values()
         perception_p95 = self._series_p95('end_to_end_perception_ms')
         decision_p95 = self._series_p95('end_to_end_decision_ms')
@@ -1391,78 +1436,126 @@ class ResourceGovernor:
             self_test = self.accelerator_self_tests.get(str(backend), {})
             self_test_passed = bool(self_test.get('passed') and safe_float(self_test.get('monotonic'), 0.0) >= safe_float(last_fault, 0.0))
             backend_blacklisted = str(backend) in self.backend_blacklist
-            total_vram = self.benchmark_profile.get('total_vram')
+            total_vram = gpu.get('total_vram', self.benchmark_profile.get('total_vram'))
             tested_peak_vram = self.benchmark_profile.get('tested_peak_vram')
-        snapshot = HardwareSnapshot(cpu_percent=round(cpu, 3), process_cpu_percent=round(process_cpu, 3), available_ram=int(available_ram), process_rss=int(process_rss), gpu_backend=str(backend), gpu_utilization=gpu_utilization, free_vram=free_vram, capture_p95_ms=round(self._series_p95('capture_latency_ms'), 3), queue_ratio=round(queue_ratio, 5), queue_oldest_ms=round(queue_oldest, 3), disk_write_p95_ms=round(self._disk_p95(), 3), end_to_end_p95_ms=round(end_to_end_p95, 3), end_to_end_p99_ms=round(end_to_end_p99, 3), dedicated_vram_used=dedicated_vram_used, shared_vram_used=shared_vram_used, gpu_queue_wait_p95_ms=round(self._series_p95('gpu_queue_wait_ms'), 3), cpu_to_gpu_copy_p95_ms=round(self._series_p95('cpu_to_gpu_copy_ms'), 3), device_removed_count=counts['removed'], device_reset_count=counts['reset'], gpu_oom_count=counts['oom'], device_removed_delta=deltas['removed'], device_reset_delta=deltas['reset'], gpu_oom_delta=deltas['oom'], last_accelerator_fault_monotonic=last_fault, accelerator_fault_age_seconds=fault_age, accelerator_self_test_passed=self_test_passed, backend_blacklisted=backend_blacklisted, available_ram_known=int(available_ram) > 0, free_vram_known=free_vram is not None, total_vram=None if total_vram is None else safe_int(total_vram, 0, 0), tested_peak_vram=None if tested_peak_vram is None else safe_int(tested_peak_vram, 0, 0))
+            probe_bytes = self.benchmark_profile.get('probe_bytes')
+            probe_passed = bool(self.benchmark_profile.get('probe_passed', self.benchmark_profile.get('vram_test_passed', False)))
+        provisional = HardwareSnapshot(cpu_percent=round(cpu, 3), process_cpu_percent=round(process_cpu, 3), available_ram=int(memory['available_ram']), process_rss=int(memory['process_rss']), gpu_backend=str(backend), gpu_utilization=gpu.get('gpu_utilization'), free_vram=gpu.get('free_vram'), capture_p95_ms=round(self._series_p95('capture_latency_ms'), 3), queue_ratio=round(queue_ratio, 5), queue_oldest_ms=round(queue_oldest, 3), disk_write_p95_ms=round(self._disk_p95(), 3), end_to_end_p95_ms=round(end_to_end_p95, 3), end_to_end_p99_ms=round(end_to_end_p99, 3), dedicated_vram_used=gpu.get('dedicated_vram_used', gpu.get('local_current_usage')), shared_vram_used=gpu.get('shared_vram_used', gpu.get('nonlocal_current_usage')), gpu_queue_wait_p95_ms=round(self._series_p95('gpu_queue_wait_ms'), 3), cpu_to_gpu_copy_p95_ms=round(self._series_p95('cpu_to_gpu_copy_ms'), 3), device_removed_count=counts['removed'], device_reset_count=counts['reset'], gpu_oom_count=counts['oom'], device_removed_delta=deltas['removed'], device_reset_delta=deltas['reset'], gpu_oom_delta=deltas['oom'], last_accelerator_fault_monotonic=last_fault, accelerator_fault_age_seconds=fault_age, accelerator_self_test_passed=self_test_passed, backend_blacklisted=backend_blacklisted, available_ram_known=int(memory['available_ram']) > 0, free_vram_known=gpu.get('free_vram') is not None, total_vram=None if total_vram is None else safe_int(total_vram, 0, 0), tested_peak_vram=None if tested_peak_vram is None else safe_int(tested_peak_vram, 0, 0), total_ram=int(memory['total_ram']), total_commit=int(memory['total_commit']), available_commit=int(memory['available_commit']), process_private_bytes=int(memory['process_private_bytes']), commit_pressure=round(float(memory['commit_pressure']), 6), pagefile_pressure=round(float(memory['pagefile_pressure']), 6), vram_budget=gpu.get('local_budget'), vram_current_usage=gpu.get('local_current_usage'), vram_available_for_reservation=gpu.get('local_available_for_reservation'), vram_current_reservation=gpu.get('local_current_reservation'), shared_vram_budget=gpu.get('nonlocal_budget'), shared_vram_current_usage=gpu.get('nonlocal_current_usage'), process_dedicated_vram=gpu.get('process_dedicated_vram'), process_shared_vram=gpu.get('process_shared_vram'), telemetry_source=str(gpu.get('source', '')), probe_bytes=None if probe_bytes is None else safe_int(probe_bytes, 0, 0), probe_passed=probe_passed)
+        limits = _effective_resource_thresholds(provisional)
+        values = {name: getattr(provisional, name) for name in provisional.__dataclass_fields__}
+        values.update({'effective_ram_red_bytes': limits['ram_red'], 'effective_ram_yellow_bytes': limits['ram_yellow'], 'effective_vram_red_bytes': limits['vram_red'], 'effective_vram_yellow_bytes': limits['vram_yellow']})
+        snapshot = HardwareSnapshot(**values)
         with self.lock:
             self.history.append(snapshot)
             self._last_snapshot = snapshot
             self._update_state_locked(now)
         if any(deltas.values()) or backend_blacklisted:
             self._persist_backend_fault_state()
-        store = APP_CONTEXT.store
-        if store is not None and getattr(store, 'base', None) and (snapshot.end_to_end_p95_ms > 0):
-            update_hardware_profile_health(store.base, snapshot.end_to_end_p95_ms)
         return snapshot
 
     def sample_once(self):
-        implementation = globals().get('_strict_governor_sample_once')
-        if implementation is None:
-            return self._base_sample_once_strict()
-        return implementation(self)
+        return self._base_sample_once_strict()
 
     def _base_update_state_locked_strict(self, now):
         recent = list(self.history)
+        if not recent:
+            return
         current = recent[-1]
-        last_five = recent[-5:]
-        queue_yellow = len(last_five) >= 5 and all((item.queue_ratio > 0.7 for item in last_five))
-        queue_red = len(recent) >= 2 and all((item.queue_ratio > 0.9 for item in recent[-2:]))
-        thresholds = RUNTIME_THRESHOLDS
+        previous_snapshot = recent[-2] if len(recent) >= 2 else None
+        old_state = self.state
+        old_plans = self.plans
+        limits = _effective_resource_thresholds(current)
+        commit_pressure = safe_float(getattr(current, 'commit_pressure', 0.0), 0.0)
+        available_commit = safe_int(getattr(current, 'available_commit', 0), 0, 0)
+        pagefile_pressure = safe_float(getattr(current, 'pagefile_pressure', 0.0), 0.0)
+        shared_vram_current_usage = getattr(current, 'shared_vram_current_usage', getattr(current, 'shared_vram_used', None))
+        shared_vram_budget = getattr(current, 'shared_vram_budget', None)
         accelerator = 'nvidia' in current.gpu_backend.casefold() or 'directml' in current.gpu_backend.casefold()
         new_fault = bool(current.device_removed_delta or current.device_reset_delta or current.gpu_oom_delta)
-        fault_age = current.accelerator_fault_age_seconds
-        fault_red = bool(accelerator and (current.backend_blacklisted or new_fault or (fault_age is not None and fault_age <= 30.0 and (not current.accelerator_self_test_passed))))
-        fault_yellow = bool(accelerator and (not fault_red) and (fault_age is not None) and (not current.accelerator_self_test_passed))
-        severe = bool(fault_red or queue_red or (current.available_ram_known and current.available_ram < thresholds.ram_red_bytes) or (current.capture_p95_ms > thresholds.capture_red_ms) or (current.end_to_end_p95_ms > thresholds.end_to_end_red_p95_ms) or (current.disk_write_p95_ms > 180.0) or (current.cpu_percent > 97.0) or (current.gpu_utilization is not None and current.gpu_utilization > 98.0) or (current.free_vram_known and current.free_vram < thresholds.free_vram_red_bytes) or (current.gpu_queue_wait_p95_ms > 40.0) or (current.cpu_to_gpu_copy_p95_ms > 30.0))
-        warning = bool(severe or fault_yellow or queue_yellow or (current.capture_p95_ms > thresholds.capture_yellow_ms) or (current.end_to_end_p95_ms > thresholds.end_to_end_yellow_p95_ms) or (current.available_ram_known and current.available_ram < thresholds.ram_yellow_bytes) or (current.disk_write_p95_ms > 80.0) or (current.cpu_percent > 88.0) or (current.process_cpu_percent > 85.0) or (current.gpu_utilization is not None and current.gpu_utilization > 94.0) or (current.free_vram_known and current.free_vram < thresholds.free_vram_yellow_bytes) or (current.gpu_queue_wait_p95_ms > 18.0) or (current.cpu_to_gpu_copy_p95_ms > 12.0) or (current.shared_vram_used is not None and current.shared_vram_used > 2 * 1024 ** 3))
-        desired = ResourceState.RED if severe else ResourceState.YELLOW if warning else ResourceState.NORMAL
-        previous_state = self.state
-        if fault_red:
-            self.state = ResourceState.RED
-            self.recovery_since = None
-        elif previous_state is ResourceState.RED and fault_age is not None and (fault_age > 30.0) and (not current.accelerator_self_test_passed):
-            self.state = ResourceState.YELLOW
-            self.recovery_since = now
-        elif current.accelerator_self_test_passed and (not severe):
-            self.state = ResourceState.YELLOW if warning else ResourceState.NORMAL
-            self.recovery_since = None
+        fault_red = bool(accelerator and (current.backend_blacklisted or new_fault or (current.accelerator_fault_age_seconds is not None and current.accelerator_fault_age_seconds <= 30.0 and (not current.accelerator_self_test_passed))))
+        rapid = False
+        if previous_snapshot is not None:
+            ram_drop = previous_snapshot.available_ram - current.available_ram
+            vram_drop = 0 if previous_snapshot.free_vram is None or current.free_vram is None else previous_snapshot.free_vram - current.free_vram
+            rapid = ram_drop >= 512 * 1024 * 1024 or vram_drop >= 256 * 1024 * 1024
+        queue_red = len(recent) >= 2 and all((item.queue_ratio > 0.9 for item in recent[-2:]))
+        severe = bool(fault_red or queue_red or rapid or (current.available_ram_known and current.available_ram < limits['ram_red']) or (current.free_vram_known and current.free_vram < limits['vram_red']) or (commit_pressure >= 0.92) or (available_commit and available_commit < limits['ram_red']) or (current.capture_p95_ms > RUNTIME_THRESHOLDS.capture_red_ms) or (current.end_to_end_p95_ms > RUNTIME_THRESHOLDS.end_to_end_red_p95_ms) or (current.disk_write_p95_ms > 180.0) or (current.cpu_percent > 97.0) or (current.gpu_utilization is not None and current.gpu_utilization > 98.0) or (current.gpu_queue_wait_p95_ms > 40.0) or (current.cpu_to_gpu_copy_p95_ms > 30.0))
+        warning = bool(severe or current.queue_ratio > 0.7 or (current.available_ram_known and current.available_ram < limits['ram_yellow']) or (current.free_vram_known and current.free_vram < limits['vram_yellow']) or (commit_pressure >= 0.82) or (pagefile_pressure >= 0.7) or (current.capture_p95_ms > RUNTIME_THRESHOLDS.capture_yellow_ms) or (current.end_to_end_p95_ms > RUNTIME_THRESHOLDS.end_to_end_yellow_p95_ms) or (current.disk_write_p95_ms > 80.0) or (current.cpu_percent > 88.0) or (current.process_cpu_percent > 85.0) or (current.gpu_utilization is not None and current.gpu_utilization > 94.0) or (current.gpu_queue_wait_p95_ms > 18.0) or (current.cpu_to_gpu_copy_p95_ms > 12.0) or (shared_vram_current_usage is not None and shared_vram_budget is not None and (shared_vram_current_usage > shared_vram_budget * 0.8)))
+        self._strict_red_streak = safe_int(getattr(self, '_strict_red_streak', 0), 0) + 1 if severe else 0
+        self._strict_yellow_streak = safe_int(getattr(self, '_strict_yellow_streak', 0), 0) + 1 if warning else 0
+        immediate_red = fault_red or rapid
+        if immediate_red or self._strict_red_streak >= 3:
+            desired = ResourceState.RED
+        elif self._strict_yellow_streak >= 5:
+            desired = ResourceState.YELLOW
         else:
-            rank = {ResourceState.NORMAL: 0, ResourceState.YELLOW: 1, ResourceState.RED: 2}
-            if rank[desired] > rank[self.state]:
+            desired = ResourceState.NORMAL
+        rank = {ResourceState.NORMAL: 0, ResourceState.YELLOW: 1, ResourceState.RED: 2}
+        if rank[desired] > rank[self.state]:
+            self.state = desired
+            self.recovery_since = None
+        elif rank[desired] < rank[self.state]:
+            if self.recovery_since is None:
+                self.recovery_since = now
+            elif now - self.recovery_since >= 30.0:
                 self.state = desired
                 self.recovery_since = None
-            elif rank[desired] < rank[self.state]:
-                if self.recovery_since is None:
-                    self.recovery_since = now
-                elif now - self.recovery_since >= 30.0:
-                    self.state = desired
-                    self.recovery_since = None
-            else:
-                self.recovery_since = None
-        self.plans = self._plans_for_state(self.state, current.gpu_backend)
+        else:
+            self.recovery_since = None
+        if self.state is ResourceState.RED:
+            if getattr(self, 'red_since', None) is None:
+                self.red_since = now
+        else:
+            self.red_since = None
+        reasons = []
+        if fault_red:
+            reasons.append('accelerator_fault')
+        if rapid:
+            reasons.append('rapid_resource_deterioration')
+        if current.available_ram_known and current.available_ram < limits['ram_red']:
+            reasons.append('available_ram')
+        if current.free_vram_known and current.free_vram < limits['vram_red']:
+            reasons.append('vram_budget_headroom')
+        if commit_pressure >= 0.92:
+            reasons.append('commit_charge')
+        if queue_red:
+            reasons.append('queue_pressure')
+        if not reasons:
+            reasons.append('resource_state_' + self.state.value.casefold())
+        self.plan_reason = '+'.join(reasons)
+        candidate_plans = self._plans_for_state(self.state, current.gpu_backend)
+        old_signature = (old_plans.ai.backend, old_plans.ai.model_tier)
+        new_signature = (candidate_plans.ai.backend, candidate_plans.ai.model_tier)
+        recent_switches = (value for value in getattr(self, '_strict_switch_times', deque()) if now - value <= 900.0)
+        self._strict_switch_times = deque(recent_switches, maxlen=16)
+        last_switch = safe_float(getattr(self, '_strict_last_switch', 0.0), 0.0)
+        if new_signature != old_signature and self.state is not ResourceState.RED and (now - last_switch < 60.0):
+            candidate_plans = old_plans
+            new_signature = old_signature
+            self.plan_reason += '+switch_rate_limited'
+        elif new_signature != old_signature:
+            self._strict_last_switch = now
+            self._strict_switch_times.append(now)
+        if len(self._strict_switch_times) >= 5:
+            self._fault_force_cpu = True
+            self.state = ResourceState.RED
+            self.plan_reason = 'oscillation_cpu_safe_mode'
+            candidate_plans = self._plans_for_state(ResourceState.RED, 'windows-x64-cpu')
+            new_signature = (candidate_plans.ai.backend, candidate_plans.ai.model_tier)
+        self.plans = candidate_plans
         self.plan = self.plans.ai
-        if self.state is ResourceState.RED and current.available_ram_known and (current.available_ram < thresholds.ram_red_bytes):
+        plan_digest = hashlib.sha256(canonical_bytes(self.plans.to_dict())).hexdigest()
+        if plan_digest != getattr(self, '_strict_plan_digest', ''):
+            self.plan_version = safe_int(getattr(self, 'plan_version', 0), 0) + 1
+            self._strict_plan_digest = plan_digest
+            RUNTIME_EVENT_LOGGER.emit('runtime_plan_changed', plan_version=self.plan_version, plan_reason=self.plan_reason, old_state=old_state.value, new_state=self.state.value, requested_backend=self.plan.backend, requested_model_tier=self.plan.model_tier, thresholds=limits, snapshot={name: getattr(current, name) for name in current.__dataclass_fields__})
+        if self.state is ResourceState.RED and current.available_ram_known and (current.available_ram < limits['ram_red']):
             FEATURE_ENGINE.clear_frames()
-            cache = globals().get('POLICY_TRAINING_CACHE')
-            if cache is not None:
-                cache.clear()
-            collect_garbage('resource_red', 30.0, previous_state is not ResourceState.RED)
+            POLICY_TRAINING_CACHE.clear()
+            collect_garbage('resource_red_dynamic', 30.0, old_state is not ResourceState.RED)
 
     def _update_state_locked(self, now):
-        implementation = globals().get('_strict_governor_update_state')
-        if implementation is None:
-            return self._base_update_state_locked_strict(now)
-        return implementation(self, now)
+        return self._base_update_state_locked_strict(now)
 
     def plan_envelope(self):
         return _strict_plan_envelope(self)
@@ -1629,7 +1722,17 @@ class ResourceGovernor:
     def sample_production_allowed(self):
         snapshot = self.current_snapshot()
         return snapshot.queue_ratio <= 0.9 and self.current_plan(ModeId.UPGRADE.value).training_batch_size > 0
-RESOURCE_GOVERNOR = ResourceGovernor(30)
+def _create_resource_governor():
+    value = ResourceGovernor(30)
+    value.plan_version = 1
+    value.plan_reason = 'startup'
+    value.worker_ack_version = 0
+    value.applied_backend = ''
+    value.applied_model_tier = 'Tiny'
+    value.red_since = None
+    value._strict_plan_digest = hashlib.sha256(canonical_bytes(value.plans.to_dict())).hexdigest()
+    return value
+RESOURCE_GOVERNOR = LazyRuntimeObject(_create_resource_governor, 'ResourceGovernor')
 _TORCH_INTEROP_CONFIGURED = False
 
 def configure_torch_runtime(torch_module, plan=None):
@@ -3516,7 +3619,7 @@ def near_perceptual_hash_pairs(values, max_distance=4, stop_check=None):
         for segment, (shift, mask) in enumerate(masks):
             buckets[segment, number >> shift & mask].append(value)
         if stop_check is not None and index % 256 == 0 and stop_check():
-            raise InputStopped('睡眠已停止')
+            raise InputStopped('升级已停止')
     return sorted(pairs)
 
 def batch_feature_distances(query, items, chunk_size=128):
@@ -3625,7 +3728,7 @@ class PrototypeConflictTracker:
         values = [item for item in items if isinstance(item, dict) and item.get('id')]
         for index, proto in enumerate(values):
             if index % 16 == 0 and self.stop_check():
-                raise InputStopped('睡眠已停止')
+                raise InputStopped('升级已停止')
             candidate_ids = self._candidate_ids(proto)
             candidates = [self.prototypes[value] for value in candidate_ids if value in self.prototypes and str(self.prototypes[value].get('cluster_id')) != str(proto.get('cluster_id'))]
             if candidates:
@@ -3698,7 +3801,7 @@ def bounded_decompress(data, maximum):
 def canonical_bytes(data):
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
 
-def deterministic_sleep_seed(game_id, samples):
+def deterministic_upgrade_seed(game_id, samples):
     checksums = []
     for item in samples or []:
         checksum = str(item.get('checksum', '')).strip() if isinstance(item, dict) else ''
@@ -4944,7 +5047,7 @@ class LegacyOCRSemanticDetector(ObjectDetector):
             except (TypeError, ValueError, OverflowError):
                 continue
         return tuple(sorted(slots, key=lambda slot: (slot.object_class, slot.instance, slot.text.casefold(), slot.bbox)))
-LEGACY_OCR_SEMANTIC_DETECTOR = LegacyOCRSemanticDetector()
+LEGACY_OCR_SEMANTIC_DETECTOR = LazyRuntimeObject(LegacyOCRSemanticDetector, 'LegacyOCRSemanticDetector')
 
 def semantic_target_at_point(targets, point, maximum_distance=0.12):
     if not isinstance(point, (list, tuple)) or len(point) < 2:
@@ -5194,7 +5297,12 @@ def action_family_key(action):
     if kind == 'gamepad_button':
         return 'gamepad_button|' + str(item.get('button', ''))
     if kind == 'gamepad_axis':
-        return 'gamepad_axis|' + str(item.get('axis', ''))
+        def axis_bucket(value):
+            number = safe_float(value, 0.0, -1.0, 1.0)
+            if abs(number) < 0.15:
+                return '0.00'
+            return format(round(number * 4.0) / 4.0, '.2f')
+        return 'gamepad_axis|' + str(item.get('axis', '')) + '|' + axis_bucket(item.get('x', 0.0)) + '|' + axis_bucket(item.get('y', 0.0))
     return kind
 
 def _main_direction(path):
@@ -9793,19 +9901,19 @@ def review_process_send(connection, kind, payload, stage=None):
 def review_process_main(connection, stop_event, payload):
     try:
         if safe_int(payload.get('protocol_version'), 0) != REVIEW_PROCESS_PROTOCOL_VERSION or payload.get('stage') != WorkerStage.STARTING.value:
-            raise RuntimeError('睡眠子进程协议版本或启动阶段无效')
+            raise RuntimeError('升级子进程协议版本或启动阶段无效')
         if payload.get('base'):
             install_write_boundary_guard(payload['base'])
         _disable_network_access()
         offline_evidence = _verify_offline_network_block()
-        review_process_send(connection, WorkerMessageKind.STATUS, '睡眠子进程已启动', WorkerStage.STARTING)
+        review_process_send(connection, WorkerMessageKind.STATUS, '升级子进程已启动', WorkerStage.STARTING)
         host = ReviewProcessHost(validate_packet('review_request', payload), stop_event, connection)
         result = host.review_controller.run_offline()
-        result.details.update({'offline_network_evidence': offline_evidence, 'offline_network_blocked': bool(offline_evidence.get('blocked')), 'sleep_seed_evidence': dict(getattr(host, 'sleep_seed_evidence', {}))})
+        result.details.update({'offline_network_evidence': offline_evidence, 'offline_network_blocked': bool(offline_evidence.get('blocked')), 'upgrade_seed_evidence': dict(getattr(host, 'upgrade_seed_evidence', {}))})
         review_process_send(connection, WorkerMessageKind.RESULT, {'status': result.status, 'summary': result.summary, 'details': result.details, 'models': host.store.saved})
     except InputStopped as error:
         saved = getattr(getattr(locals().get('host', None), 'store', None), 'saved', [])
-        review_process_send(connection, WorkerMessageKind.RESULT, {'status': ModeResultStatus.STOPPED.value, 'summary': '睡眠已停止', 'details': {'reason': str(error)}, 'models': saved})
+        review_process_send(connection, WorkerMessageKind.RESULT, {'status': ModeResultStatus.STOPPED.value, 'summary': '升级已停止', 'details': {'reason': str(error)}, 'models': saved})
     except Exception:
         saved = getattr(getattr(locals().get('host', None), 'store', None), 'saved', [])
         review_process_send(connection, WorkerMessageKind.ERROR, {'traceback': traceback.format_exc(), 'models': saved})
@@ -9835,10 +9943,10 @@ class ReviewProcessWorker:
             if self.connection.poll(max(0.0, float(timeout))):
                 packet = self.connection.recv()
                 if not isinstance(packet, dict) or safe_int(packet.get('protocol_version'), 0) != REVIEW_PROCESS_PROTOCOL_VERSION or packet.get('stage') not in {stage.value for stage in WorkerStage if stage is not WorkerStage.READY}:
-                    return ('error', {'traceback': '睡眠子进程返回了无效协议包', 'packet_type': type(packet).__name__})
+                    return ('error', {'traceback': '升级子进程返回了无效协议包', 'packet_type': type(packet).__name__})
                 return (str(packet.get('kind', WorkerMessageKind.ERROR.value)), packet.get('payload'))
         except (EOFError, OSError) as error:
-            return ('error', {'traceback': '睡眠子进程连接提前关闭：' + str(error), 'exitcode': self.process.exitcode, 'stage': WorkerStage.FAILED.value})
+            return ('error', {'traceback': '升级子进程连接提前关闭：' + str(error), 'exitcode': self.process.exitcode, 'stage': WorkerStage.FAILED.value})
         return None
 
     def alive(self):
@@ -10018,7 +10126,7 @@ class ReviewRunner(PhaseRunner):
     def rollback(self, error, prepared):
         super().rollback(error, prepared)
         if not self.offline and self.context.store is not None:
-            best_effort_cleanup('SLEEP_ROLLBACK_RESUME_WRITES', lambda: self.context.store.resume_sample_writes())
+            best_effort_cleanup('UPGRADE_ROLLBACK_RESUME_WRITES', lambda: self.context.store.resume_sample_writes())
 
 class TrainingRunner(PhaseRunner):
 
@@ -10360,7 +10468,7 @@ class LearningExecution:
         self.step_id = 0
         self.task_id = 'default'
         self.capability = CapabilityProfile({})
-        self.capture_options = CaptureOptions()
+        self.capture_options = CaptureOptions(mouse=True, keyboard=True, gamepad=False, audio=False)
         self.keyboard_enabled = False
         self.semantic_keymap = {}
         self.semantic_keyboard_events = deque(maxlen=64)
@@ -10374,6 +10482,15 @@ class LearningExecution:
         self.audio_monitor = None
         self.corrective_workflow = None
         self.pending_correction = None
+        self.pending_keys = {}
+        self.pending_gamepad_buttons = {}
+        self.last_gamepad_state = {}
+        self.last_gamepad_axis_sample = {}
+        self.pressed_keys = set()
+        self.ignored_system_keys = set()
+        self.discovered_families = set()
+        self.discovered_keymap = {}
+        self.profile = {}
 
     def preflight(self):
         self.game = self.phase.get('game') or self.host.require_game()
@@ -10382,13 +10499,21 @@ class LearningExecution:
         profile = self.host.store.load_game_profile(self.game['id'])
         self.task_id = normalized_identifier(profile.get('default_task_id'), 'default', 96)
         selected_options = getattr(self.host, 'capture_options', None)
-        self.capture_options = selected_options if isinstance(selected_options, CaptureOptions) else CaptureOptions.from_profile(profile)
+        selected_options = selected_options if isinstance(selected_options, CaptureOptions) else CaptureOptions.from_profile(profile)
+        self.capture_options = CaptureOptions(mouse=selected_options.mouse, keyboard=True, gamepad=selected_options.gamepad, audio=selected_options.audio)
         profile = self.capture_options.apply_profile(profile)
-        if self.capture_options.keyboard and (not profile.get('semantic_keymap')):
-            profile['semantic_keymap'] = {'move_left': '65', 'move_right': '68', 'move_up': '87', 'move_down': '83', 'jump': '32', 'interact': '69', 'open_menu': '9', 'pause': '80'}
+        profile['keyboard_enabled'] = True
+        profile['capability_level'] = max(2, safe_int(profile.get('capability_level'), 0, 0, 4))
+        permissions = profile.get('modality_permissions', {}) if isinstance(profile.get('modality_permissions'), dict) else {}
+        permissions['keyboard'] = {'enabled': True, 'data_mask': 'semantic_only', 'model_version': 'semantic_keyboard_v2', 'safety_permission': True}
+        profile['modality_permissions'] = permissions
+        human_required = [value for value in profile.get('required_input_modalities', []) if str(value).casefold() not in {'gamepad', 'continuous_control'}]
+        profile['required_input_modalities'] = list(dict.fromkeys(human_required + ['mouse', 'keyboard', 'vision']))
+        self.profile = dict(profile)
         self.capability = CapabilityProfile(profile)
-        self.keyboard_enabled = bool(self.capture_options.keyboard and self.capability.authorize('keyboard'))
+        self.keyboard_enabled = True
         self.semantic_keymap = dict(self.capability.semantic_keymap)
+        self.discovered_keymap = dict(self.semantic_keymap)
         self.session_id = 'learn|' + uuid.uuid4().hex
         self.host.mode_session_id = self.session_id
         self.target = dict(self.phase.get('window') or self.host.require_window(False))
@@ -10410,7 +10535,12 @@ class LearningExecution:
         self.keyboard = session.start_keyboard()
         self.monitor = session.start_mouse() if self.capture_options.mouse else None
         self.mouse_drop_baseline = self.monitor.snapshot()['dropped_events'] if self.monitor is not None else 0
-        self.gamepad_monitor = session.start_gamepad() if self.capture_options.gamepad else None
+        self.gamepad_monitor = None
+        try:
+            self.gamepad_monitor = session.start_gamepad()
+        except DeviceUnavailable:
+            self.gamepad_monitor = None
+        self.capture_options = CaptureOptions(mouse=self.capture_options.mouse, keyboard=True, gamepad=self.gamepad_monitor is not None, audio=self.capture_options.audio)
         self.audio_monitor = session.start_audio() if self.capture_options.audio else None
         self.host.lifecycle.mark_running()
         self.active = {}
@@ -10424,47 +10554,86 @@ class LearningExecution:
         self.last_update = 0.0
         self.sampling_delay = 0.012
 
+    def _system_keyboard_event(self, vk, down):
+        value = safe_int(vk, -1, 0, 65535)
+        modifiers = set(self.pressed_keys)
+        if down:
+            modifiers.add(value)
+        else:
+            modifiers.discard(value)
+        if value in {91, 92} or 91 in modifiers or 92 in modifiers:
+            return True
+        alt = 18 in modifiers or 164 in modifiers or 165 in modifiers
+        control = 17 in modifiers or 162 in modifiers or 163 in modifiers
+        if alt and value in {9, 27, 32, 115}:
+            return True
+        if control and value == 27:
+            return True
+        if alt and control and value == 46:
+            return True
+        return value in {3, 27, 44, 91, 92, 93}
+
+    def _semantic_key_for_vk(self, vk):
+        token = str(safe_int(vk, 0, 0, 65535))
+        inverse = {str(value).casefold(): key for key, value in self.discovered_keymap.items()}
+        semantic = inverse.get(token.casefold())
+        if semantic:
+            family = 'key|' + semantic
+            modeled = family in self.profile.get('allowed_families', [])
+            self.discovered_families.add(family)
+            return (semantic, modeled)
+        semantic = 'vk_' + token
+        self.discovered_keymap[semantic] = token
+        self.discovered_families.add('key|' + semantic)
+        return (semantic, False)
+
     def drain_keyboard_events(self):
         events = [event for event in self.keyboard.drain() if event.get('kind') == 'other']
         if not events:
-            return events
-        self.keyboard_count += len(events)
-        if self.keyboard_enabled:
-            inverse = {str(value).casefold(): key for key, value in self.semantic_keymap.items()}
-            for event in events:
-                vk = safe_int(event.get('vk'), -1, 0, 65535)
-                semantic = inverse.get(str(vk).casefold(), '')
-                stamp = safe_float(event.get('time'), time.monotonic())
-                if not semantic:
-                    self.keyboard_discarded += 1
-                    continue
-                self.semantic_keyboard_events.append({'semantic_action': semantic, 'vk': vk, 'down': bool(event.get('down')), 'time': stamp, 'model_version': 'semantic_keyboard_v2', 'execution_support': 'SendInput_scancode_with_lease'})
-                if event.get('down'):
-                    if vk not in self.pending_keys:
-                        frame = self.capture_safe(stamp)
-                        if frame is not None:
-                            self.pending_keys[vk] = {'frame': frame, 'start': stamp, 'semantic': semantic}
-                else:
-                    pending = self.pending_keys.pop(vk, None)
-                    if pending is not None:
-                        duration = max(0.03, min(3.0, stamp - safe_float(pending.get('start'), stamp)))
-                        self.save(pending.get('frame'), {'kind': 'key', 'vk': vk, 'semantic_key': pending.get('semantic', semantic), 'duration': duration}, 'learn_keyboard', 1.2)
             return []
-        down_events = [event for event in events if event.get('down')]
-        if not down_events:
-            return events
-        self.strict_violation = True
-        self.invalid_reason = 'non_escape_keyboard_input'
-        self.keyboard_state['generation'] += 1
-        self.keyboard_state['last_time'] = safe_float(down_events[0].get('time'), time.monotonic())
-        if not self.invalid_marked:
-            self.host.store.invalidate_learning_session(self.game['id'], self.session_id, self.invalid_reason)
-            self.invalid_marked = True
-        self.isolation.signal('keyboard', self.keyboard_state['last_time'])
-        self.host.request_mode_stop('stopped', '学习检测到未授权的非ESC键盘输入，整段session无效')
-        self.host.api.block_input()
-        self.host.api.release_all_buttons()
-        return events
+        self.keyboard_count += len(events)
+        for event in events:
+            vk = safe_int(event.get('vk'), -1, 0, 65535)
+            down = bool(event.get('down'))
+            stamp = safe_float(event.get('time'), time.monotonic())
+            if vk in self.ignored_system_keys:
+                if not down:
+                    self.ignored_system_keys.discard(vk)
+                    self.pressed_keys.discard(vk)
+                    self.pending_keys.pop(vk, None)
+                continue
+            if self._system_keyboard_event(vk, down):
+                if down:
+                    modifier_keys = {16, 160, 161, 17, 162, 163, 18, 164, 165, 91, 92}
+                    blocked = {vk} | (self.pressed_keys & modifier_keys)
+                    self.ignored_system_keys.update(blocked)
+                    for blocked_vk in blocked:
+                        self.pending_keys.pop(blocked_vk, None)
+                    self.pressed_keys.add(vk)
+                else:
+                    self.ignored_system_keys.discard(vk)
+                    self.pressed_keys.discard(vk)
+                    self.pending_keys.pop(vk, None)
+                continue
+            if down:
+                self.pressed_keys.add(vk)
+            else:
+                self.pressed_keys.discard(vk)
+            semantic, modeled = self._semantic_key_for_vk(vk)
+            self.semantic_keyboard_events.append({'semantic_action': semantic, 'vk': vk, 'down': down, 'time': stamp, 'model_version': 'semantic_keyboard_v2', 'execution_support': 'SendInput_scancode_with_lease', 'modeled_before_session': modeled, 'unmodeled_sample': not modeled})
+            if down:
+                if vk not in self.pending_keys:
+                    frame = self.capture_safe(stamp)
+                    if frame is not None:
+                        self.pending_keys[vk] = {'frame': frame, 'start': stamp, 'semantic': semantic, 'modeled': modeled}
+            else:
+                pending = self.pending_keys.pop(vk, None)
+                if pending is not None:
+                    duration = max(0.03, min(3.0, stamp - safe_float(pending.get('start'), stamp)))
+                    source = 'learn_keyboard' if pending.get('modeled') else 'learn_keyboard_unmodeled'
+                    if not self.save(pending.get('frame'), {'kind': 'key', 'vk': vk, 'semantic_key': pending.get('semantic', semantic), 'duration': duration}, source, 1.2):
+                        self.keyboard_discarded += 1
+        return []
 
     def drain_auxiliary_events(self):
         changed = False
@@ -10488,7 +10657,11 @@ class LearningExecution:
                     pending = self.pending_gamepad_buttons.pop((device, button), None)
                     if pending is not None:
                         duration = max(0.03, min(3.0, now - safe_float(pending.get('start'), now)))
-                        self.save(pending.get('frame'), {'kind': 'gamepad_button', 'button': button, 'duration': duration}, 'learn_gamepad', 1.25)
+                        action = {'kind': 'gamepad_button', 'button': button, 'duration': duration}
+                        family = action_family_key(action)
+                        modeled = family in self.profile.get('allowed_families', [])
+                        self.discovered_families.add(family)
+                        self.save(pending.get('frame'), action, 'learn_gamepad' if modeled else 'learn_gamepad_unmodeled', 1.25)
                 for axis_name, state_key in (('left_stick', 'left_stick'), ('right_stick', 'right_stick'), ('triggers', None)):
                     if state_key:
                         values = state.get(state_key, [0.0, 0.0])
@@ -10507,7 +10680,11 @@ class LearningExecution:
                     if active and changed_axis and (now - last >= 0.08):
                         frame = self.capture_safe(now)
                         if frame is not None:
-                            self.save(frame, {'kind': 'gamepad_axis', 'axis': axis_name, 'x': x, 'y': y, 'duration': 0.08}, 'learn_gamepad_axis', 1.15)
+                            action = {'kind': 'gamepad_axis', 'axis': axis_name, 'x': x, 'y': y, 'duration': 0.08}
+                            family = action_family_key(action)
+                            modeled = family in self.profile.get('allowed_families', [])
+                            self.discovered_families.add(family)
+                            self.save(frame, action, 'learn_gamepad_axis' if modeled else 'learn_gamepad_axis_unmodeled', 1.15)
                             self.last_gamepad_axis_sample[device, axis_name] = now
                 self.last_gamepad_state[device] = dict(state)
             if self.gamepad_monitor.error is not None:
@@ -10523,7 +10700,7 @@ class LearningExecution:
 
     def paused(self):
         self.drain_keyboard_events()
-        return self.strict_violation or (not self.keyboard_enabled and self.keyboard.other_event.is_set())
+        return self.strict_violation
 
     def capture_safe(self, stamp=None):
         frame = self.frame_buffer.latest(stamp, 0.75, 'learning')
@@ -10850,13 +11027,12 @@ class LearningExecution:
                 if self.reject_mouse_overflow(now):
                     break
                 keyboard_before = self.keyboard_count
-                keyboard_violation = self.drain_keyboard_events()
+                self.drain_keyboard_events()
                 auxiliary_changed = self.drain_auxiliary_events() or self.keyboard_count > keyboard_before
-                if keyboard_violation or self.paused():
+                if self.paused():
                     self.clear_pointer_state(True)
                     if self.monitor is not None:
                         self.monitor.drain()
-                    self.host.set_status('检测到未授权的非ESC键盘输入，人类采集立即停止且整段session将被标记无效')
                     break
                 rect = self.acquire_focus()
                 events = self.monitor.drain() if self.monitor is not None else []
@@ -10883,20 +11059,43 @@ class LearningExecution:
                 self.update_status(now)
                 interruptible_wait(self.host.stop_event, self.sampling_delay)
 
+    def persist_discovered_controls(self):
+        profile = self.host.store.load_game_profile(self.game['id'])
+        allowed = {str(value) for value in profile.get('allowed_families', []) if str(value)}
+        allowed.update(self.discovered_families)
+        profile['allowed_families'] = sorted(allowed)
+        keymap = profile.get('semantic_keymap', {}) if isinstance(profile.get('semantic_keymap'), dict) else {}
+        keymap.update(self.discovered_keymap)
+        profile['semantic_keymap'] = keymap
+        profile['keyboard_enabled'] = True
+        profile['capability_level'] = max(2, safe_int(profile.get('capability_level'), 0, 0, 4))
+        required = [str(value).casefold() for value in profile.get('required_input_modalities', []) if str(value)]
+        required.extend(['mouse', 'keyboard', 'vision'])
+        if any(family.startswith('gamepad_') for family in self.discovered_families):
+            profile['gamepad_enabled'] = True
+            profile['capability_level'] = 4
+            required.append('gamepad')
+        profile['required_input_modalities'] = list(dict.fromkeys(required))
+        permissions = profile.get('modality_permissions', {}) if isinstance(profile.get('modality_permissions'), dict) else {}
+        permissions['keyboard'] = {'enabled': True, 'data_mask': 'semantic_only', 'model_version': 'semantic_keyboard_v2', 'safety_permission': True}
+        permissions['gamepad'] = {'enabled': bool(profile.get('gamepad_enabled')), 'data_mask': 'semantic_only', 'model_version': 'gamepad_semantic_v2', 'safety_permission': bool(profile.get('gamepad_enabled'))}
+        profile['modality_permissions'] = permissions
+        self.host.store.save_game_profile(self.game['id'], profile)
+        self.profile = profile
+
     def finalize(self):
         self.host.learning_controller.submit(self.host.store, self.game['id'], self.session_id)
         if self.strict_violation:
             reason = self.invalid_reason or 'input_safety_violation'
             removed = self.host.store.discard_session(self.game['id'], self.session_id, reason)
             self.keyboard_discarded = max(self.keyboard_discarded, removed)
-            if reason == 'mouse_event_queue_overflow':
-                dropped = self.monitor.snapshot()['dropped_events'] - self.mouse_drop_baseline if self.monitor is not None else 0
-                return ModeResult('stopped', '学习因鼠标事件队列溢出而严格停止；整段session已作废并删除' + str(removed) + '个样本', {'invalid_session': self.session_id, 'dropped_mouse_events': dropped})
-            return ModeResult('stopped', '学习因检测到非ESC键盘输入而严格停止；整段session已作废并删除' + str(removed) + '个样本', {'invalid_session': self.session_id, 'keyboard_events': self.keyboard_count})
+            dropped = self.monitor.snapshot()['dropped_events'] - self.mouse_drop_baseline if self.monitor is not None else 0
+            return ModeResult('stopped', '学习因鼠标事件队列溢出而严格停止；整段session已作废并删除' + str(removed) + '个样本', {'invalid_session': self.session_id, 'dropped_mouse_events': dropped})
+        self.persist_discovered_controls()
         self.host.store.validate_learning_session(self.game['id'], self.session_id)
         summary = '学习已停止：有效' + str(self.learned) + '，重复或配额抑制' + str(self.duplicates) + '，越界废弃' + str(self.discarded) + '，无效画面' + str(self.invalid_frames)
         status = 'stopped' if self.host.stop_event and self.host.stop_event.is_set() else 'completed'
-        details = {'session_id': self.session_id, 'real_mouse_events': self.mouse_event_count, 'outside_rejected': self.discarded, 'keyboard_events': self.keyboard_count, 'gamepad_events': self.gamepad_count, 'audio_events': self.audio_count, 'modality_samples': self.modality_sample_count, 'capture_options': self.capture_options.to_dict(), 'modality_mask_closed_loop': True, 'valid_samples': self.learned, 'duplicates': self.duplicates, 'invalid_frames': self.invalid_frames, 'client_only': True, 'session_status': 'valid'}
+        details = {'session_id': self.session_id, 'real_mouse_events': self.mouse_event_count, 'outside_rejected': self.discarded, 'keyboard_events': self.keyboard_count, 'keyboard_unmodeled_or_discarded': self.keyboard_discarded, 'gamepad_events': self.gamepad_count, 'audio_events': self.audio_count, 'modality_samples': self.modality_sample_count, 'capture_options': self.capture_options.to_dict(), 'discovered_action_families': sorted(self.discovered_families), 'ignored_system_keys': sorted(self.ignored_system_keys), 'modality_mask_closed_loop': True, 'valid_samples': self.learned, 'duplicates': self.duplicates, 'invalid_frames': self.invalid_frames, 'client_only': True, 'session_status': 'valid'}
         return ModeResult(status, summary, details)
 
     def run(self):
@@ -11034,7 +11233,7 @@ class ExperienceBuilder:
         episode = []
         for index, item in enumerate(ordered):
             if (experience_offset + len(episode)) % 64 == 0 and self.controller.context.callbacks.should_stop():
-                raise InputStopped('睡眠已停止')
+                raise InputStopped('升级已停止')
             prepared = self._prepare_step(session, ordered, index, state)
             episode.append(self._make_experience(prepared, len(ordered)))
         return episode
@@ -11212,7 +11411,7 @@ class ReviewController:
         ordered = sorted(valid, key=lambda item: (self.session_of(item), float(item.get('created', 0.0)), str(item.get('checksum', ''))))
         for index, item in enumerate(ordered):
             if index % 32 == 0 and self.context.callbacks.should_stop():
-                raise InputStopped('睡眠已停止')
+                raise InputStopped('升级已停止')
             key = (self.session_of(item), semantic_action_signature(sample_semantic_action(item)), self.method_of(item))
             old = previous.get(key)
             keep = True
@@ -11376,11 +11575,11 @@ class ReviewController:
             if stats.get('invalid', 0):
                 host.set_status('升级1/5：发现无效样本并已隔离，继续使用有效分层数据')
             rgb_samples = [item for item in samples if sample_rgb_valid(item.get('rgb'))]
-            sleep_seed, sleep_seed_evidence = deterministic_sleep_seed(game['id'], rgb_samples)
-            host.sleep_seed = sleep_seed
-            host.sleep_seed_evidence = sleep_seed_evidence
+            upgrade_seed, upgrade_seed_evidence = deterministic_upgrade_seed(game['id'], rgb_samples)
+            host.upgrade_seed = upgrade_seed
+            host.upgrade_seed_evidence = upgrade_seed_evidence
             host.set_status('升级2/5：使用受限RGB样本训练对象模型、视觉适配器与终止检测器')
-            manifest = host.vision_runtime.train(game['id'], rgb_samples, host.stop_event, host.set_progress, sleep_seed, len(samples))
+            manifest = host.vision_runtime.train(game['id'], rgb_samples, host.stop_event, host.set_progress, upgrade_seed, len(samples))
             host.store.record_vision_model(game['id'], manifest)
             host.store.reencode_samples(game['id'], host.vision_runtime, host.stop_event, host.set_progress)
             del rgb_samples, samples
@@ -12158,7 +12357,7 @@ class ReviewExecution:
         valid = []
         for index, sample in enumerate(samples):
             if index % 64 == 0 and self.host.should_stop():
-                raise InputStopped('睡眠已停止')
+                raise InputStopped('升级已停止')
             action = normalize_action(sample.get('a'))
             context = sample.get('context', {})
             temporal = temporal_from_context(context)
@@ -12178,7 +12377,7 @@ class ReviewExecution:
         self.action_clusters = self.host._cluster_action_samples(self.train)
         self.uncovered_actions = self.host.review_controller.map_holdout(self.holdout, self.action_clusters)
         if self.host.should_stop():
-            raise InputStopped('睡眠已停止')
+            raise InputStopped('升级已停止')
         self.holdout_sessions = set(self.split_info.get('holdout_sessions', []))
         self.cluster_map = {cluster['id']: cluster for cluster in self.action_clusters}
         self.groups = defaultdict(list)
@@ -12193,12 +12392,12 @@ class ReviewExecution:
         try:
             for cluster_id, items in self.ordered:
                 if self.host.should_stop():
-                    raise InputStopped('睡眠已停止')
+                    raise InputStopped('升级已停止')
                 cluster = self.cluster_map[cluster_id]
 
                 def progress(local, total_local, count):
                     self.host.set_progress(78 * (processed + local) / max(1, len(self.train)))
-                    self.host.set_status('睡眠中：仅使用训练集生成动作簇和短时序原型；' + str(processed + local) + '/' + str(len(self.train)))
+                    self.host.set_status('升级中：仅使用训练集生成动作簇和短时序原型；' + str(processed + local) + '/' + str(len(self.train)))
                 generated = self.host._cluster_action_group(cluster_id, cluster['a'], len(items), items, progress, cluster.get('repeat_policy', 'one_shot'), cluster.get('max_rate', 3.0))
                 processed += len(items)
                 limited = self.host._limit_prototypes(self.prototypes + generated, MAX_PROTOTYPES)
@@ -12206,7 +12405,7 @@ class ReviewExecution:
                 existing_ids = set(tracker.prototypes)
                 tracker.add_batch([item for item in limited if str(item.get('id')) not in existing_ids])
                 self.prototypes = limited
-                self.host.set_status('睡眠阶段：动作簇' + str(len(self.prototypes)) + '；距离缓存' + str(len(self.host.review_distance_cache)) + '/' + str(self.host.review_distance_cache.capacity) + '；剩余样本约' + str(max(0, len(self.train) - processed)))
+                self.host.set_status('升级阶段：动作簇' + str(len(self.prototypes)) + '；距离缓存' + str(len(self.host.review_distance_cache)) + '/' + str(self.host.review_distance_cache.capacity) + '；剩余样本约' + str(max(0, len(self.train) - processed)))
                 self.host.review_distance_cache.clear()
         except InputStopped:
             self.save_partial_model()
@@ -12215,7 +12414,7 @@ class ReviewExecution:
         for index, _ in enumerate(self.prototypes):
             if index % 12 == 0:
                 if self.host.should_stop():
-                    raise InputStopped('睡眠已停止')
+                    raise InputStopped('升级已停止')
                 self.host.set_progress(78 + 7 * (index + 1) / max(1, len(self.prototypes)))
 
     def save_partial_model(self):
@@ -12231,7 +12430,7 @@ class ReviewExecution:
             matching = []
             for rejection_index, rejection in enumerate(rejections):
                 if (proto_index * max(1, len(rejections)) + rejection_index) % 64 == 0 and self.host.should_stop():
-                    raise InputStopped('睡眠已停止')
+                    raise InputStopped('升级已停止')
                 candidates = [normalize_semantic_action(item.get('semantic_action') or item.get('a')) for item in rejection.get('candidates', []) if isinstance(item, dict)]
                 proto_semantic = normalize_semantic_action(proto.get('semantic_action')) or semantic_action_from_coordinate(proto.get('a'))
                 related = any((action and semantic_action_family_key(action) == semantic_action_family_key(proto_semantic) and (semantic_action_distance(action, proto_semantic) <= 0.45) for action in candidates))
@@ -12331,7 +12530,7 @@ class ReviewExecution:
         self.initialize_holdout_metrics()
         for index, sample in enumerate(self.holdout):
             if index % 8 == 0 and self.host.should_stop():
-                raise InputStopped('睡眠已停止')
+                raise InputStopped('升级已停止')
             self.evaluate_holdout_sample(sample)
             if index % 5 == 0:
                 self.host.set_progress(85 + 13 * (index + 1) / max(1, len(self.holdout)))
@@ -12471,10 +12670,10 @@ class ReviewExecution:
         generalization = {'same_game_different_session': {'train_sessions': sorted({self.host.review_controller.session_of(item) for item in self.train}), 'holdout_sessions': sorted(self.holdout_sessions), 'passed': bool(self.split_info.get('complete'))}, 'same_task_different_resolution': {'groups': resolution_groups, 'group_count': len(resolution_groups), 'evaluated': len(resolution_groups) > 1}, 'same_game_different_ui_or_save': {'groups': ui_groups[:128], 'group_count': len(ui_groups), 'evaluated': len(ui_groups) > 1}, 'unseen_game': {'evaluated': False, 'passed': False, 'reason': '需要至少另一游戏的隔离数据集后才能宣称跨游戏迁移'}}
         skill_counts = Counter((str(item.get('skill_id', 'unknown')) for item in experiences))
         skill_library = {name: {'count': count, 'schema_version': SKILL_SCHEMA_VERSION} for name, count in sorted(skill_counts.items())}
-        sleep_seed = safe_int(getattr(self.host, 'sleep_seed', 0), 0, 0, 2 ** 63 - 1)
+        upgrade_seed = safe_int(getattr(self.host, 'upgrade_seed', 0), 0, 0, 2 ** 63 - 1)
         plan = RESOURCE_GOVERNOR.current_plan()
         hardware_training_profile = current_hardware_training_profile(self.host.store.base)
-        self.model = {'created': time.time(), 'model_version': MODEL_SCHEMA_VERSION, 'configuration_version': RUNTIME_THRESHOLDS.version, 'runtime_thresholds': RUNTIME_THRESHOLDS.to_dict(), 'model_tier': plan.model_tier, 'policy_state_size': plan.policy_state_size, 'policy_hidden_size': plan.policy_hidden_size, 'policy_ensemble_size': plan.policy_ensemble_size, 'temporal_context_length': plan.temporal_context_length, 'world_model_horizon': plan.world_model_horizon, 'object_slot_count': plan.object_slot_count, 'compatibility_signature': compatibility_signature(), 'training_hardware_profile': hardware_training_profile, 'sleep_seed': sleep_seed, 'temporal_encoder_seed': sleep_seed, 'determinism': {'seed': sleep_seed, 'build_hash': current_build_hash(), 'training_checksums_hash': hashlib.sha256(canonical_bytes(self.train_checksums)).hexdigest(), 'holdout_checksums_hash': hashlib.sha256(canonical_bytes(self.holdout_checksums)).hexdigest()}, 'samples': len(self.decorrelated), 'training_samples': len(self.train), 'holdout_samples': len(self.holdout), 'invalid_samples': self.stats['invalid'], 'action_clusters': len(self.action_clusters), 'rejection_constraints': self.rejection_constraints, 'prototypes': self.prototypes, 'capture_backends': self.train_methods, 'validation': self.validation, 'generalization_evaluation': generalization, 'training_checksums': self.train_checksums, 'holdout_checksums': self.holdout_checksums, 'sequence_model': self.sequence_model, 'experiences': experiences, 'experience_model': experience_model, 'demonstration_curriculum': demonstration_curriculum_assessment(experiences), 'behavior_model': behavior_model, 'value_model': value_model, 'risk_model': risk_model, 'offline_rl_training': value_model.get('training_diagnostics', {}), 'semantic_encoder': semantic_encoder, 'deduplicated_training_count': len(training_experiences), 'capability_profile': CapabilityProfile(profile).to_dict(), 'training_data_split': experience_portfolio.get('immutable_training_manifest', {}), 'decision_calibration': decision_calibration, 'episode_metrics': summarize_episode_metrics(experiences), 'default_task_id': default_task_id, 'task_ids': sorted({str(item.get('task_id', 'default')) for item in tasks}), 'task_definitions_checksum': task_definitions_checksum(tasks), 'task_definitions': tasks, 'skill_library': skill_library, 'policy_score_weights': normalized_policy_score_weights(profile.get('policy_score_weights')), 'decision_architecture': 'task_conditioned_neural_double_q_iql_awr_cql_bootstrap+risk_model+independent_safety_shield', 'state_architecture': 'dynamic_64x36_to_160x90_fast_path+dynamic_224_to_384_semantic_path+high_resolution_ocr_roi+derived_audio_keyboard_gamepad_features+object_slots+scene_graph+goal+memory', 'semantic_action_schema_version': SEMANTIC_ACTION_SCHEMA_VERSION, 'observation_schema_version': OBSERVATION_SCHEMA_VERSION, 'skill_schema_version': SKILL_SCHEMA_VERSION, 'state_key_algorithm_version': STATE_KEY_ALGORITHM_VERSION, 'model_hierarchy': {'shared_visual_encoder': True, 'shared_semantic_action_space': True, 'shared_skill_library': True, 'game_adapter': 'lightweight', 'task_policy_head': True, 'atomic_action_as_skill_parameter': True}, 'model_binding': model_binding_from_samples(self.train), 'safety_profile_checksum': profile_checksum(profile), 'stopped': False}
+        self.model = {'created': time.time(), 'model_version': MODEL_SCHEMA_VERSION, 'configuration_version': RUNTIME_THRESHOLDS.version, 'runtime_thresholds': RUNTIME_THRESHOLDS.to_dict(), 'model_tier': plan.model_tier, 'policy_state_size': plan.policy_state_size, 'policy_hidden_size': plan.policy_hidden_size, 'policy_ensemble_size': plan.policy_ensemble_size, 'temporal_context_length': plan.temporal_context_length, 'world_model_horizon': plan.world_model_horizon, 'object_slot_count': plan.object_slot_count, 'compatibility_signature': compatibility_signature(), 'training_hardware_profile': hardware_training_profile, 'upgrade_seed': upgrade_seed, 'temporal_encoder_seed': upgrade_seed, 'determinism': {'seed': upgrade_seed, 'build_hash': current_build_hash(), 'training_checksums_hash': hashlib.sha256(canonical_bytes(self.train_checksums)).hexdigest(), 'holdout_checksums_hash': hashlib.sha256(canonical_bytes(self.holdout_checksums)).hexdigest()}, 'samples': len(self.decorrelated), 'training_samples': len(self.train), 'holdout_samples': len(self.holdout), 'invalid_samples': self.stats['invalid'], 'action_clusters': len(self.action_clusters), 'rejection_constraints': self.rejection_constraints, 'prototypes': self.prototypes, 'capture_backends': self.train_methods, 'validation': self.validation, 'generalization_evaluation': generalization, 'training_checksums': self.train_checksums, 'holdout_checksums': self.holdout_checksums, 'sequence_model': self.sequence_model, 'experiences': experiences, 'experience_model': experience_model, 'demonstration_curriculum': demonstration_curriculum_assessment(experiences), 'behavior_model': behavior_model, 'value_model': value_model, 'risk_model': risk_model, 'offline_rl_training': value_model.get('training_diagnostics', {}), 'semantic_encoder': semantic_encoder, 'deduplicated_training_count': len(training_experiences), 'capability_profile': CapabilityProfile(profile).to_dict(), 'training_data_split': experience_portfolio.get('immutable_training_manifest', {}), 'decision_calibration': decision_calibration, 'episode_metrics': summarize_episode_metrics(experiences), 'default_task_id': default_task_id, 'task_ids': sorted({str(item.get('task_id', 'default')) for item in tasks}), 'task_definitions_checksum': task_definitions_checksum(tasks), 'task_definitions': tasks, 'skill_library': skill_library, 'policy_score_weights': normalized_policy_score_weights(profile.get('policy_score_weights')), 'decision_architecture': 'task_conditioned_neural_double_q_iql_awr_cql_bootstrap+risk_model+independent_safety_shield', 'state_architecture': 'dynamic_64x36_to_160x90_fast_path+dynamic_224_to_384_semantic_path+high_resolution_ocr_roi+derived_audio_keyboard_gamepad_features+object_slots+scene_graph+goal+memory', 'semantic_action_schema_version': SEMANTIC_ACTION_SCHEMA_VERSION, 'observation_schema_version': OBSERVATION_SCHEMA_VERSION, 'skill_schema_version': SKILL_SCHEMA_VERSION, 'state_key_algorithm_version': STATE_KEY_ALGORITHM_VERSION, 'model_hierarchy': {'shared_visual_encoder': True, 'shared_semantic_action_space': True, 'shared_skill_library': True, 'game_adapter': 'lightweight', 'task_policy_head': True, 'atomic_action_as_skill_parameter': True}, 'model_binding': model_binding_from_samples(self.train), 'safety_profile_checksum': profile_checksum(profile), 'stopped': False}
         self.model['replay_bundles'] = {'schema_version': REPLAY_BUNDLE_SCHEMA_VERSION, 'count': len(replay_bundles), 'paths': replay_paths, 'evaluations': [ReplayEvaluator.evaluate(value) for value in replay_bundles[:64]]}
         self.model['task_induction'] = task_induction
         self.model['temporal_termination_model'] = temporal_termination_model
@@ -12491,7 +12690,7 @@ class ReviewExecution:
         portfolio = self.model.get('experience_replay_portfolio', {})
         training_experiences = ExperienceReplayPortfolio.partition(experiences, portfolio, 'train', MAX_TRAINING_SAMPLES)
         experience_model = self.model.get('experience_model', {})
-        self.model['candidate_ranker'] = LearnedCandidateRankingHead.train(experience_model, training_experiences, safe_int(self.model.get('sleep_seed'), 0), self.model.get('semantic_encoder'))
+        self.model['candidate_ranker'] = LearnedCandidateRankingHead.train(experience_model, training_experiences, safe_int(self.model.get('upgrade_seed'), 0), self.model.get('semantic_encoder'))
         self.model['world_model'] = train_latent_world_model(training_experiences, self.model.get('semantic_encoder'))
         self.model['world_model']['semantic_encoder'] = self.model.get('semantic_encoder', {})
         self.model['auditable_transition_model'] = self.model['world_model'].get('auditable_transition_model', {})
@@ -12513,7 +12712,7 @@ class ReviewExecution:
         self.model['validation']['game_id_split_complete'] = bool(split_manifest.get('split_complete'))
         self.model['validation']['game_id_split_reason'] = str(split_manifest.get('split_reason', ''))
         self.model['capability_profile'] = CapabilityProfile(profile).to_dict()
-        self.model['sleep_pipeline'] = {'schema_version': 3, 'phases': list(SLEEP_PIPELINE_PHASES), 'training_sample_limit': MAX_TRAINING_SAMPLES, 'prototype_online_limit': MAX_PROTOTYPES, 'stratified_sampling': True, 'game_id_isolated_validation_and_test': True, 'split_status': split_manifest.get('split_status', 'not_evaluated')}
+        self.model['upgrade_pipeline'] = {'schema_version': 3, 'phases': list(UPGRADE_PIPELINE_PHASES), 'training_sample_limit': MAX_TRAINING_SAMPLES, 'prototype_online_limit': MAX_PROTOTYPES, 'stratified_sampling': True, 'game_id_isolated_validation_and_test': True, 'split_status': split_manifest.get('split_status', 'not_evaluated')}
         self.model['decision_architecture'] = 'skill_generation+task_conditioned_neural_double_q_target_networks+iql_expectile+advantage_weighted_bc+cql+behavior_support+bootstrap_uncertainty+risk_calibration+sequence_world_model+hierarchical_predicate_planner+independent_safety_lease'
         self.model['state_architecture'] = 'dynamic_64x36_to_160x90_auditable_fast_path+224_to_384_semantic_global_path+adaptive_high_resolution_ocr_roi+derived_audio_keyboard_gamepad_features+high_resolution_local_crops+object_slots+open_vocabulary_affordances+tracked_scene_graph+temporal_memory+goal_embedding+manual_safety_fallback'
         self.model['model_hierarchy'] = {'shared_backbone': {'read_only': True, 'updated_by_game_training': False}, 'game_type_adapter': {'kind': 'low_rank_residual_film', 'rank': ADAPTER_RANK}, 'game_specific_adapter': {'kind': 'low_rank_residual_film', 'rank': ADAPTER_RANK}, 'balanced_replay_required_for_shared_update': True, 'distillation_required_for_shared_update': True, 'parameter_change_constraint_required': True, 'old_task_regression_required': True, 'automatic_rollback_required': True}
@@ -12522,7 +12721,7 @@ class ReviewExecution:
     def report_lines(self):
         label = '通过完整独立验收' if self.validation_status == 'passed' else '已生成基础安全模型，可训练已授权的普通安全动作' if self.validation_status == 'basic_safe' else '验证不足，仅保存不可训练临时模型' if self.validation_status == 'insufficient' else '验证失败，仅保存不可训练临时模型'
         error_text = '无可计算值' if self.accepted_error_rate is None else str(round(self.accepted_error_rate * 100, 2)) + '%'
-        headline = '睡眠完成，' + label + '：原型' + str(len(self.prototypes)) + '，独立session留出' + str(self.holdout_count) + '，接受' + str(self.accepted) + '，覆盖率' + str(round(self.coverage * 100, 2)) + '%，接受错误率' + error_text + '，95%错误率上界' + str(round(self.error_upper_95 * 100, 2)) + '%，未覆盖动作' + str(self.uncovered_actions) + '，连续帧去相关移除' + str(self.decorrelated_removed) + ('；留出失败原因：' + str(self.split_info.get('reason')) if self.split_info.get('reason') else '')
+        headline = '升级完成，' + label + '：原型' + str(len(self.prototypes)) + '，独立session留出' + str(self.holdout_count) + '，接受' + str(self.accepted) + '，覆盖率' + str(round(self.coverage * 100, 2)) + '%，接受错误率' + error_text + '，95%错误率上界' + str(round(self.error_upper_95 * 100, 2)) + '%，未覆盖动作' + str(self.uncovered_actions) + '，连续帧去相关移除' + str(self.decorrelated_removed) + ('；留出失败原因：' + str(self.split_info.get('reason')) if self.split_info.get('reason') else '')
         lines = [headline, '各动作独立留出验证：']
         for signature, row in sorted(self.per_action.items()):
             authorization = '完整授权' if row['passed'] else '基础安全授权' if row.get('basic_safe_passed') else '未授权'
@@ -12537,7 +12736,7 @@ class ReviewExecution:
 
     def finalize(self):
         if not self.prototypes:
-            raise RuntimeError('睡眠未生成可用原型')
+            raise RuntimeError('升级未生成可用原型')
         try:
             champion = self.host.store.load_model(self.game['id'])
         except RuntimeError:
@@ -12711,7 +12910,7 @@ class TrainingExecution:
         self.current_subgoal = Subgoal('advance_goal', self.task_definition.goal, {}, (), 0, 0.0)
         experience_schema = safe_int(self.model.get('experience_model', {}).get('schema_version', 0), 0) if isinstance(self.model.get('experience_model'), dict) else 0
         if experience_schema >= 3 and active_task_id not in {str(value) for value in self.model.get('task_ids', [])}:
-            raise RuntimeError('当前任务未包含在已睡眠模型中，请重新学习和睡眠')
+            raise RuntimeError('当前任务未包含在已升级模型中，请重新学习和升级')
         self.agent_policy = TaskAgentPolicy(self.profile)
         if not self.agent_policy.allowed:
             raise RuntimeError('当前游戏未配置任何自动动作白名单，请先打开“任务与安全”')
@@ -12725,7 +12924,7 @@ class TrainingExecution:
         self.capability_result = self.capability.require_training_support({'capture_fps': self.calibration.get('fps', 0.0), 'available_action_frequency': 1.0 / max(0.01, safe_float(self.calibration.get('input_delay', 0.25), 0.25)), 'semantic_size': HYBRID_GLOBAL_SIZE, **self.host.api.execution_capabilities()})
         self.validated_backend = str(self.calibration.get('validated_backend', ''))
         if self.validated_backend not in self.allowed_backends:
-            raise RuntimeError('当前采集后端未被当前可训练模型授权；请用该后端重新学习并睡眠')
+            raise RuntimeError('当前采集后端未被当前可训练模型授权；请用该后端重新学习并升级')
         self.build_snapshot()
         self.host.api.request_foreground(self.target['hwnd'])
         self.host.wait_escape_release()
@@ -12957,7 +13156,7 @@ class TrainingExecution:
             interruptible_wait(self.host.stop_event, 0.1)
             return False
         if frame.method != self.validated_backend or frame.method not in self.allowed_backends:
-            self.host.set_status('采集后端变化或未在模型中验证，拒绝自动动作；请重新学习和睡眠')
+            self.host.set_status('采集后端变化或未在模型中验证，拒绝自动动作；请重新学习和升级')
             interruptible_wait(self.host.stop_event, 0.1)
             return False
         return True
@@ -14117,7 +14316,7 @@ class DataStoreLifecycleMixin:
 class DataStoreGameTaskMixin:
 
     def default_game_profile(self):
-        return {'goal': '模仿已学习的鼠标操作并在不确定时停止', 'default_task_id': 'default', 'allowed_families': ['no_op', 'click|left', 'move', 'hover', 'scroll_v|1', 'scroll_v|-1'], 'max_consecutive_failures': 3, 'exploration_enabled': False, 'restart_action': None, 'irreversible_target_whitelist': [], 'success_states': [], 'failure_states': [], 'success_hash_distance': 6, 'failure_hash_distance': 6, 'terminal_confirm_frames': 2, 'success_reward': 1.0, 'failure_reward': -1.0, 'step_penalty': -0.01, 'progress_scale': 0.5, 'no_change_penalty': 0.0, 'repeat_penalty': 0.0, 'offline_discount': 0.97, 'awr_temperature': 0.5, 'policy_score_weights': dict(DEFAULT_POLICY_SCORE_WEIGHTS), 'capability_level': 0, 'required_input_modalities': ['mouse', 'vision'], 'minimum_frame_rate': 8.0, 'maximum_action_frequency': 4.0, 'required_action_frequency': 1.0, 'continuous_control_required': False, 'minimum_semantic_width': 224, 'minimum_semantic_height': 126, 'mouse_enabled': True, 'keyboard_enabled': False, 'sound_enabled': False, 'gamepad_enabled': False, 'semantic_keymap': {}, 'modality_permissions': {'keyboard': {'enabled': False, 'data_mask': 'semantic_only', 'model_version': 'semantic_keyboard_v1', 'safety_permission': False}, 'sound': {'enabled': False, 'data_mask': 'event_only_no_raw_audio', 'model_version': 'audio_event_v1', 'safety_permission': False}, 'gamepad': {'enabled': False, 'data_mask': 'semantic_only', 'model_version': 'gamepad_semantic_v1', 'safety_permission': False}}, 'game_type': 'ui_game', 'updated': 0.0}
+        return {'goal': '模仿该游戏在人类学习期间实际出现过的鼠标、键盘和手柄操作并在不确定时停止', 'default_task_id': 'default', 'allowed_families': ['no_op', 'click|left', 'move', 'hover', 'scroll_v|1', 'scroll_v|-1'], 'max_consecutive_failures': 3, 'exploration_enabled': False, 'restart_action': None, 'irreversible_target_whitelist': [], 'success_states': [], 'failure_states': [], 'success_hash_distance': 6, 'failure_hash_distance': 6, 'terminal_confirm_frames': 2, 'success_reward': 1.0, 'failure_reward': -1.0, 'step_penalty': -0.01, 'progress_scale': 0.5, 'no_change_penalty': 0.0, 'repeat_penalty': 0.0, 'offline_discount': 0.97, 'awr_temperature': 0.5, 'policy_score_weights': dict(DEFAULT_POLICY_SCORE_WEIGHTS), 'capability_level': 2, 'required_input_modalities': ['mouse', 'keyboard', 'vision'], 'minimum_frame_rate': 8.0, 'maximum_action_frequency': 4.0, 'required_action_frequency': 1.0, 'continuous_control_required': False, 'minimum_semantic_width': 224, 'minimum_semantic_height': 126, 'mouse_enabled': True, 'keyboard_enabled': True, 'sound_enabled': False, 'gamepad_enabled': False, 'semantic_keymap': {}, 'modality_permissions': {'keyboard': {'enabled': True, 'data_mask': 'semantic_only', 'model_version': 'semantic_keyboard_v2', 'safety_permission': True}, 'sound': {'enabled': False, 'data_mask': 'event_only_no_raw_audio', 'model_version': 'audio_event_v1', 'safety_permission': False}, 'gamepad': {'enabled': False, 'data_mask': 'semantic_only', 'model_version': 'gamepad_semantic_v2', 'safety_permission': False}}, 'game_type': 'ui_game', 'updated': 0.0}
 
     def load_game_profile(self, gid):
         profile = self.default_game_profile()
@@ -14140,7 +14339,7 @@ class DataStoreGameTaskMixin:
         value = self.default_game_profile()
         if isinstance(profile, dict):
             value.update(profile)
-        value['goal'] = str(value.get('goal', '')).strip()[:2000] or '模仿已学习的鼠标操作并在不确定时停止'
+        value['goal'] = str(value.get('goal', '')).strip()[:2000] or '模仿该游戏在人类学习期间实际出现过的鼠标、键盘和手柄操作并在不确定时停止'
         value['default_task_id'] = normalized_identifier(value.get('default_task_id'), 'default', 96)
         value['allowed_families'] = sorted({str(item) for item in value.get('allowed_families', []) if str(item)})
         value['success_states'] = sorted({str(item) for item in value.get('success_states', []) if str(item)})
@@ -14154,23 +14353,23 @@ class DataStoreGameTaskMixin:
         value['awr_temperature'] = safe_float(value.get('awr_temperature', 0.5), 0.5, 0.05, 10.0)
         value['policy_score_weights'] = normalized_policy_score_weights(value.get('policy_score_weights'))
         value['exploration_enabled'] = bool(value.get('exploration_enabled', False))
-        value['capability_level'] = safe_int(value.get('capability_level', 0), 0, 0, 4)
-        required = value.get('required_input_modalities', ['mouse', 'vision'])
+        value['capability_level'] = safe_int(value.get('capability_level', 2), 2, 0, 4)
+        required = value.get('required_input_modalities', ['mouse', 'keyboard', 'vision'])
         allowed_modalities = {'mouse', 'vision', 'ocr', 'keyboard', 'sound', 'gamepad', 'continuous_control'}
         value['required_input_modalities'] = list(dict.fromkeys((str(item).strip().casefold() for item in required if str(item).strip().casefold() in allowed_modalities))) if isinstance(required, (list, tuple, set)) else ['mouse', 'vision']
         if not value['required_input_modalities']:
-            value['required_input_modalities'] = ['mouse', 'vision']
+            value['required_input_modalities'] = ['mouse', 'keyboard', 'vision']
         value['minimum_frame_rate'] = safe_float(value.get('minimum_frame_rate', 8.0), 8.0, 1.0, 240.0)
         value['maximum_action_frequency'] = safe_float(value.get('maximum_action_frequency', 4.0), 4.0, 0.1, 120.0)
         value['required_action_frequency'] = safe_float(value.get('required_action_frequency', 1.0), 1.0, 0.0, 120.0)
         value['continuous_control_required'] = bool(value.get('continuous_control_required', False))
         value['minimum_semantic_width'] = safe_int(value.get('minimum_semantic_width', 224), 224, 64, 1024)
         value['minimum_semantic_height'] = safe_int(value.get('minimum_semantic_height', 126), 126, 36, 1024)
-        value['keyboard_enabled'] = bool(value.get('keyboard_enabled', False))
+        value['keyboard_enabled'] = bool(value.get('keyboard_enabled', True))
         value['sound_enabled'] = bool(value.get('sound_enabled', False))
         value['gamepad_enabled'] = bool(value.get('gamepad_enabled', False))
         permissions = value.get('modality_permissions', {}) if isinstance(value.get('modality_permissions'), dict) else {}
-        value['modality_permissions'] = {'keyboard': {'enabled': value['keyboard_enabled'], 'data_mask': 'semantic_only', 'model_version': str((permissions.get('keyboard') or {}).get('model_version', 'semantic_keyboard_v1')), 'safety_permission': value['keyboard_enabled']}, 'sound': {'enabled': value['sound_enabled'], 'data_mask': 'event_only_no_raw_audio', 'model_version': str((permissions.get('sound') or {}).get('model_version', 'audio_event_v1')), 'safety_permission': value['sound_enabled']}, 'gamepad': {'enabled': value['gamepad_enabled'], 'data_mask': 'semantic_only', 'model_version': str((permissions.get('gamepad') or {}).get('model_version', 'gamepad_semantic_v1')), 'safety_permission': value['gamepad_enabled']}}
+        value['modality_permissions'] = {'keyboard': {'enabled': value['keyboard_enabled'], 'data_mask': 'semantic_only', 'model_version': str((permissions.get('keyboard') or {}).get('model_version', 'semantic_keyboard_v2')), 'safety_permission': value['keyboard_enabled']}, 'sound': {'enabled': value['sound_enabled'], 'data_mask': 'event_only_no_raw_audio', 'model_version': str((permissions.get('sound') or {}).get('model_version', 'audio_event_v1')), 'safety_permission': value['sound_enabled']}, 'gamepad': {'enabled': value['gamepad_enabled'], 'data_mask': 'semantic_only', 'model_version': str((permissions.get('gamepad') or {}).get('model_version', 'gamepad_semantic_v2')), 'safety_permission': value['gamepad_enabled']}}
         value['semantic_keymap'] = {str(key): str(item) for key, item in (value.get('semantic_keymap', {}) if isinstance(value.get('semantic_keymap'), dict) else {}).items() if str(key) in SEMANTIC_KEY_ACTIONS and str(item)} if 'SEMANTIC_KEY_ACTIONS' in globals() else {}
         value['game_type'] = str(value.get('game_type', 'ui_game'))[:64] or 'ui_game'
         value['restart_action'] = normalize_action(value.get('restart_action')) if value.get('restart_action') else None
@@ -14399,7 +14598,7 @@ class DataStoreGameTaskMixin:
                     relative = candidate.relative_to(self.base).as_posix().casefold()
                 except ValueError:
                     continue
-                if relative.startswith('quarantine/game_trash/') or relative.startswith('audit/game_deletion_reports/'):
+                if relative.startswith('quarantine/game_trash/') or relative.startswith('quarantine/game_rollback/') or relative.startswith('audit/game_deletion_reports/'):
                     continue
                 candidates.append(candidate)
         for candidate in self.base.iterdir():
@@ -14635,7 +14834,7 @@ class DataStoreGameTaskMixin:
                     relative_text = candidate.relative_to(self.base).as_posix().casefold()
                 except ValueError:
                     continue
-                if relative_text.startswith('quarantine/game_trash/'):
+                if relative_text.startswith('quarantine/game_trash/') or relative_text.startswith('quarantine/game_rollback/'):
                     continue
                 if any((token and token in relative_text for token in tokens)):
                     resolved.append(candidate)
@@ -14774,6 +14973,12 @@ class DataStoreGameTaskMixin:
                 pass
             except RECOVERABLE_ERRORS as error:
                 errors.append((str(root), str(error)))
+            try:
+                parent = Path(root).parent
+                if parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+            except RECOVERABLE_ERRORS as error:
+                errors.append((str(Path(root).parent), str(error)))
         if errors:
             raise StorageError('恢复已暂存游戏文件失败：' + json.dumps(errors, ensure_ascii=False))
 
@@ -14795,7 +15000,7 @@ class DataStoreGameTaskMixin:
                         os.chmod(candidate, 448)
                     except OSError as error:
                         record_cleanup_error('GAME_ASSET_PERMISSION_REPAIR_FAILED', error)
-                time.sleep(0.05)
+                threading.Event().wait(0.05)
         if root.exists():
             raise StorageError('无法彻底删除游戏暂存数据：' + str(last_error or root))
         parent = root.parent
@@ -14941,11 +15146,143 @@ class DataStoreGameTaskMixin:
             return None
         return next((game for game in self.games() if game['id'] == row[0]), None)
 
+    def _create_game_deletion_rollback(self, descriptor):
+        rollback_root = self.base / 'quarantine' / 'game_rollback' / uuid.uuid4().hex
+        rollback_root.mkdir(parents=True, exist_ok=False)
+        database_backup = rollback_root / 'database.sqlite3'
+        try:
+            with self.lock:
+                self.db.execute('PRAGMA wal_checkpoint(FULL)')
+                destination = sqlite3.connect(str(database_backup))
+                try:
+                    self.db.current().backup(destination)
+                finally:
+                    destination.close()
+            shared = []
+            shared_root = rollback_root / 'shared'
+            for path in self._managed_text_files():
+                try:
+                    raw = path.read_text(encoding='utf-8')
+                except (OSError, UnicodeError):
+                    continue
+                if not self._text_contains_game_reference(raw, descriptor):
+                    continue
+                relative = path.relative_to(self.base)
+                backup = shared_root / relative
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, backup)
+                shared.append((path, backup))
+            return {'root': rollback_root, 'database': database_backup, 'shared': shared, 'assets': []}
+        except RECOVERABLE_ERRORS:
+            shutil.rmtree(rollback_root, ignore_errors=True)
+            parent = rollback_root.parent
+            try:
+                if parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+            except OSError:
+                pass
+            raise
+
+    def _backup_staged_game_assets(self, staged, rollback):
+        assets_root = Path(rollback['root']) / 'assets'
+        values = []
+        for source, destination in staged.get('moved', []):
+            relative = source.relative_to(self.base)
+            backup = assets_root / relative
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            if destination.is_dir():
+                shutil.copytree(destination, backup)
+            elif destination.is_file():
+                shutil.copy2(destination, backup)
+            values.append((source, backup))
+        rollback['assets'] = values
+        rollback['staged'] = staged
+        return rollback
+
+    def _restore_game_deletion_rollback(self, rollback):
+        errors = []
+        staged = rollback.get('staged')
+        if isinstance(staged, dict):
+            try:
+                self._restore_staged_game_assets(staged)
+            except RECOVERABLE_ERRORS as error:
+                errors.append('staged:' + str(error))
+        for source, backup in rollback.get('assets', []):
+            try:
+                if not backup.exists():
+                    continue
+                if source.exists():
+                    if source.is_dir():
+                        shutil.rmtree(source)
+                    else:
+                        source.unlink()
+                source.parent.mkdir(parents=True, exist_ok=True)
+                if backup.is_dir():
+                    shutil.copytree(backup, source)
+                else:
+                    shutil.copy2(backup, source)
+            except RECOVERABLE_ERRORS as error:
+                errors.append('asset:' + str(source) + ':' + str(error))
+        for path, backup in rollback.get('shared', []):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup, path)
+            except RECOVERABLE_ERRORS as error:
+                errors.append('shared:' + str(path) + ':' + str(error))
+        database_backup = Path(rollback.get('database', ''))
+        if database_backup.is_file():
+            try:
+                with self.lock:
+                    try:
+                        self.db.rollback()
+                    except sqlite3.Error:
+                        pass
+                    source = sqlite3.connect(str(database_backup))
+                    try:
+                        source.backup(self.db.current())
+                    finally:
+                        source.close()
+                    self.db.execute('PRAGMA foreign_keys=ON')
+                    self.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            except RECOVERABLE_ERRORS as error:
+                errors.append('database:' + str(error))
+        if errors:
+            raise StorageError('游戏删除回滚失败：' + json.dumps(errors, ensure_ascii=False))
+        return True
+
+    def _remove_game_deletion_rollback(self, rollback):
+        root = Path(rollback.get('root', ''))
+        deadline = time.monotonic() + 4.0
+        last_error = None
+        while root.exists() and time.monotonic() < deadline:
+            try:
+                shutil.rmtree(root)
+            except FileNotFoundError:
+                break
+            except RECOVERABLE_ERRORS as error:
+                last_error = error
+                for candidate in root.rglob('*'):
+                    try:
+                        os.chmod(candidate, 448)
+                    except OSError as permission_error:
+                        record_cleanup_error('GAME_ROLLBACK_PERMISSION_REPAIR_FAILED', permission_error)
+                gc.collect()
+                threading.Event().wait(0.05)
+        if root.exists():
+            raise StorageError('事务回滚隔离目录未能彻底移除：' + str(last_error or root))
+        parent = root.parent
+        try:
+            if parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError as error:
+            record_cleanup_error('EMPTY_GAME_ROLLBACK_PARENT_REMOVE_FAILED', error)
+        return True
+
     def replace_games(self, games, selected):
         cleaned = []
         names = set()
         for item in games:
-            if not isinstance(item, dict) or not item.get('id') or (not str(item.get('name', '')).strip()):
+            if not isinstance(item, dict) or not item.get('id') or not str(item.get('name', '')).strip():
                 continue
             name = str(item['name']).strip()
             if name.casefold() in names:
@@ -14964,6 +15301,12 @@ class DataStoreGameTaskMixin:
         descriptor = self._game_deletion_descriptor(deleting, deleted_names)
         database_reference_counts = self._database_game_reference_counts(deleting) if deleting else {}
         database_rows_deleted = len(deleting) + sum(database_reference_counts.values())
+        removed_pending = []
+        rollback = None
+        staged = None
+        scrub_report = {'files_scanned': 0, 'files_rewritten': 0, 'records_removed': 0, 'strings_scrubbed': 0}
+        deletion_report_path = ''
+        created_game_roots = []
         with self.pending_lock:
             self.blocked_game_ids.update(deleting)
             removed_pending = [item for item in self.pending_samples if item.get('gid') in deleting]
@@ -14971,110 +15314,105 @@ class DataStoreGameTaskMixin:
             self._rebuild_pending_indexes_locked()
             if not self.pending_samples:
                 self.pending_event.clear()
-                if self.writer_inflight == 0 and self.writer_error:
-                    self.writer_error = None
-                    self._notify_writer_error(None)
             self.writer_condition.notify_all()
-        staged = None
-        cleanup_pending = False
-        cleanup_error = ''
-        cleanup_state = 'compacted' if deleting else 'not_required'
-        scrub_report = {'files_scanned': 0, 'files_rewritten': 0, 'records_removed': 0, 'strings_scrubbed': 0}
-        residual_database = {}
-        residual_files = []
-        deletion_report_path = ''
         try:
             self.sample_write_barrier()
-            staged = self._stage_game_assets(descriptor, selected_id) if deleting else {'moved': [], 'root': None, 'transaction_id': '', 'asset_count': 0}
-            try:
-                with self.critical_transaction():
-                    for gid in deleting:
-                        self.db.execute('DELETE FROM games WHERE id=?', (gid,))
-                    self._assert_no_database_game_references(deleting)
-                    for item in cleaned:
-                        self.db.execute('INSERT INTO games(id,name,created,needs_review,last_review) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,created=excluded.created,needs_review=excluded.needs_review,last_review=excluded.last_review', (item['id'], item['name'], item['created'], item['needs_review'], item['last_review']))
-                    if selected_id is None:
-                        self.db.execute("DELETE FROM meta WHERE key='selected_game'")
-                    else:
-                        self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('selected_game',?)", (selected_id,))
-                    snapshot = json.dumps(self._config_snapshot(), ensure_ascii=False, separators=(',', ':'))
-                    if deleting:
-                        self.db.execute('DELETE FROM config_backups')
-                    self.db.execute('INSERT INTO config_backups(created,payload) VALUES(?,?)', (time.time(), snapshot))
-                    self.db.execute('DELETE FROM config_backups WHERE id NOT IN (SELECT id FROM config_backups ORDER BY id DESC LIMIT 5)')
-                    if deleting:
-                        self.db.execute("UPDATE game_deletion_transactions SET state='database_committed',updated=?,last_error='' WHERE transaction_id=?", (time.time(), staged['transaction_id']))
-            except RECOVERABLE_ERRORS:
-                if staged is not None:
-                    self._restore_staged_game_assets(staged)
-                    self._forget_game_deletion_transaction(staged.get('transaction_id', ''))
-                raise
+            rollback = self._create_game_deletion_rollback(descriptor)
             if deleting:
-                try:
-                    self._set_game_deletion_transaction_state(staged['transaction_id'], 'database_committed')
-                except RECOVERABLE_ERRORS as error:
-                    self.logger.write('GAME_DELETION_COMMIT_STATE_REFRESH_FAILED', error, details={'transaction_id': staged['transaction_id']})
-                try:
-                    scrub_report = self._scrub_shared_game_references(descriptor)
-                    residual_database = self._scan_database_content_references(descriptor)
-                    residual_files = self._scan_managed_file_references(descriptor)
-                    if residual_database or residual_files:
-                        raise StorageError('删除游戏后仍存在残留引用：' + json.dumps({'database': residual_database, 'files': residual_files[:32]}, ensure_ascii=False, sort_keys=True))
-                    self._set_game_deletion_transaction_state(staged['transaction_id'], 'references_scrubbed')
-                    cleanup_state = 'references_scrubbed'
-                except RECOVERABLE_ERRORS as error:
-                    cleanup_pending = True
-                    cleanup_error = str(error)
-                    cleanup_state = 'database_committed'
-                    try:
-                        self._set_game_deletion_transaction_state(staged['transaction_id'], cleanup_state, error)
-                    except RECOVERABLE_ERRORS as state_error:
-                        self.logger.write('GAME_DELETION_SCRUB_STATE_FAILED', state_error, details={'transaction_id': staged['transaction_id']})
-                    self.logger.write('GAME_DELETION_SCRUB_DEFERRED', error, details={'transaction_id': staged['transaction_id']})
-                if not cleanup_pending:
-                    try:
-                        self._purge_staged_game_assets(staged)
-                        self._set_game_deletion_transaction_state(staged['transaction_id'], 'files_purged')
-                        cleanup_state = 'files_purged'
-                    except RECOVERABLE_ERRORS as error:
-                        cleanup_pending = True
-                        cleanup_error = str(error)
-                        cleanup_state = 'references_scrubbed'
-                        try:
-                            self._set_game_deletion_transaction_state(staged['transaction_id'], cleanup_state, error)
-                        except RECOVERABLE_ERRORS as state_error:
-                            self.logger.write('GAME_DELETION_PURGE_STATE_FAILED', state_error, details={'transaction_id': staged['transaction_id']})
-                        self.logger.write('GAME_DELETION_PURGE_DEFERRED', error, details={'transaction_id': staged['transaction_id']})
-                if not cleanup_pending:
-                    try:
-                        self._secure_compact_after_deletion()
-                        self._set_game_deletion_transaction_state(staged['transaction_id'], 'compacted')
-                        deletion_report_path = self._write_game_deletion_report(staged['transaction_id'], {'database_rows_deleted': database_rows_deleted, 'files_deleted': safe_int(staged.get('asset_count', len(staged.get('moved', []))), 0, 0), 'shared_files_scanned': scrub_report.get('files_scanned', 0), 'shared_files_rewritten': scrub_report.get('files_rewritten', 0), 'shared_records_removed': scrub_report.get('records_removed', 0), 'residual_database_references': 0, 'residual_file_references': 0, 'complete': True})
-                        self._forget_game_deletion_transaction(staged['transaction_id'])
-                        cleanup_state = 'compacted'
-                    except RECOVERABLE_ERRORS as error:
-                        cleanup_pending = True
-                        cleanup_error = str(error)
-                        cleanup_state = 'files_purged'
-                        try:
-                            self._set_game_deletion_transaction_state(staged['transaction_id'], cleanup_state, error)
-                        except RECOVERABLE_ERRORS as state_error:
-                            self.logger.write('GAME_DELETION_COMPACT_STATE_FAILED', state_error, details={'transaction_id': staged['transaction_id']})
-                        self.logger.write('GAME_DELETION_COMPACTION_DEFERRED', error, details={'transaction_id': staged['transaction_id']})
-                if cleanup_pending:
-                    try:
-                        deletion_report_path = self._write_game_deletion_report(staged['transaction_id'], {'database_rows_deleted': database_rows_deleted, 'files_deleted': safe_int(staged.get('asset_count', len(staged.get('moved', []))), 0, 0) if cleanup_state in {'files_purged', 'compacted'} else 0, 'shared_files_scanned': scrub_report.get('files_scanned', 0), 'shared_files_rewritten': scrub_report.get('files_rewritten', 0), 'shared_records_removed': scrub_report.get('records_removed', 0), 'residual_database_references': sum(residual_database.values()), 'residual_file_references': len(residual_files), 'complete': False})
-                    except RECOVERABLE_ERRORS as report_error:
-                        self.logger.write('GAME_DELETION_REPORT_FAILED', report_error, details={'transaction_id': staged['transaction_id']})
+                staged = self._stage_game_assets(descriptor, selected_id)
+                self._backup_staged_game_assets(staged, rollback)
+            with self.critical_transaction():
+                for gid in deleting:
+                    self.db.execute('DELETE FROM games WHERE id=?', (gid,))
+                self._assert_no_database_game_references(deleting)
+                for item in cleaned:
+                    self.db.execute('INSERT INTO games(id,name,created,needs_review,last_review) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,created=excluded.created,needs_review=excluded.needs_review,last_review=excluded.last_review', (item['id'], item['name'], item['created'], item['needs_review'], item['last_review']))
+                if selected_id is None:
+                    self.db.execute("DELETE FROM meta WHERE key='selected_game'")
+                else:
+                    self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('selected_game',?)", (selected_id,))
+                snapshot = json.dumps(self._config_snapshot(), ensure_ascii=False, separators=(',', ':'))
+                if deleting:
+                    self.db.execute('DELETE FROM config_backups')
+                    self.db.execute("UPDATE game_deletion_transactions SET state='database_committed',updated=?,last_error='' WHERE transaction_id=?", (time.time(), staged['transaction_id']))
+                self.db.execute('INSERT INTO config_backups(created,payload) VALUES(?,?)', (time.time(), snapshot))
+                self.db.execute('DELETE FROM config_backups WHERE id NOT IN (SELECT id FROM config_backups ORDER BY id DESC LIMIT 5)')
+            if deleting:
+                scrub_report = self._scrub_shared_game_references(descriptor)
+                residual_database = self._scan_database_content_references(descriptor)
+                residual_files = self._scan_managed_file_references(descriptor)
+                if residual_database or residual_files:
+                    raise StorageError('删除游戏后仍存在残留引用：' + json.dumps({'database': residual_database, 'files': residual_files[:32]}, ensure_ascii=False, sort_keys=True))
+                self._set_game_deletion_transaction_state(staged['transaction_id'], 'references_scrubbed')
+                self._purge_staged_game_assets(staged)
+                self._set_game_deletion_transaction_state(staged['transaction_id'], 'files_purged')
+                self._secure_compact_after_deletion()
+                self._forget_game_deletion_transaction(staged['transaction_id'])
+                residual_database = self._scan_database_content_references(descriptor)
+                residual_files = self._scan_managed_file_references(descriptor)
+                transaction_count = safe_int(self.db.execute('SELECT COUNT(*) FROM game_deletion_transactions WHERE transaction_id=?', (staged['transaction_id'],)).fetchone()[0], 0)
+                game_count = safe_int(self.db.execute('SELECT COUNT(*) FROM games WHERE id IN (' + ','.join(('?' for _ in deleting)) + ')', tuple(sorted(deleting))).fetchone()[0], 0)
+                staged_exists = bool(staged.get('root') and Path(staged['root']).exists())
+                if residual_database or residual_files or transaction_count or game_count or staged_exists:
+                    raise StorageError('删除完成条件未全部满足：' + json.dumps({'database_references': residual_database, 'file_references': residual_files[:32], 'staged_assets_exist': staged_exists, 'transaction_record_exist': bool(transaction_count), 'game_record_exist': bool(game_count)}, ensure_ascii=False, sort_keys=True))
+                deletion_report_path = self._write_game_deletion_report(staged['transaction_id'], {'database_rows_deleted': database_rows_deleted, 'files_deleted': safe_int(staged.get('asset_count', len(staged.get('moved', []))), 0, 0), 'shared_files_scanned': scrub_report.get('files_scanned', 0), 'shared_files_rewritten': scrub_report.get('files_rewritten', 0), 'shared_records_removed': scrub_report.get('records_removed', 0), 'residual_database_references': 0, 'residual_file_references': 0, 'complete': True})
             for item in cleaned:
                 game_root = self.base / 'games' / item['id']
+                if not game_root.exists():
+                    created_game_roots.append(game_root)
                 game_root.mkdir(parents=True, exist_ok=True)
                 with self.lock, self.db:
                     self._register_game_asset_record(item['id'], game_root.relative_to(self.base), 'game_root')
             for gid in deleting:
                 self.model_cache.pop(gid, None)
                 self._invalidate_sample_caches(gid)
-            return {'deleted_games': sorted(deleting), 'discarded_pending_samples': len(removed_pending), 'database_rows_deleted': database_rows_deleted, 'deleted_asset_count': safe_int(staged.get('asset_count', len(staged.get('moved', []))), 0, 0) if staged else 0, 'shared_files_scanned': safe_int(scrub_report.get('files_scanned'), 0, 0), 'shared_files_rewritten': safe_int(scrub_report.get('files_rewritten'), 0, 0), 'shared_records_removed': safe_int(scrub_report.get('records_removed'), 0, 0), 'residual_database_references': sum(residual_database.values()), 'residual_file_references': len(residual_files), 'deletion_report': deletion_report_path, 'trash_removed': not bool(staged and staged.get('root') and Path(staged['root']).exists()), 'selected_game': selected_id, 'cleanup_pending': cleanup_pending, 'cleanup_state': cleanup_state, 'cleanup_error': cleanup_error, 'transaction_id': staged.get('transaction_id', '') if cleanup_pending and staged else ''}
+            if rollback is not None and not self._remove_game_deletion_rollback(rollback):
+                raise StorageError('事务回滚隔离目录未能彻底移除')
+            return {'deleted_games': sorted(deleting), 'discarded_pending_samples': len(removed_pending), 'database_rows_deleted': database_rows_deleted, 'deleted_asset_count': safe_int(staged.get('asset_count', len(staged.get('moved', []))), 0, 0) if staged else 0, 'shared_files_scanned': safe_int(scrub_report.get('files_scanned'), 0, 0), 'shared_files_rewritten': safe_int(scrub_report.get('files_rewritten'), 0, 0), 'shared_records_removed': safe_int(scrub_report.get('records_removed'), 0, 0), 'residual_database_references': 0, 'residual_file_references': 0, 'deletion_report': deletion_report_path, 'trash_removed': True, 'selected_game': selected_id, 'cleanup_pending': False, 'cleanup_state': 'complete', 'cleanup_error': '', 'transaction_id': ''}
+        except RECOVERABLE_ERRORS as error:
+            rollback_errors = []
+            for game_root in reversed(created_game_roots):
+                try:
+                    if game_root.exists():
+                        shutil.rmtree(game_root)
+                except RECOVERABLE_ERRORS as root_error:
+                    rollback_errors.append('created_root:' + str(game_root) + ':' + str(root_error))
+            if deletion_report_path:
+                try:
+                    report_path = Path(deletion_report_path)
+                    if report_path.is_file():
+                        report_path.unlink()
+                except RECOVERABLE_ERRORS as report_error:
+                    rollback_errors.append('report:' + str(report_error))
+            if rollback is not None:
+                try:
+                    self._restore_game_deletion_rollback(rollback)
+                except RECOVERABLE_ERRORS as rollback_error:
+                    rollback_errors.append(str(rollback_error))
+                try:
+                    self._remove_game_deletion_rollback(rollback)
+                except RECOVERABLE_ERRORS as rollback_cleanup_error:
+                    rollback_errors.append(str(rollback_cleanup_error))
+            elif staged is not None:
+                try:
+                    self._restore_staged_game_assets(staged)
+                except RECOVERABLE_ERRORS as rollback_error:
+                    rollback_errors.append(str(rollback_error))
+            with self.pending_lock:
+                existing_pending = {(str(item.get('gid')), str(item.get('session_id')), str(item.get('sample_id', item.get('id', '')))) for item in self.pending_samples}
+                for item in removed_pending:
+                    key = (str(item.get('gid')), str(item.get('session_id')), str(item.get('sample_id', item.get('id', ''))))
+                    if key not in existing_pending:
+                        self.pending_samples.append(item)
+                self._rebuild_pending_indexes_locked()
+                if self.pending_samples:
+                    self.pending_event.set()
+                self.writer_condition.notify_all()
+            details = str(error)
+            if rollback_errors:
+                details += '；回滚异常：' + '；'.join(rollback_errors)
+                raise StorageError('删除失败，自动回滚未完整完成：' + details) from error
+            raise StorageError('删除失败，游戏记录和相关文件已恢复：' + details) from error
         finally:
             with self.pending_lock:
                 self.blocked_game_ids.difference_update(deleting)
@@ -15155,7 +15493,7 @@ class DataStoreSampleMixin:
                 terminal = next((str(item.get('terminal_state')) for item in reversed(ordered) if item.get('done')), 'neutral')
                 total_reward = sum((safe_float(item.get('reward_t', item.get('reward', 0.0)), 0.0) for item in ordered))
                 override_count = sum((1 for item in ordered if item.get('human_override')))
-                metadata = {'schema_version': EPISODE_SCHEMA_VERSION, 'trajectory_schema_version': TRAJECTORY_SCHEMA_VERSION, 'step_count': len(ordered), 'source': 'sleep_reconstruction', 'observation_schema_version': OBSERVATION_SCHEMA_VERSION, 'skill_schema_version': SKILL_SCHEMA_VERSION}
+                metadata = {'schema_version': EPISODE_SCHEMA_VERSION, 'trajectory_schema_version': TRAJECTORY_SCHEMA_VERSION, 'step_count': len(ordered), 'source': 'upgrade_reconstruction', 'observation_schema_version': OBSERVATION_SCHEMA_VERSION, 'skill_schema_version': SKILL_SCHEMA_VERSION}
                 self.db.execute('INSERT INTO episodes(game_id,episode_id,task_id,started,finished,terminal_state,total_reward,human_override_count,model_version,metadata) VALUES(?,?,?,?,?,?,?,?,?,?)', (game_id, episode_id, task_id, started, finished, terminal, round(total_reward, 6), override_count, version, encode(metadata, 65536)))
                 step_rows = []
                 for position, item in enumerate(ordered):
@@ -15634,7 +15972,7 @@ class DataStoreSampleMixin:
         if count > DEFAULT_SAMPLE_BUDGET + 16:
             with self.lock, self.db:
                 self.db.execute('UPDATE games SET needs_review=1 WHERE id=?', (game_id,))
-            self.logger.write('SAMPLE_BUDGET_DEFERRED_TO_SLEEP', details={'game_id': game_id, 'estimated_samples': count, 'session_id': session_id, 'session_status': 'staging_or_unconfirmed'})
+            self.logger.write('SAMPLE_BUDGET_DEFERRED_TO_UPGRADE', details={'game_id': game_id, 'estimated_samples': count, 'session_id': session_id, 'session_status': 'staging_or_unconfirmed'})
         return True
 
     def discard_session(self, gid, session_id, reason='discarded'):
@@ -16095,11 +16433,11 @@ class DataStoreSampleMixin:
         result['commit_hash'] = hashlib.sha256(canonical_bytes(result)).hexdigest()
         return result
 
-    def commit_sleep_result(self, gid, models, plan):
+    def commit_upgrade_result(self, gid, models, plan):
         game_id = str(gid)
         records = list(models or [])
         if str(plan.get('game_id', '')) != game_id:
-            raise RuntimeError('睡眠模型与经验池计划游戏不一致')
+            raise RuntimeError('升级模型与经验池计划游戏不一致')
         with self.lock:
             old_models = [dict(row) for row in iter_rows(self.db.execute('SELECT game_id,slot,saved,created,prototype_count,validation,payload,checksum FROM models WHERE game_id=?', (game_id,)))]
             old_game = self.db.execute('SELECT needs_review,last_review FROM games WHERE id=?', (game_id,)).fetchone()
@@ -16108,7 +16446,7 @@ class DataStoreSampleMixin:
         try:
             for model_gid, model, complete in records:
                 if str(model_gid) != game_id:
-                    raise RuntimeError('睡眠子进程返回了其他游戏模型')
+                    raise RuntimeError('升级子进程返回了其他游戏模型')
                 self.save_model(game_id, model, complete)
             pool_result = self.apply_experience_pool_optimization(plan)
         except RECOVERABLE_ERRORS:
@@ -17057,18 +17395,17 @@ class GameSelectionDialog:
             app.show_error('请先停止当前模式')
             return
         working_games = [dict(item) for item in app.store.games()]
-        original_selected = app.selected_game['id'] if app.selected_game else None
-        working_selected = original_selected
+        working_selected = app.selected_game['id'] if app.selected_game else None
         win = tk.Toplevel(app.root)
         win.title('游戏名称')
         fit_window(win, 540, 450, 420, 340)
         win.transient(app.root)
         win.grab_set()
-        state = {'closed': False}
+        state = {'closed': False, 'refreshing': False}
         frame = ttk.Frame(win, padding=16)
         frame.pack(fill='both', expand=True)
         ttk.Label(frame, text='选择、新建、编辑或删除游戏名称', font=('Microsoft YaHei UI', 13, 'bold')).pack(anchor='w', pady=(0, 10))
-        ttk.Label(frame, text='所有修改仅保存在本对话框中；点击“确认”后一次性写入数据库。', wraplength=500).pack(anchor='w', pady=(0, 8))
+        ttk.Label(frame, text='所有修改都会立即保存；关闭按钮、窗口右上角和 ESC 都会保存当前选择后关闭。', wraplength=500).pack(anchor='w', pady=(0, 8))
         list_frame = ttk.Frame(frame)
         list_frame.pack(fill='both', expand=True)
         box = tk.Listbox(list_frame, exportselection=False, font=('Microsoft YaHei UI', 11))
@@ -17079,36 +17416,92 @@ class GameSelectionDialog:
 
         def refresh(target=None):
             nonlocal working_selected
-            box.delete(0, 'end')
-            for game in working_games:
-                suffix = '  [需要升级]' if game.get('needs_review') else ''
-                box.insert('end', game['name'] + suffix)
-            wanted = target if target is not None else working_selected
-            if wanted is not None:
-                for index, game in enumerate(working_games):
-                    if game['id'] == wanted:
-                        box.selection_set(index)
-                        box.see(index)
-                        working_selected = wanted
-                        return
-            working_selected = None
+            state['refreshing'] = True
+            try:
+                box.delete(0, 'end')
+                for game in working_games:
+                    suffix = '  [需要升级]' if game.get('needs_review') else ''
+                    box.insert('end', game['name'] + suffix)
+                wanted = target if target is not None else working_selected
+                if wanted is not None:
+                    for index, game in enumerate(working_games):
+                        if game['id'] == wanted:
+                            box.selection_set(index)
+                            box.see(index)
+                            working_selected = wanted
+                            return
+                if working_games:
+                    working_selected = str(working_games[0]['id'])
+                    box.selection_set(0)
+                    box.see(0)
+                else:
+                    working_selected = None
+            finally:
+                state['refreshing'] = False
 
         def current_index():
             selection = box.curselection()
             return selection[0] if selection else None
+
+        def reload_saved():
+            nonlocal working_selected
+            working_games[:] = [dict(item) for item in app.store.games()]
+            selected = app.store.selected_game()
+            working_selected = str(selected['id']) if selected else None
+            refresh(working_selected)
+
+        def persist(message='', close=False):
+            nonlocal working_selected
+            if state.get('closed'):
+                return False
+            selection = box.curselection()
+            if working_games:
+                if selection and selection[0] < len(working_games):
+                    working_selected = str(working_games[selection[0]]['id'])
+                elif not any(str(item['id']) == str(working_selected) for item in working_games):
+                    working_selected = str(working_games[0]['id'])
+            else:
+                working_selected = None
+            chosen = next((dict(item) for item in working_games if str(item['id']) == str(working_selected)), None)
+            previous_id = str(app.selected_game['id']) if app.selected_game else ''
+            try:
+                result = app.store.replace_games(working_games, working_selected)
+            except RECOVERABLE_ERRORS as error:
+                app.show_error('保存游戏名称失败：' + str(error))
+                reload_saved()
+                return False
+            chosen_id = str(chosen['id']) if chosen else ''
+            if previous_id != chosen_id:
+                clear_runtime_isolation()
+                app.window_generation += 1
+                app.selected_window = None
+                app.selected_numeric_region_id = ''
+            app.selected_game = chosen
+            app._refresh_all()
+            deleted = len(result.get('deleted_games', [])) if isinstance(result, dict) else 0
+            if message:
+                app.status.set(message + ('；已删除' + str(deleted) + '个游戏及关联数据' if deleted else ''))
+            elif chosen:
+                app.status.set('已保存并选择游戏：' + chosen['name'])
+            else:
+                app.status.set('已保存游戏列表；当前没有游戏')
+            if close:
+                app.close_dialog(win, state)
+            return True
 
         def add_game():
             nonlocal working_selected
             name = app.prompt_text('新建游戏', '输入游戏名称')
             if name is None:
                 return
-            if any((item['name'].casefold() == name.casefold() for item in working_games)):
+            if any(item['name'].casefold() == name.casefold() for item in working_games):
                 app.show_error('游戏名称已存在')
                 return
             game = {'id': uuid.uuid4().hex, 'name': name, 'created': time.time(), 'needs_review': False, 'last_review': None}
             working_games.append(game)
             working_selected = game['id']
             refresh(working_selected)
+            persist('已新建并保存游戏：' + name)
 
         def edit_game():
             index = current_index()
@@ -17118,11 +17511,12 @@ class GameSelectionDialog:
             name = app.prompt_text('编辑游戏', '修改游戏名称', working_games[index]['name'])
             if name is None:
                 return
-            if any((position != index and item['name'].casefold() == name.casefold() for position, item in enumerate(working_games))):
+            if any(position != index and item['name'].casefold() == name.casefold() for position, item in enumerate(working_games)):
                 app.show_error('游戏名称已存在')
                 return
             working_games[index]['name'] = name
             refresh(working_games[index]['id'])
+            persist('已编辑并保存游戏名称：' + name)
 
         def delete_game():
             nonlocal working_selected
@@ -17131,46 +17525,30 @@ class GameSelectionDialog:
                 app.show_error('请先选择一个游戏')
                 return
             item = working_games.pop(index)
-            if item['id'] in {original_selected, working_selected}:
-                working_selected = None
-            elif working_games:
-                working_selected = working_games[min(index, len(working_games) - 1)]['id']
-            refresh(working_selected)
-            app.status.set('已在临时列表标记删除：' + item['name'] + '；点击“确认”后删除相关文件和数据')
-
-        def confirm():
-            nonlocal working_selected
-            selection = box.curselection()
-            chosen = None
             if working_games:
-                if not selection:
-                    app.show_error('请先选择一个仍存在的游戏，或删除全部游戏后再确认')
-                    return
-                chosen = working_games[selection[0]]
-                working_selected = chosen['id']
-            result = app.store.replace_games(working_games, working_selected)
-            clear_runtime_isolation()
-            app.window_generation += 1
-            app.selected_window = None
-            app.selected_game = dict(chosen) if chosen is not None else None
-            app.selected_numeric_region_id = ''
-            app._refresh_all()
-            deleted = len(result.get('deleted_games', [])) if isinstance(result, dict) else 0
-            assets = safe_int(result.get('deleted_asset_count'), 0) if isinstance(result, dict) else 0
-            database_rows = safe_int(result.get('database_rows_deleted'), 0) if isinstance(result, dict) else 0
-            shared_records = safe_int(result.get('shared_records_removed'), 0) if isinstance(result, dict) else 0
-            report_path = str(result.get('deletion_report', '')) if isinstance(result, dict) else ''
-            cleanup_pending = bool(result.get('cleanup_pending')) if isinstance(result, dict) else False
-            residual_count = safe_int(result.get('residual_database_references'), 0) + safe_int(result.get('residual_file_references'), 0) if isinstance(result, dict) else 0
-            deletion_summary = ('；已删除数据库关联行' + str(database_rows) + '条' if deleted else '') + ('；已清理磁盘资产' + str(assets) + '项' if assets else '') + ('；已清理共享记录' + str(shared_records) + '条' if shared_records else '') + ('；删除报告：' + report_path if report_path else '')
-            if cleanup_pending or residual_count:
-                app.show_error('游戏记录已删除，但彻底清理尚未完成。残留引用数：' + str(residual_count) + ('；' + str(result.get('cleanup_error', '')) if isinstance(result, dict) and result.get('cleanup_error') else '') + ('；报告：' + report_path if report_path else ''))
-                app.status.set('游戏删除清理未完成' + deletion_summary)
-            elif chosen is None:
-                app.status.set('已删除全部游戏及相关文件和数据' + deletion_summary + '；残留引用数：0；请新建游戏')
+                working_selected = str(working_games[min(index, len(working_games) - 1)]['id'])
             else:
-                app.status.set('已提交游戏列表并选择：' + chosen['name'] + ('；已删除' + str(deleted) + '个游戏及其全部相关文件和数据' if deleted else '') + deletion_summary + ('；残留引用数：0' if deleted else ''))
-            app.close_dialog(win, state)
+                working_selected = None
+            refresh(working_selected)
+            persist('已删除游戏：' + item['name'])
+
+        def select_game(event=None):
+            nonlocal working_selected
+            if state.get('refreshing'):
+                return
+            index = current_index()
+            if index is None or index >= len(working_games):
+                return
+            selected = str(working_games[index]['id'])
+            if selected == str(working_selected):
+                return
+            working_selected = selected
+            persist('已选择并保存游戏：' + working_games[index]['name'])
+
+        def close_saved(event=None):
+            persist(close=True)
+            return 'break' if event is not None else None
+
         tools = ttk.Frame(frame)
         tools.pack(fill='x', pady=10)
         ttk.Button(tools, text='新建', command=add_game).pack(side='left', padx=(0, 6))
@@ -17178,13 +17556,14 @@ class GameSelectionDialog:
         ttk.Button(tools, text='删除', command=delete_game).pack(side='left', padx=6)
         actions = ttk.Frame(frame)
         actions.pack(fill='x')
-        ttk.Button(actions, text='取消', command=lambda: app.close_dialog(win, state)).pack(side='right')
-        ttk.Button(actions, text='确认', command=confirm).pack(side='right', padx=(0, 8))
-        win.protocol('WM_DELETE_WINDOW', lambda: app.close_dialog(win, state))
-        win.bind('<Escape>', lambda event: app.close_dialog(win, state))
+        ttk.Button(actions, text='关闭', command=close_saved).pack(side='right')
+        box.bind('<<ListboxSelect>>', select_game)
+        win.protocol('WM_DELETE_WINDOW', close_saved)
+        win.bind('<Escape>', close_saved)
         refresh()
         win.wait_visibility()
         box.focus_set()
+
 
 @dataclass(slots=True)
 class WindowSelectionState:
@@ -17433,6 +17812,7 @@ NUMERIC_NEURAL_MAX_HISTORY = 96
 NUMERIC_REWARD_DEFAULT_SCALE = 1.0
 NUMERIC_REWARD_MIN_SCALE = 1e-06
 NUMERIC_CONDITION_FAILED_DEFAULT_REWARD = 0.0
+NUMERIC_REWARD_POLICY = 'state_utility_delta_or_conditioned_transition_desirability_v1'
 
 @dataclass(frozen=True, slots=True)
 class NumericValue:
@@ -17720,7 +18100,19 @@ def _metric_delta_reward(before_metric, now_metric, higher_is_better=True, scale
     except (OverflowError, InvalidOperation, ValueError):
         reward = 1.0 if preference_delta_decimal > 0 else -1.0 if preference_delta_decimal < 0 else 0.0
     metric_delta = safe_float(now_metric) - safe_float(before_metric)
-    return {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': True, 'reward': max(-1.0, min(1.0, reward)), 'status': 'metric_delta', 'before_metric': safe_float(before_metric), 'now_metric': safe_float(now_metric), 'metric_delta': metric_delta if finite_number(metric_delta) else None, 'preference_delta': str(preference_delta_decimal), 'scale': selected_scale}
+    utility_before = safe_float(before_metric) if higher_is_better else -safe_float(before_metric)
+    utility_now = safe_float(now_metric) if higher_is_better else -safe_float(now_metric)
+    return {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': True, 'reward': max(-1.0, min(1.0, reward)), 'status': 'metric_delta', 'reward_policy': NUMERIC_REWARD_POLICY, 'reward_basis': 'normalized_state_utility_delta', 'utility_before': utility_before, 'utility_now': utility_now, 'utility_delta': utility_now - utility_before, 'before_metric': safe_float(before_metric), 'now_metric': safe_float(now_metric), 'metric_delta': metric_delta if finite_number(metric_delta) else None, 'preference_delta': str(preference_delta_decimal), 'scale': selected_scale}
+
+def _conditional_magnitude_reward(magnitude, lower_is_better, scale):
+    if not finite_number(magnitude):
+        return {'valid': False, 'observation_valid': False, 'configuration_valid': True, 'preference_applicable': False, 'reward': 0.0, 'status': 'invalid_metric'}
+    selected_scale = max(NUMERIC_REWARD_MIN_SCALE, abs(safe_float(scale, NUMERIC_REWARD_DEFAULT_SCALE)))
+    normalized = max(0.0, safe_float(magnitude)) / selected_scale
+    score = math.tanh(normalized)
+    reward = 1.0 - score if lower_is_better else score
+    raw_utility = -safe_float(magnitude) if lower_is_better else safe_float(magnitude)
+    return {'valid': True, 'observation_valid': True, 'configuration_valid': True, 'preference_applicable': True, 'reward': max(0.0, min(1.0, reward)), 'status': 'conditional_utility', 'reward_policy': NUMERIC_REWARD_POLICY, 'reward_basis': 'conditioned_transition_desirability', 'utility_before': None, 'utility_now': raw_utility, 'utility_delta': None, 'desirability': max(0.0, min(1.0, reward)), 'before_metric': 0.0, 'now_metric': safe_float(magnitude), 'metric_delta': safe_float(magnitude), 'preference_delta': str(-Decimal(str(magnitude)) if lower_is_better else Decimal(str(magnitude))), 'scale': selected_scale, 'utility_definition': '-abs(delta)' if lower_is_better else 'abs(delta)', 'reward_definition': '1-tanh(abs(delta)/scale)' if lower_is_better else 'tanh(abs(delta)/scale)'}
 
 def evaluate_numeric_preference_detailed(region, old_value, new_value, before_snapshot, now_snapshot):
     config = normalize_relation_config(region.get('relation_config', {}))
@@ -17760,7 +18152,7 @@ def evaluate_numeric_preference_detailed(region, old_value, new_value, before_sn
     if relation in {NumericPreference.POSITIVE_DELTA_HIGHER.value, NumericPreference.POSITIVE_DELTA_LOWER.value}:
         if delta_decimal <= 0:
             return condition_failed('positive_delta_condition_failed')
-        result.update(_metric_delta_reward(0.0, delta, relation == NumericPreference.POSITIVE_DELTA_HIGHER.value, reward_scale))
+        result.update(_conditional_magnitude_reward(delta, relation == NumericPreference.POSITIVE_DELTA_LOWER.value, reward_scale))
         result['status'] = 'positive_delta'
         return result
     if relation in {NumericPreference.NEGATIVE_DELTA_HIGHER.value, NumericPreference.NEGATIVE_DELTA_LOWER.value}:
@@ -17768,7 +18160,7 @@ def evaluate_numeric_preference_detailed(region, old_value, new_value, before_sn
         if decrease_decimal <= 0:
             return condition_failed('negative_delta_condition_failed')
         decrease = float(decrease_decimal)
-        result.update(_metric_delta_reward(0.0, decrease, relation == NumericPreference.NEGATIVE_DELTA_HIGHER.value, reward_scale))
+        result.update(_conditional_magnitude_reward(decrease, relation == NumericPreference.NEGATIVE_DELTA_LOWER.value, reward_scale))
         result['status'] = 'negative_delta'
         return result
     if relation in {NumericPreference.ABS_DELTA_HIGHER.value, NumericPreference.ABS_DELTA_LOWER.value}:
@@ -17776,7 +18168,7 @@ def evaluate_numeric_preference_detailed(region, old_value, new_value, before_sn
         if magnitude_decimal == 0:
             return condition_failed('absolute_delta_condition_failed')
         magnitude = float(magnitude_decimal)
-        result.update(_metric_delta_reward(0.0, magnitude, relation == NumericPreference.ABS_DELTA_HIGHER.value, reward_scale))
+        result.update(_conditional_magnitude_reward(magnitude, relation == NumericPreference.ABS_DELTA_LOWER.value, reward_scale))
         result['status'] = 'absolute_delta'
         return result
     if relation in NUMERIC_FIXED_VALUE_RELATIONS:
@@ -17809,6 +18201,19 @@ def evaluate_numeric_preference_detailed(region, old_value, new_value, before_sn
 def ensure_numeric_prediction_snapshot(value, fallback=None):
     if numeric_snapshot_value(value) is not None:
         return value
+    candidates = []
+    if isinstance(value, dict):
+        for source, key in (('online_temporal_prediction', 'predicted_value'), ('trusted_history_trend', 'trend_prediction'), ('last_reliable_value', 'last_observed_value'), ('persistent_last_session', 'persistent_value'), ('persistent_last_session', 'last_session_value'), ('fallback_prediction', 'fallback_value')):
+            number = value.get(key)
+            if finite_number(number):
+                candidates.append((source, safe_float(number), safe_float(value.get('confidence', value.get('last_observation_confidence', 0.55)), 0.55, 0.0, 1.0)))
+    fallback_number = numeric_snapshot_value(fallback)
+    if fallback_number is not None:
+        confidence = safe_float(fallback.get('confidence'), 0.55, 0.0, 1.0) if isinstance(fallback, dict) else 0.55
+        candidates.append(('fallback_prediction', fallback_number, max(0.35, confidence * 0.9)))
+    if candidates:
+        source, number, confidence = candidates[0]
+        return {'value': number, 'numeric_value': number, 'source': source, 'predicted': True, 'valid': True, 'available': True, 'confidence': confidence, 'prediction_source': source, 'prediction_fallback': True, 'reason': ''}
     reason = 'insufficient_prediction_evidence'
     if isinstance(value, dict) and value.get('reason'):
         reason = str(value.get('reason'))
@@ -17818,27 +18223,31 @@ def select_numeric_priority_difference(regions, before, now):
     before_snapshot = dict(before) if isinstance(before, dict) else {}
     now_snapshot = dict(now) if isinstance(now, dict) else {}
     ordered = sorted((dict(region) for region in regions or [] if isinstance(region, dict) and region.get('enabled', True)), key=lambda region: (safe_int(region.get('priority'), 0), safe_float(region.get('created'), 0.0), str(region.get('id', ''))))
+    used_prediction = False
     for region in ordered:
         region_id = str(region.get('id', ''))
-        old_value = ensure_numeric_prediction_snapshot(before_snapshot.get(region_id))
-        new_value = ensure_numeric_prediction_snapshot(now_snapshot.get(region_id))
+        raw_old = before_snapshot.get(region_id)
+        raw_new = now_snapshot.get(region_id)
+        old_value = ensure_numeric_prediction_snapshot(raw_old)
+        new_value = ensure_numeric_prediction_snapshot(raw_new, old_value)
         before_snapshot[region_id] = old_value
         now_snapshot[region_id] = new_value
+        used_prediction = used_prediction or bool(isinstance(old_value, dict) and old_value.get('predicted')) or bool(isinstance(new_value, dict) and new_value.get('predicted'))
         old_number = numeric_snapshot_value(old_value)
         new_number = numeric_snapshot_value(new_value)
         if old_number is None or new_number is None:
-            return {'status': 'priority_region_unavailable', 'region': region, 'region_id': region_id, 'priority': safe_int(region.get('priority'), 0), 'old_value': old_value, 'new_value': new_value, 'before': old_number, 'now': new_number, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': False, 'observation_valid': False, 'preference_applicable': False}
+            return {'status': 'waiting_for_priority_baseline', 'region': region, 'region_id': region_id, 'priority': safe_int(region.get('priority'), 0), 'old_value': old_value, 'new_value': new_value, 'before': old_number, 'now': new_number, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': False, 'observation_valid': False, 'preference_applicable': False, 'used_prediction': used_prediction}
         if numeric_values_equal(old_value, new_value):
             continue
-        return {'status': 'difference_selected', 'region': region, 'region_id': region_id, 'priority': safe_int(region.get('priority'), 0), 'old_value': old_value, 'new_value': new_value, 'before': old_number, 'now': new_number, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': True, 'observation_valid': True, 'preference_applicable': True}
-    return {'status': 'all_equal', 'region': None, 'region_id': '', 'priority': None, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': True, 'observation_valid': True, 'preference_applicable': False}
+        return {'status': 'difference_selected', 'region': region, 'region_id': region_id, 'priority': safe_int(region.get('priority'), 0), 'old_value': old_value, 'new_value': new_value, 'before': old_number, 'now': new_number, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': True, 'observation_valid': True, 'preference_applicable': True, 'used_prediction': used_prediction}
+    return {'status': 'all_equal', 'region': None, 'region_id': '', 'priority': None, 'before_snapshot': before_snapshot, 'now_snapshot': now_snapshot, 'valid': True, 'observation_valid': True, 'preference_applicable': False, 'used_prediction': used_prediction}
 
 def compare_numeric_snapshots_detailed(regions, before, now):
     selected = select_numeric_priority_difference(regions, before, now)
     if selected.get('status') != 'difference_selected':
-        return {'reward': 0.0, 'winning_region_id': '', 'status': str(selected.get('status', 'all_equal')), 'priority': selected.get('priority'), 'valid': bool(selected.get('valid', True)), 'observation_valid': bool(selected.get('observation_valid', True)), 'configuration_valid': True, 'preference_applicable': False, 'used_prediction': False}
+        return {'reward': 0.0, 'winning_region_id': '', 'status': str(selected.get('status', 'all_equal')), 'priority': selected.get('priority'), 'valid': bool(selected.get('valid', True)), 'observation_valid': bool(selected.get('observation_valid', True)), 'configuration_valid': True, 'preference_applicable': False, 'used_prediction': bool(selected.get('used_prediction'))}
     evaluation = evaluate_numeric_preference_detailed(selected['region'], selected['old_value'], selected['new_value'], selected['before_snapshot'], selected['now_snapshot'])
-    return {'reward': max(-1.0, min(1.0, safe_float(evaluation.get('reward'), 0.0))), 'winning_region_id': selected['region_id'], 'status': str(evaluation.get('status', 'metric_delta')), 'priority': selected['priority'], 'before': selected['before'], 'now': selected['now'], 'preference': str(evaluation.get('preference', '')), 'valid': bool(evaluation.get('valid')), 'observation_valid': bool(evaluation.get('observation_valid')), 'configuration_valid': bool(evaluation.get('configuration_valid', True)), 'preference_applicable': bool(evaluation.get('preference_applicable')), 'used_prediction': bool(isinstance(selected.get('old_value'), dict) and selected['old_value'].get('predicted') or isinstance(selected.get('new_value'), dict) and selected['new_value'].get('predicted')), 'utility': evaluation}
+    return {'reward': max(-1.0, min(1.0, safe_float(evaluation.get('reward'), 0.0))), 'winning_region_id': selected['region_id'], 'status': str(evaluation.get('status', 'metric_delta')), 'priority': selected['priority'], 'before': selected['before'], 'now': selected['now'], 'preference': str(evaluation.get('preference', '')), 'valid': bool(evaluation.get('valid')), 'observation_valid': bool(evaluation.get('observation_valid')), 'configuration_valid': bool(evaluation.get('configuration_valid', True)), 'preference_applicable': bool(evaluation.get('preference_applicable')), 'used_prediction': bool(selected.get('used_prediction')), 'utility': evaluation}
 
 def reorder_numeric_regions(regions, source_index, target_index):
     values = list(regions or [])
@@ -18141,12 +18550,14 @@ class NumericRegionEditor:
         self.list_drag_state = None
         self.photo = None
         self.closed = False
+        self.save_after_id = None
+        self.persisting = False
         self.win = tk.Toplevel(app.root)
         self.win.title('数字识别区域')
         fit_window(self.win, 1080, 720, 900, 620)
         self.win.transient(app.root)
-        self.win.protocol('WM_DELETE_WINDOW', self.cancel_and_close)
-        self.win.bind('<Escape>', lambda event: self.cancel_and_close())
+        self.win.protocol('WM_DELETE_WINDOW', self.save_and_close)
+        self.win.bind('<Escape>', lambda event: self.save_and_close())
         self._build()
         self.refresh_all()
         self.win.wait_visibility()
@@ -18208,6 +18619,7 @@ class NumericRegionEditor:
         ttk.Label(form, text='名称').grid(row=0, column=0, sticky='w')
         self.name_entry = ttk.Entry(form, textvariable=self.name_var, width=22)
         self.name_entry.grid(row=0, column=1, sticky='ew', padx=(6, 12))
+        self.name_entry.bind('<KeyRelease>', lambda event: self.apply_form(live=True))
         ttk.Label(form, text='数字偏好').grid(row=0, column=2, sticky='w')
         self.preference_box = ttk.Combobox(form, textvariable=self.preference_var, values=list(NUMERIC_PREFERENCE_OPTIONS), state='readonly', width=34)
         self.preference_box.grid(row=0, column=3, sticky='ew', padx=(6, 12))
@@ -18215,9 +18627,11 @@ class NumericRegionEditor:
         ttk.Label(form, text='另一区域').grid(row=0, column=4, sticky='w')
         self.compare_box = ttk.Combobox(form, textvariable=self.compare_var, state='readonly', width=24)
         self.compare_box.grid(row=0, column=5, sticky='ew', padx=(6, 0))
+        self.compare_box.bind('<<ComboboxSelected>>', lambda event: self.apply_form(live=True))
         ttk.Label(form, text='固定值').grid(row=1, column=0, sticky='w', pady=(8, 0))
         self.fixed_value_entry = ttk.Entry(form, textvariable=self.fixed_value_var, width=22)
         self.fixed_value_entry.grid(row=1, column=1, sticky='ew', padx=(6, 12), pady=(8, 0))
+        self.fixed_value_entry.bind('<KeyRelease>', lambda event: self.apply_form(live=True))
         ttk.Label(form, text='颜色').grid(row=1, column=2, sticky='w', pady=(8, 0))
         color_row = ttk.Frame(form)
         color_row.grid(row=1, column=3, sticky='ew', padx=(6, 12), pady=(8, 0))
@@ -18229,6 +18643,7 @@ class NumericRegionEditor:
         ttk.Label(form, text='奖励尺度').grid(row=2, column=0, sticky='w', pady=(8, 0))
         self.reward_scale_entry = ttk.Entry(form, textvariable=self.reward_scale_var, width=22)
         self.reward_scale_entry.grid(row=2, column=1, sticky='ew', padx=(6, 12), pady=(8, 0))
+        self.reward_scale_entry.bind('<KeyRelease>', lambda event: self.apply_form(live=True))
         ttk.Label(form, text='改善量达到该值时奖励约为±0.76；必须大于0').grid(row=2, column=2, columnspan=3, sticky='w', pady=(8, 0))
         ttk.Button(form, text='应用编辑', command=self.apply_form).grid(row=2, column=5, sticky='e', pady=(8, 0))
         for column in (1, 3, 5):
@@ -18237,8 +18652,7 @@ class NumericRegionEditor:
         bottom.pack(fill='x', pady=(10, 0))
         self.info = tk.StringVar(value='')
         ttk.Label(bottom, textvariable=self.info, wraplength=820).pack(side='left', fill='x', expand=True)
-        ttk.Button(bottom, text='取消', command=self.cancel_and_close).pack(side='right')
-        ttk.Button(bottom, text='保存', command=self.save_and_close).pack(side='right', padx=(0, 8))
+        ttk.Button(bottom, text='关闭', command=self.save_and_close).pack(side='right')
 
     def current(self):
         for region in self.regions:
@@ -18336,9 +18750,30 @@ class NumericRegionEditor:
         return (('nw', x, y), ('n', x + width / 2, y), ('ne', x + width, y), ('e', x + width, y + height / 2), ('se', x + width, y + height), ('s', x + width / 2, y + height), ('sw', x, y + height), ('w', x, y + height / 2))
 
     def hit_handle(self, region, px, py):
-        for name, hx, hy in self.handle_points(region):
-            if abs(px - hx) <= 9 and abs(py - hy) <= 9:
-                return name
+        x, y, width, height = self.canvas_rect(region)
+        right = x + width
+        bottom = y + height
+        margin = 9
+        near_left = abs(px - x) <= margin and y - margin <= py <= bottom + margin
+        near_right = abs(px - right) <= margin and y - margin <= py <= bottom + margin
+        near_top = abs(py - y) <= margin and x - margin <= px <= right + margin
+        near_bottom = abs(py - bottom) <= margin and x - margin <= px <= right + margin
+        if near_left and near_top:
+            return 'nw'
+        if near_right and near_top:
+            return 'ne'
+        if near_right and near_bottom:
+            return 'se'
+        if near_left and near_bottom:
+            return 'sw'
+        if near_top:
+            return 'n'
+        if near_right:
+            return 'e'
+        if near_bottom:
+            return 's'
+        if near_left:
+            return 'w'
         return None
 
     def hit_region(self, px, py):
@@ -18351,7 +18786,18 @@ class NumericRegionEditor:
     def canvas_press(self, event):
         selected = self.current()
         handle = self.hit_handle(selected, event.x, event.y) if selected is not None else None
-        target = selected if handle else self.hit_region(event.x, event.y)
+        target = selected if handle else None
+        if target is None:
+            for region in reversed(self.regions):
+                if selected is not None and str(region.get('id')) == str(selected.get('id')):
+                    continue
+                candidate_handle = self.hit_handle(region, event.x, event.y)
+                if candidate_handle is not None:
+                    target = region
+                    handle = candidate_handle
+                    break
+        if target is None:
+            target = self.hit_region(event.x, event.y)
         if target is None:
             self.selected_id = None
             self.drag_state = None
@@ -18395,6 +18841,7 @@ class NumericRegionEditor:
         self.drag_state = None
         self._refresh_tracking_template(self.current())
         self.refresh_list()
+        self.persist_changes()
 
     def _list_drag_press(self, event):
         if not self.regions:
@@ -18424,6 +18871,7 @@ class NumericRegionEditor:
         if isinstance(state, dict) and state.get('moved'):
             self.selected_id = state.get('selected_id') or None
             self.refresh_all()
+            self.persist_changes()
             return 'break'
         return None
 
@@ -18451,6 +18899,7 @@ class NumericRegionEditor:
         self.refresh_all()
         self.name_entry.focus_set()
         self.name_entry.selection_range(0, 'end')
+        self.persist_changes()
 
     def edit_region(self):
         if self.current() is None:
@@ -18467,6 +18916,7 @@ class NumericRegionEditor:
         self.regions = clean_numeric_region_references(self.regions, region.get('id'))
         self.selected_id = self.regions[0]['id'] if self.regions else None
         self.refresh_all()
+        self.persist_changes()
 
     def _preference_changed(self, update=True):
         relation = normalize_numeric_preference(NUMERIC_PREFERENCE_OPTIONS.get(self.preference_var.get(), DEFAULT_NUMERIC_PREFERENCE))
@@ -18494,7 +18944,7 @@ class NumericRegionEditor:
             self.color_text.set(_valid_overlay_color(chosen))
             self.apply_form(live=True)
 
-    def apply_form(self, live=False):
+    def apply_form(self, live=False, persist=True):
         region = self.current()
         if region is None:
             return
@@ -18513,20 +18963,22 @@ class NumericRegionEditor:
         if relation in NUMERIC_FIXED_VALUE_RELATIONS:
             if finite_number(self.fixed_value_var.get()):
                 config['fixed_value'] = safe_float(self.fixed_value_var.get())
-            elif not live:
-                raise ValueError('与固定值比较时必须输入有效固定值')
+            else:
+                config['fixed_value'] = 0.0
         else:
             config.pop('fixed_value', None)
         if finite_number(self.reward_scale_var.get()) and safe_float(self.reward_scale_var.get()) > 0.0:
             config['reward_scale'] = max(NUMERIC_REWARD_MIN_SCALE, safe_float(self.reward_scale_var.get()))
-        elif not live:
-            raise ValueError('奖励尺度必须是大于0的数字')
+        else:
+            config['reward_scale'] = NUMERIC_REWARD_DEFAULT_SCALE
         region['goal_relation'] = relation
         region['relation_config'] = config
         if not live:
             self._refresh_tracking_template(region)
         self.refresh_list()
         self.refresh_canvas()
+        if persist:
+            self._schedule_persist()
 
     def _validate_regions(self):
         ids = {str(region.get('id', '')) for region in self.regions}
@@ -18564,9 +19016,58 @@ class NumericRegionEditor:
         config.update({'tracking_template': templates[0], 'tracking_templates': templates, 'tracking_template_w': NUMERIC_TRACKING_TEMPLATE_W, 'tracking_template_h': NUMERIC_TRACKING_TEMPLATE_H, 'tracking_search': 'stable_ui_anchor_optical_flow_neural_embedding_multi_hypothesis', 'tracking_independent_scales': True, 'tracking_anchor_excludes_numeric_content': True, 'tracking_uses_learned_roi_embedding': True, 'tracking_uses_online_box_regression': True, 'tracking_occlusion_recovery': True, 'tracking_update_confirmation_frames': NUMERIC_TRACKING_CONFIRM_FRAMES, 'tracking_persist_stable': bool(config.get('tracking_persist_stable', False))})
         region['relation_config'] = config
 
-    def _close_without_saving(self):
+    def _cancel_pending_save(self):
+        if self.save_after_id is None:
+            return
+        try:
+            self.win.after_cancel(self.save_after_id)
+        except tk.TclError:
+            pass
+        self.save_after_id = None
+
+    def _schedule_persist(self):
+        if self.closed or self.persisting:
+            return
+        self._cancel_pending_save()
+        try:
+            self.save_after_id = self.win.after(180, self._persist_scheduled)
+        except tk.TclError:
+            self.save_after_id = None
+
+    def _persist_scheduled(self):
+        self.save_after_id = None
+        self.persist_changes()
+
+    def persist_changes(self, refresh_app=False):
+        if self.closed or self.persisting:
+            return False
+        self._cancel_pending_save()
+        self.persisting = True
+        try:
+            self._validate_regions()
+            saved = self.app.store.replace_ocr_regions(self.game['id'], self.regions)
+            selected_id = str(self.selected_id or '')
+            self.regions = [self._normalize_region(item) for item in saved]
+            if selected_id and any(str(item.get('id')) == selected_id for item in self.regions):
+                self.selected_id = selected_id
+            else:
+                self.selected_id = self.regions[0]['id'] if self.regions else None
+            self.app.selected_numeric_region_id = str(self.selected_id or '')
+            self.info.set('已实时保存 ' + str(len(self.regions)) + ' 个数字识别区域')
+            if refresh_app:
+                self.app.status.set('数字识别区域已保存：' + str(len(self.regions)) + ' 个')
+                self.app._refresh_all()
+            return True
+        except RECOVERABLE_ERRORS as error:
+            self.app.show_error('保存数字识别区域失败：' + str(error))
+            return False
+        finally:
+            self.persisting = False
+
+    def _close_editor(self):
         if self.closed:
             return
+        self._cancel_pending_save()
         self.closed = True
         try:
             self.win.grab_release()
@@ -18574,26 +19075,15 @@ class NumericRegionEditor:
             pass
         self.win.destroy()
 
-    def cancel_and_close(self):
-        self.app.status.set('已取消数字识别区域编辑，未保存任何修改')
-        self._close_without_saving()
-
     def save_and_close(self):
         if self.closed:
             return
-        try:
-            self.apply_form(live=False)
-            self._validate_regions()
-            for region in self.regions:
-                self._refresh_tracking_template(region)
-            saved = self.app.store.replace_ocr_regions(self.game['id'], self.regions)
-            self.app.selected_numeric_region_id = str(self.selected_id or '')
-            self.app.status.set('数字识别区域已保存：' + str(len(saved)) + ' 个')
-            self.app._refresh_all()
-        except RECOVERABLE_ERRORS as error:
-            self.app.show_error('保存数字识别区域失败：' + str(error))
+        self.apply_form(live=True, persist=False)
+        for region in self.regions:
+            self._refresh_tracking_template(region)
+        if not self.persist_changes(refresh_app=True):
             return
-        self._close_without_saving()
+        self._close_editor()
 
 class AppServiceBase:
     __slots__ = ('app',)
@@ -18648,7 +19138,7 @@ class AppUiService(AppServiceBase):
         self.controls.extend([choose, integrity])
         flow = ttk.LabelFrame(outer, text='操作流程', style='Card.TLabelframe')
         flow.pack(fill='x', pady=(0, 12))
-        primary_specs = [('游戏名称', self.open_game_dialog), ('选择窗口', self.open_window_dialog), (MODE_LABELS[ModeId.COLLECT], self.start_learning), (MODE_LABELS[ModeId.NUMERIC], self.open_numeric_region_dialog), (MODE_LABELS[ModeId.UPGRADE], self.start_sleep), (MODE_LABELS[ModeId.AI], self.start_training)]
+        primary_specs = [('游戏名称', self.open_game_dialog), ('选择窗口', self.open_window_dialog), (MODE_LABELS[ModeId.COLLECT], self.start_learning), (MODE_LABELS[ModeId.NUMERIC], self.open_numeric_region_dialog), (MODE_LABELS[ModeId.UPGRADE], self.start_upgrade), (MODE_LABELS[ModeId.AI], self.start_training)]
         for index, (name, command) in enumerate(primary_specs):
             button = ttk.Button(flow, text=name, command=command, style='Workflow.TButton')
             self.control_buttons[name] = button
@@ -18937,7 +19427,7 @@ class AppUiService(AppServiceBase):
             return {'unchanged': True, 'signature': signature}
         game_ready = isinstance(game, dict)
         window_ready = False
-        result = {'unchanged': False, 'signature': signature, 'game_text': game.get('name', '未选择') if game_ready else '请新建游戏', 'window_text': '未选择', 'window_detail': 'PID：-  类名：-  客户区：-  游戏区域：-', 'capture_text': '采集方式：未检测', 'sample_text': '样本：有效0  废弃0  session 0  数据0 KB', 'model_text': '单游戏模型：无  需要睡眠：否', 'training_ready': False, 'flow_text': ''}
+        result = {'unchanged': False, 'signature': signature, 'game_text': game.get('name', '未选择') if game_ready else '请新建游戏', 'window_text': '未选择', 'window_detail': 'PID：-  类名：-  客户区：-  游戏区域：-', 'capture_text': '采集方式：未检测', 'sample_text': '样本：有效0  废弃0  session 0  数据0 KB', 'model_text': '单游戏模型：无  需要升级：否', 'training_ready': False, 'flow_text': ''}
         if isinstance(window, dict):
             result['window_text'] = window.get('title', '未命名窗口')
             try:
@@ -18990,7 +19480,7 @@ class AppUiService(AppServiceBase):
                     retained_general = bool(trainable_validation.get('model_scope') == 'general_model' and trainable_validation.get('generalization_benchmark_verified') and trainable_validation.get('generalization_level_3_4_passed'))
                     retained_scope = '通用模型' if retained_general else '单游戏模型'
                     retained_text = '' if trainable_metadata is None or trainable_metadata.get('saved') == metadata.get('saved') else '  已保留可训练' + retained_scope + '：' + retained_status + '，授权动作：' + ('、'.join(retained_authorized) if retained_authorized else '已授权动作')
-                    result['model_text'] = model_kind + '：' + str(metadata.get('prototype_count', 0)) + '个原型  最近睡眠：' + created + '  ' + error_text + '  ' + detail + '  授权动作：' + ('、'.join(authorized) if authorized else '无') + '  需要睡眠：' + ('是' if needs else '否') + retained_text
+                    result['model_text'] = model_kind + '：' + str(metadata.get('prototype_count', 0)) + '个原型  最近升级：' + created + '  ' + error_text + '  ' + detail + '  授权动作：' + ('、'.join(authorized) if authorized else '无') + '  需要升级：' + ('是' if needs else '否') + retained_text
                     result['training_ready'] = bool(trainable_metadata is not None and retained_status in {'passed', 'basic_safe'} and (int(trainable_validation.get('authorized_prototypes', 0) or 0) > 0) and (not needs))
                     model_state = ('可训练（完整授权：' + ('、'.join(retained_authorized) if retained_authorized else '已授权动作') + '）' if retained_status == 'passed' else '可训练（仅基础安全动作：' + ('、'.join(retained_authorized) if retained_authorized else '已授权动作') + '）') if result['training_ready'] else '不可训练'
                     session_count = int(validation.get('session_count', sessions) or sessions)
@@ -19011,11 +19501,11 @@ class AppUiService(AppServiceBase):
                             left_count = safe_int(families.get('click|left', 0), 0, 0)
                             missing.insert(0, '普通左键样本 ' + str(max(0, VersionedThresholdConfig.basic_safe_min_positive - left_count)) + ' 个，或其他基础安全动作达到' + str(VersionedThresholdConfig.basic_safe_min_positive) + '个高一致样本')
                 else:
-                    result['model_text'] = '单游戏模型：无  需要睡眠：' + ('是' if needs else '否')
+                    result['model_text'] = '单游戏模型：无  需要升级：' + ('是' if needs else '否')
                     if valid <= 0:
                         missing.append('有效学习样本')
                     else:
-                        missing.append('完成一次睡眠')
+                        missing.append('完成一次升级')
             except RECOVERABLE_ERRORS as error:
                 result['sample_text'] = '数据统计失败'
                 result['model_text'] = str(error)
@@ -19026,7 +19516,7 @@ class AppUiService(AppServiceBase):
         if not window_ready:
             missing.append('选择并确认窗口与游戏区域')
         result['training_ready'] = bool(result.get('training_ready') and game_ready and window_ready)
-        learning_state = '可睡眠（有效' + str(valid) + '，独立session ' + str(sessions) + '）' if valid > 0 else '不足'
+        learning_state = '可升级（有效' + str(valid) + '，独立session ' + str(sessions) + '）' if valid > 0 else '不足'
         extra = '；还需要：' + '；'.join(dict.fromkeys(missing)) if missing else ''
         result['flow_text'] = '1. 游戏：' + ('已完成' if game_ready else '未完成') + '\n2. 窗口：' + ('已完成' if window_ready else '未完成') + '\n3. 学习数据：' + learning_state + '\n4. 模型：' + model_state + extra
         return result
@@ -19976,8 +20466,8 @@ class AppModeService(AppServiceBase):
             sample_bundle, stats = self.store.write_training_sample_bundle(game['id'], MAX_TRAINING_SAMPLES, 'policy')
             rejections = self.store.load_rejections(game['id'], 500)
             ocr_events = self.store.load_ocr_experience_events(game['id'], 5000)
-            sleep_seed = safe_int(getattr(self, 'sleep_seed', 0), 0, 0, 2 ** 63 - 1)
-            worker = ReviewProcessWorker({'base': str(self.store.base), 'game': game, 'sample_bundle': sample_bundle, 'stats': stats, 'rejections': rejections, 'ocr_events': ocr_events, 'profile': self.store.load_game_profile(game['id']), 'champion': self.store.load_model(game['id']), 'sleep_seed': sleep_seed, 'sleep_seed_evidence': dict(getattr(self, 'sleep_seed_evidence', {})), 'cache_capacity': 50000})
+            upgrade_seed = safe_int(getattr(self, 'upgrade_seed', 0), 0, 0, 2 ** 63 - 1)
+            worker = ReviewProcessWorker({'base': str(self.store.base), 'game': game, 'sample_bundle': sample_bundle, 'stats': stats, 'rejections': rejections, 'ocr_events': ocr_events, 'profile': self.store.load_game_profile(game['id']), 'champion': self.store.load_model(game['id']), 'upgrade_seed': upgrade_seed, 'upgrade_seed_evidence': dict(getattr(self, 'upgrade_seed_evidence', {})), 'cache_capacity': 50000})
             self.review_process = worker
             packet = None
             while True:
@@ -20000,11 +20490,11 @@ class AppModeService(AppServiceBase):
                     break
             if packet is None:
                 if self.stop_event is not None and self.stop_event.is_set():
-                    raise InputStopped('睡眠子进程已停止')
-                raise RuntimeError('睡眠子进程异常退出且未返回结果')
+                    raise InputStopped('升级子进程已停止')
+                raise RuntimeError('升级子进程异常退出且未返回结果')
             kind, payload = packet
             if kind == WorkerMessageKind.ERROR.value:
-                raise RuntimeError(payload.get('traceback', '睡眠子进程失败'))
+                raise RuntimeError(payload.get('traceback', '升级子进程失败'))
             models = list(payload.get('models', []))
             status = str(payload.get('status', 'failed'))
             details = dict(payload.get('details', {}))
@@ -20014,7 +20504,7 @@ class AppModeService(AppServiceBase):
                     retained.update((str(value) for value in model.get('training_checksums', []) if str(value)))
                     retained.update((str(value) for value in model.get('holdout_checksums', []) if str(value)))
                 plan = self.store.plan_experience_pool_optimization(game['id'], retained)
-                commit = self.store.commit_sleep_result(game['id'], models, plan)
+                commit = self.store.commit_upgrade_result(game['id'], models, plan)
                 before_metrics = dict(commit.get('model_before_metrics', {}))
                 after_metrics = dict(commit.get('model_after_metrics', {}))
                 model_optimized = bool(after_metrics.get('holdout_accuracy', 0.0) > before_metrics.get('holdout_accuracy', 0.0) or after_metrics.get('rejection_coverage', 0.0) > before_metrics.get('rejection_coverage', 0.0) or after_metrics.get('prototype_count', 0) < before_metrics.get('prototype_count', 0))
@@ -20023,18 +20513,18 @@ class AppModeService(AppServiceBase):
                 pool_downweighted = safe_int(commit['pool'].get('downweighted'), 0, 0)
                 pool_validation_completed = bool(commit['pool'].get('pool_validation_completed'))
                 pool_changed = bool(pool_deleted or pool_merged or pool_downweighted)
-                seed_evidence = dict(details.get('sleep_seed_evidence', getattr(self, 'sleep_seed_evidence', {})))
-                expected_evidence = dict(getattr(self, 'sleep_seed_evidence', {}))
-                deterministic_seed = bool(sleep_seed > 0 and seed_evidence.get('material_hash') and (seed_evidence.get('material_hash') == expected_evidence.get('material_hash')))
+                seed_evidence = dict(details.get('upgrade_seed_evidence', getattr(self, 'upgrade_seed_evidence', {})))
+                expected_evidence = dict(getattr(self, 'upgrade_seed_evidence', {}))
+                deterministic_seed = bool(upgrade_seed > 0 and seed_evidence.get('material_hash') and (seed_evidence.get('material_hash') == expected_evidence.get('material_hash')))
                 offline_evidence = dict(details.get('offline_network_evidence', {}))
-                details.update({'sleep_seed': sleep_seed, 'sleep_seed_evidence': seed_evidence, 'deterministic_seed': deterministic_seed, 'offline_network_blocked': bool(offline_evidence.get('blocked')), 'model_optimized': model_optimized, 'model_optimization_checked': True, 'pool_optimized': bool(pool_changed or pool_validation_completed), 'pool_changed': pool_changed, 'pool_validation_completed': pool_validation_completed, 'model_before_metrics': before_metrics, 'model_after_metrics': after_metrics, 'model_before_hash': commit['model_before_hash'], 'model_after_hash': commit['model_after_hash'], 'pool_before_hash': commit['pool']['before'].get('summary_hash', ''), 'pool_after_hash': commit['pool']['after'].get('summary_hash', ''), 'pool_before_metrics': commit['pool'].get('before', {}), 'pool_after_metrics': commit['pool'].get('after', {}), 'pool_deleted': pool_deleted, 'pool_merged': pool_merged, 'pool_downweighted': pool_downweighted, 'sleep_commit_hash': commit['commit_hash']})
+                details.update({'upgrade_seed': upgrade_seed, 'upgrade_seed_evidence': seed_evidence, 'deterministic_seed': deterministic_seed, 'offline_network_blocked': bool(offline_evidence.get('blocked')), 'model_optimized': model_optimized, 'model_optimization_checked': True, 'pool_optimized': bool(pool_changed or pool_validation_completed), 'pool_changed': pool_changed, 'pool_validation_completed': pool_validation_completed, 'model_before_metrics': before_metrics, 'model_after_metrics': after_metrics, 'model_before_hash': commit['model_before_hash'], 'model_after_hash': commit['model_after_hash'], 'pool_before_hash': commit['pool']['before'].get('summary_hash', ''), 'pool_after_hash': commit['pool']['after'].get('summary_hash', ''), 'pool_before_metrics': commit['pool'].get('before', {}), 'pool_after_metrics': commit['pool'].get('after', {}), 'pool_deleted': pool_deleted, 'pool_merged': pool_merged, 'pool_downweighted': pool_downweighted, 'upgrade_commit_hash': commit['commit_hash']})
                 model_text = '模型指标改善' if model_optimized else '模型优化检查完成，无需调整'
                 pool_text = '经验池已调整：删除' + str(pool_deleted) + '，合并计数' + str(pool_merged) + '，降权' + str(pool_downweighted) if pool_changed else '经验池优化检查完成，无需调整'
-                summary = str(payload.get('summary', '睡眠结束')) + '\n' + model_text + '；' + pool_text + '；提交哈希' + str(details['sleep_commit_hash'])
+                summary = str(payload.get('summary', '升级结束')) + '\n' + model_text + '；' + pool_text + '；提交哈希' + str(details['upgrade_commit_hash'])
                 return ModeResult(status, summary, details)
             for model_gid, model, complete in models:
                 self.store.save_model(model_gid, model, complete)
-            return ModeResult(status, payload.get('summary', '睡眠结束'), details)
+            return ModeResult(status, payload.get('summary', '升级结束'), details)
         finally:
             if worker is not None:
                 worker.request_stop()
@@ -20070,7 +20560,7 @@ class AppModeService(AppServiceBase):
             for other in comparisons:
                 operations += 1
                 if operations % 32 == 0 and self.should_stop():
-                    raise InputStopped('睡眠已停止')
+                    raise InputStopped('升级已停止')
                 other_key = compact_checksum_key(other)
                 key = (candidate_key, other_key) if candidate_key <= other_key else (other_key, candidate_key)
                 distance = cache.get(key)
@@ -20096,7 +20586,7 @@ class AppModeService(AppServiceBase):
             for other in comparisons:
                 operations += 1
                 if operations % 32 == 0 and self.should_stop():
-                    raise InputStopped('睡眠已停止')
+                    raise InputStopped('升级已停止')
                 total += action_geometry_distance(candidate['a'], other['a']) * float(other.get('weight', 1.0))
             if total < best_total:
                 best_total = total
@@ -20107,7 +20597,7 @@ class AppModeService(AppServiceBase):
         families = defaultdict(list)
         for index, sample in enumerate(samples):
             if index % 64 == 0 and self.should_stop():
-                raise InputStopped('睡眠已停止')
+                raise InputStopped('升级已停止')
             semantic = sample_semantic_action(sample)
             family = semantic_action_family_key(semantic)
             if family:
@@ -20117,7 +20607,7 @@ class AppModeService(AppServiceBase):
         operations = 0
         for family, items in sorted(families.items()):
             if self.should_stop():
-                raise InputStopped('睡眠已停止')
+                raise InputStopped('升级已停止')
             local = []
             for item in sorted(items, key=lambda value: str(value.get('checksum', ''))):
                 semantic = item['semantic_action']
@@ -20130,7 +20620,7 @@ class AppModeService(AppServiceBase):
                 for cluster in local:
                     operations += 1
                     if operations % 32 == 0 and self.should_stop():
-                        raise InputStopped('睡眠已停止')
+                        raise InputStopped('升级已停止')
                     semantic_gap = semantic_action_distance(semantic, cluster['semantic_medoid'])
                     geometry_gap = action_geometry_distance(item['a'], cluster['medoid']['a']) if coordinate_primary and cluster['coordinate_primary'] else 0.0
                     distances.append(semantic_gap + (geometry_gap if coordinate_primary else 0.0))
@@ -20146,7 +20636,7 @@ class AppModeService(AppServiceBase):
                     local.append({'family': family, 'members': [item], 'medoid': item, 'semantic_medoid': semantic, 'coordinate_primary': coordinate_primary})
             for index, cluster in enumerate(local):
                 if self.should_stop():
-                    raise InputStopped('睡眠已停止')
+                    raise InputStopped('升级已停止')
                 action = normalize_action(cluster['medoid']['a'])
                 semantic = normalize_semantic_action(cluster['semantic_medoid'])
                 canonical = semantic_action_signature(semantic)
@@ -20156,7 +20646,7 @@ class AppModeService(AppServiceBase):
                 learned_policies = []
                 for member_index, member in enumerate(cluster['members']):
                     if member_index % 32 == 0 and self.should_stop():
-                        raise InputStopped('睡眠已停止')
+                        raise InputStopped('升级已停止')
                     context = member.get('context', {}) if isinstance(member.get('context'), dict) else {}
                     if context.get('previous_action') == canonical and (not context.get('previous_action_changed_frame', True)) and finite_number(context.get('seconds_since_previous')) and (float(context.get('seconds_since_previous')) <= 1.5):
                         intervals.append(max(0.05, float(context.get('seconds_since_previous'))))
@@ -20197,7 +20687,7 @@ class AppModeService(AppServiceBase):
         visual_threshold = statistics.median(calibrated) if calibrated else 420.0
         for index, item in enumerate(items):
             if self.should_stop():
-                raise InputStopped('睡眠已停止')
+                raise InputStopped('升级已停止')
             if not clusters:
                 clusters.append([item])
             else:
@@ -20213,10 +20703,10 @@ class AppModeService(AppServiceBase):
         result = []
         semantic = sample_semantic_action(items[0]) if items else semantic_action_from_coordinate(action)
         canonical = semantic_action_signature(semantic)
-        temporal_seed = safe_int(getattr(self, 'sleep_seed', 0), 0, 0, 2 ** 63 - 1)
+        temporal_seed = safe_int(getattr(self, 'upgrade_seed', 0), 0, 0, 2 ** 63 - 1)
         for cluster_index, cluster in enumerate(clusters):
             if self.should_stop():
-                raise InputStopped('睡眠已停止')
+                raise InputStopped('升级已停止')
             medoid = self._prototype_medoid(cluster)
             distances = []
             temporal_distances = []
@@ -20225,7 +20715,7 @@ class AppModeService(AppServiceBase):
             medoid_embedding = temporal_state_embedding(temporal, temporal_seed)
             for item_index, item in enumerate(cluster):
                 if item_index % 32 == 0 and self.should_stop():
-                    raise InputStopped('睡眠已停止')
+                    raise InputStopped('升级已停止')
                 distances.append(sample_state_distance(item, medoid))
                 embedding = temporal_state_embedding(item.get('context', {}), temporal_seed)
                 embeddings.append(embedding)
@@ -20378,7 +20868,7 @@ class AppModeService(AppServiceBase):
             raise RuntimeError('模型不存在或格式无效')
         binding = model.get('model_binding')
         if not isinstance(binding, dict):
-            raise RuntimeError('模型缺少窗口绑定快照，请重新睡眠')
+            raise RuntimeError('模型缺少窗口绑定快照，请重新升级')
         identity = binding.get('safety_identity') if isinstance(binding.get('safety_identity'), dict) else binding
         adaptation = binding.get('visual_adaptation') if isinstance(binding.get('visual_adaptation'), dict) else binding
         current = self.api.target_identity(target)
@@ -20426,19 +20916,19 @@ class AppModeService(AppServiceBase):
         manifest = self.vision_runtime.manifest()
         stored = model.get('vision_model_manifest') if isinstance(model, dict) else None
         if not isinstance(stored, dict) or str(stored.get('checksum', '')) != str(manifest.get('checksum', '')) or safe_int(stored.get('architecture_version'), 0) != VISION_ARCHITECTURE_VERSION:
-            raise RuntimeError('离线AI视觉模型版本、权重或SHA-256已变化，请重新睡眠')
+            raise RuntimeError('离线AI视觉模型版本、权重或SHA-256已变化，请重新升级')
         if str(model.get('preprocess_hash', '')) != VISION_PREPROCESS_HASH or str(stored.get('preprocess_hash', '')) != VISION_PREPROCESS_HASH:
-            raise RuntimeError('RGB预处理签名变化，请重新睡眠')
+            raise RuntimeError('RGB预处理签名变化，请重新升级')
         current_runtime = manifest.get('runtime_fingerprint', {})
         stored_runtime = stored.get('runtime_fingerprint', {})
         if not isinstance(stored_runtime, dict) or str(stored_runtime.get('checksum', '')) != str(current_runtime.get('checksum', '')):
-            raise RuntimeError('运行库版本变化，明确拒绝旧模型，请重新睡眠')
+            raise RuntimeError('运行库版本变化，明确拒绝旧模型，请重新升级')
         current_ocr = hashlib.sha256(canonical_bytes([{key: item.get(key) for key in ('id', 'region_norm', 'region_type', 'number_format', 'goal_relation', 'target_min', 'target_max', 'special_value', 'special_meaning', 'reset_meaning', 'checksum')} for item in self.store.list_ocr_regions(self.require_game()['id'], True)])).hexdigest()
         if str(model.get('ocr_regions_checksum', '')) != current_ocr or safe_int(model.get('ocr_semantic_version', 0), 0) != OCR_SEMANTIC_VERSION:
-            raise RuntimeError('OCR区域或数字语义已变化，请重新睡眠')
+            raise RuntimeError('OCR区域或数字语义已变化，请重新升级')
         return True
 
-    def start_sleep(self):
+    def start_upgrade(self):
         try:
             self.require_ai_runtime()
             self.require_game()
@@ -20554,7 +21044,7 @@ class AppModeService(AppServiceBase):
                 self.api.validate_action_point(target, x, y, expected_rect, expected_dpi)
             return rect
 
-        def sleep_checked(duration):
+        def upgrade_checked(duration):
             deadline = time.monotonic() + max(0.0, float(duration))
             while time.monotonic() < deadline:
                 stop_check()
@@ -20578,7 +21068,7 @@ class AppModeService(AppServiceBase):
                 while time.monotonic() < deadline:
                     geometry()
                     self.api.renew_input_lease(lease, 0.25)
-                    sleep_checked(min(0.02, deadline - time.monotonic()))
+                    upgrade_checked(min(0.02, deadline - time.monotonic()))
             finally:
                 self.api.release_input_lease(lease)
             return
@@ -20586,7 +21076,7 @@ class AppModeService(AppServiceBase):
             deadline = time.monotonic() + item.get('duration', 0.35)
             while time.monotonic() < deadline:
                 geometry()
-                sleep_checked(min(0.02, deadline - time.monotonic()))
+                upgrade_checked(min(0.02, deadline - time.monotonic()))
             return
         path = item.get('path') or [[0.5, 0.5]] * 16
         current_point = path[0]
@@ -20604,13 +21094,13 @@ class AppModeService(AppServiceBase):
         if kind == 'move':
             for point in path[1:]:
                 move_to(point)
-                sleep_checked(max(0.004, item['duration'] / max(1, len(path) - 1)))
+                upgrade_checked(max(0.004, item['duration'] / max(1, len(path) - 1)))
             return
         if kind == 'hover':
             deadline = time.monotonic() + item['duration']
             while time.monotonic() < deadline:
                 geometry(current_point)
-                sleep_checked(min(0.02, deadline - time.monotonic()))
+                upgrade_checked(min(0.02, deadline - time.monotonic()))
             return
         if kind in {'scroll_v', 'scroll_h'}:
             geometry(current_point)
@@ -20625,12 +21115,12 @@ class AppModeService(AppServiceBase):
                 geometry(current_point)
                 self.api.button(button, True)
                 try:
-                    sleep_checked(0.045)
+                    upgrade_checked(0.045)
                 finally:
                     self.api.button(button, False)
                 if iteration == 0:
                     stop_check()
-                    sleep_checked(0.09)
+                    upgrade_checked(0.09)
                     stop_check()
             return
         clip = None
@@ -20649,13 +21139,13 @@ class AppModeService(AppServiceBase):
                     deadline = time.monotonic() + step_time
                     while time.monotonic() < deadline:
                         geometry(current_point)
-                        sleep_checked(min(0.012, deadline - time.monotonic()))
+                        upgrade_checked(min(0.012, deadline - time.monotonic()))
             else:
                 hold = item['duration'] if kind == 'long_press' else min(0.13, item['duration'])
                 deadline = time.monotonic() + hold
                 while time.monotonic() < deadline:
                     geometry(current_point)
-                    sleep_checked(min(0.01, deadline - time.monotonic()))
+                    upgrade_checked(min(0.01, deadline - time.monotonic()))
         finally:
             if pressed:
                 try:
@@ -20676,12 +21166,12 @@ class AppModeService(AppServiceBase):
             target = self.require_window(False)
             model = self.store.load_trainable_model(game['id'])
             if not model or not model.get('prototypes'):
-                raise RuntimeError('没有已授权动作的可训练模型，请先完成学习和睡眠；普通左键单击、移动、悬停、等待可在单次高重复一致学习后获得基础安全授权')
+                raise RuntimeError('没有已授权动作的可训练模型，请先完成学习和升级；普通左键单击、移动、悬停、等待可在单次高重复一致学习后获得基础安全授权')
             if str(model.get('validation', {}).get('status', '')) not in {'passed', 'basic_safe'}:
                 raise RuntimeError('模型没有通过完整验收，也没有获得基础安全动作授权')
             current = next((item for item in self.store.games() if item['id'] == game['id']), {})
             if current.get('needs_review'):
-                raise RuntimeError('模型需要睡眠：请先点击“睡眠”完成离线优化')
+                raise RuntimeError('模型需要升级：请先点击“升级”完成离线优化')
             self.validate_model_binding(model, target)
         except RECOVERABLE_ERRORS as error:
             self.show_error(str(error))
@@ -21341,57 +21831,18 @@ class AppStorageService(AppServiceBase):
         return ModeResult('completed', '文件处理完成；视觉：' + vision_text + '；OCR：' + ocr_text + '；模型格式：' + str(runtime_details['vision_serialization']), {'runtime': runtime_details})
 
 class App:
+    _DELEGATED_SERVICE_METHODS = {'_action_medoid': 'mode_service', '_ai_worker_failed': 'storage_service', '_apply_refresh_snapshot': 'ui_service', '_begin_mode_stopping': 'lifecycle_service', '_build': 'ui_service', '_cluster_action_group': 'mode_service', '_cluster_action_samples': 'mode_service', '_collect_refresh_snapshot': 'ui_service', '_commit_prepared_directory': 'storage_service', '_escape_hook_signal': 'lifecycle_service', '_fail_active_mode': 'lifecycle_service', '_handle_mode_thread_timeout': 'lifecycle_service', '_keyboard_escape': 'lifecycle_service', '_learning_worker_impl': 'mode_service', '_limit_prototypes': 'mode_service', '_make_shutdown_coordinator': 'lifecycle_service', '_poll_mode_shutdown': 'lifecycle_service', '_poll_shutdown': 'lifecycle_service', '_prototype_medoid': 'mode_service', '_rank_action_candidates_base': 'mode_service', '_refresh_all': 'ui_service', '_restore_directory_display': 'storage_service', '_review_worker_impl': 'mode_service', '_run_review_process': 'mode_service', '_set_capture_options': 'ui_service', '_show_result_modal': 'ui_service', '_split_review_samples': 'mode_service', '_start_ai_worker': 'storage_service', '_start_mode_transaction': 'lifecycle_service', '_sync_capture_options_from_profile': 'ui_service', '_training_worker_impl': 'mode_service', '_try_open_local_data_directory': 'storage_service', '_window_state_signature': 'ui_service', 'action_cooldown': 'mode_service', 'action_strictness': 'mode_service', 'action_text': 'mode_service', 'basic_actions': 'mode_service', 'choose_data_directory': 'storage_service', 'close': 'lifecycle_service', 'close_dialog': 'ui_service', 'confirm_dialog': 'ui_service', 'evaluate_action_candidates': 'mode_service', 'execute_action': 'mode_service', 'integrity_check_worker': 'storage_service', 'learning_worker': 'mode_service', 'open_game_dialog': 'ui_service', 'open_numeric_region_dialog': 'ui_service', 'open_window_dialog': 'ui_service', 'poll_global_escape': 'lifecycle_service', 'process_ui_queue': 'lifecycle_service', 'prompt_text': 'ui_service', 'rank_action_candidates': 'mode_service', 'refresh_all_async': 'ui_service', 'refresh_data_stats': 'ui_service', 'request_mode_stop': 'lifecycle_service', 'request_stop': 'lifecycle_service', 'require_ai_runtime': 'storage_service', 'review_worker': 'mode_service', 'run_background': 'lifecycle_service', 'set_controls': 'lifecycle_service', 'show_error': 'ui_service', 'show_info': 'ui_service', 'start_integrity_check': 'storage_service', 'start_learning': 'mode_service', 'start_training': 'mode_service', 'start_upgrade': 'mode_service', 'start_worker': 'lifecycle_service', 'tk_exception': 'ui_service', 'training_worker': 'mode_service', 'ui': 'ui_service', 'validate_model_binding': 'mode_service', 'wait_escape_release': 'lifecycle_service', 'worker_entry': 'lifecycle_service'}
 
-    def _build(self, *args, **kwargs):
-        return self.ui_service._build(*args, **kwargs)
+    def __getattr__(self, name):
+        service_name = self._DELEGATED_SERVICE_METHODS.get(name)
+        if service_name is None:
+            raise AttributeError(name)
+        try:
+            service = object.__getattribute__(self, service_name)
+        except AttributeError as error:
+            raise AttributeError(name) from error
+        return getattr(service, name)
 
-    def _set_capture_options(self, *args, **kwargs):
-        return self.ui_service._set_capture_options(*args, **kwargs)
-
-    def _sync_capture_options_from_profile(self, *args, **kwargs):
-        return self.ui_service._sync_capture_options_from_profile(*args, **kwargs)
-
-    def tk_exception(self, *args, **kwargs):
-        return self.ui_service.tk_exception(*args, **kwargs)
-
-    def ui(self, *args, **kwargs):
-        return self.ui_service.ui(*args, **kwargs)
-
-    def close_dialog(self, *args, **kwargs):
-        return self.ui_service.close_dialog(*args, **kwargs)
-
-    def _show_result_modal(self, *args, **kwargs):
-        return self.ui_service._show_result_modal(*args, **kwargs)
-
-    def show_error(self, *args, **kwargs):
-        return self.ui_service.show_error(*args, **kwargs)
-
-    def show_info(self, *args, **kwargs):
-        return self.ui_service.show_info(*args, **kwargs)
-
-    def prompt_text(self, *args, **kwargs):
-        return self.ui_service.prompt_text(*args, **kwargs)
-
-    def confirm_dialog(self, *args, **kwargs):
-        return self.ui_service.confirm_dialog(*args, **kwargs)
-
-    def _window_state_signature(self, *args, **kwargs):
-        return self.ui_service._window_state_signature(*args, **kwargs)
-
-    def _collect_refresh_snapshot(self, *args, **kwargs):
-        return self.ui_service._collect_refresh_snapshot(*args, **kwargs)
-
-    def _apply_refresh_snapshot(self, *args, **kwargs):
-        return self.ui_service._apply_refresh_snapshot(*args, **kwargs)
-
-    def refresh_all_async(self, *args, **kwargs):
-        return self.ui_service.refresh_all_async(*args, **kwargs)
-
-    def _refresh_all(self, *args, **kwargs):
-        return self.ui_service._refresh_all(*args, **kwargs)
-
-    def refresh_data_stats(self, *args, **kwargs):
-        return self.ui_service.refresh_data_stats(*args, **kwargs)
 
     def _base_periodic_refresh_strict(self, *args, **kwargs):
         return self.ui_service.periodic_refresh(*args, **kwargs)
@@ -21399,179 +21850,11 @@ class App:
     def periodic_refresh(self, *args, **kwargs):
         return _strict_periodic_refresh(self)
 
-    def open_game_dialog(self, *args, **kwargs):
-        return self.ui_service.open_game_dialog(*args, **kwargs)
-
-    def open_window_dialog(self, *args, **kwargs):
-        return self.ui_service.open_window_dialog(*args, **kwargs)
-
-    def open_numeric_region_dialog(self, *args, **kwargs):
-        return self.ui_service.open_numeric_region_dialog(*args, **kwargs)
-
-    def run_background(self, *args, **kwargs):
-        return self.lifecycle_service.run_background(*args, **kwargs)
-
-    def process_ui_queue(self, *args, **kwargs):
-        return self.lifecycle_service.process_ui_queue(*args, **kwargs)
-
-    def _make_shutdown_coordinator(self, *args, **kwargs):
-        return self.lifecycle_service._make_shutdown_coordinator(*args, **kwargs)
-
-    def _begin_mode_stopping(self, *args, **kwargs):
-        return self.lifecycle_service._begin_mode_stopping(*args, **kwargs)
-
-    def _handle_mode_thread_timeout(self, *args, **kwargs):
-        return self.lifecycle_service._handle_mode_thread_timeout(*args, **kwargs)
-
-    def _poll_mode_shutdown(self, *args, **kwargs):
-        return self.lifecycle_service._poll_mode_shutdown(*args, **kwargs)
-
-    def _fail_active_mode(self, *args, **kwargs):
-        return self.lifecycle_service._fail_active_mode(*args, **kwargs)
-
-    def _escape_hook_signal(self, *args, **kwargs):
-        return self.lifecycle_service._escape_hook_signal(*args, **kwargs)
-
-    def poll_global_escape(self, *args, **kwargs):
-        return self.lifecycle_service.poll_global_escape(*args, **kwargs)
-
-    def set_controls(self, *args, **kwargs):
-        return self.lifecycle_service.set_controls(*args, **kwargs)
-
-    def _start_mode_transaction(self, *args, **kwargs):
-        return self.lifecycle_service._start_mode_transaction(*args, **kwargs)
-
-    def start_worker(self, *args, **kwargs):
-        return self.lifecycle_service.start_worker(*args, **kwargs)
-
-    def worker_entry(self, *args, **kwargs):
-        return self.lifecycle_service.worker_entry(*args, **kwargs)
-
-    def request_mode_stop(self, *args, **kwargs):
-        return self.lifecycle_service.request_mode_stop(*args, **kwargs)
-
-    def request_stop(self, *args, **kwargs):
-        return self.lifecycle_service.request_stop(*args, **kwargs)
-
-    def _keyboard_escape(self, *args, **kwargs):
-        return self.lifecycle_service._keyboard_escape(*args, **kwargs)
-
-    def wait_escape_release(self, *args, **kwargs):
-        return self.lifecycle_service.wait_escape_release(*args, **kwargs)
-
-    def close(self, *args, **kwargs):
-        return self.lifecycle_service.close(*args, **kwargs)
-
-    def _poll_shutdown(self, *args, **kwargs):
-        return self.lifecycle_service._poll_shutdown(*args, **kwargs)
-
-    def start_learning(self, *args, **kwargs):
-        return self.mode_service.start_learning(*args, **kwargs)
-
-    def learning_worker(self, *args, **kwargs):
-        return self.mode_service.learning_worker(*args, **kwargs)
-
-    def _learning_worker_impl(self, *args, **kwargs):
-        return self.mode_service._learning_worker_impl(*args, **kwargs)
-
-    def _run_review_process(self, *args, **kwargs):
-        return self.mode_service._run_review_process(*args, **kwargs)
-
-    def _prototype_medoid(self, *args, **kwargs):
-        return self.mode_service._prototype_medoid(*args, **kwargs)
-
-    def _action_medoid(self, *args, **kwargs):
-        return self.mode_service._action_medoid(*args, **kwargs)
-
-    def _cluster_action_samples(self, *args, **kwargs):
-        return self.mode_service._cluster_action_samples(*args, **kwargs)
-
-    def _cluster_action_group(self, *args, **kwargs):
-        return self.mode_service._cluster_action_group(*args, **kwargs)
-
-    def _rank_action_candidates_base(self, *args, **kwargs):
-        return self.mode_service._rank_action_candidates_base(*args, **kwargs)
-
-    def rank_action_candidates(self, *args, **kwargs):
-        return self.mode_service.rank_action_candidates(*args, **kwargs)
-
-    def evaluate_action_candidates(self, *args, **kwargs):
-        return self.mode_service.evaluate_action_candidates(*args, **kwargs)
-
-    def validate_model_binding(self, *args, **kwargs):
-        return self.mode_service.validate_model_binding(*args, **kwargs)
-
-    def start_sleep(self, *args, **kwargs):
-        return self.mode_service.start_sleep(*args, **kwargs)
-
-    def _limit_prototypes(self, *args, **kwargs):
-        return self.mode_service._limit_prototypes(*args, **kwargs)
-
-    def _split_review_samples(self, *args, **kwargs):
-        return self.mode_service._split_review_samples(*args, **kwargs)
-
-    def _review_worker_impl(self, *args, **kwargs):
-        return self.mode_service._review_worker_impl(*args, **kwargs)
-
-    def review_worker(self, *args, **kwargs):
-        return self.mode_service.review_worker(*args, **kwargs)
-
-    def action_text(self, *args, **kwargs):
-        return self.mode_service.action_text(*args, **kwargs)
-
-    def action_cooldown(self, *args, **kwargs):
-        return self.mode_service.action_cooldown(*args, **kwargs)
-
-    def action_strictness(self, *args, **kwargs):
-        return self.mode_service.action_strictness(*args, **kwargs)
-
-    def execute_action(self, *args, **kwargs):
-        return self.mode_service.execute_action(*args, **kwargs)
-
-    def start_training(self, *args, **kwargs):
-        return self.mode_service.start_training(*args, **kwargs)
-
-    def training_worker(self, *args, **kwargs):
-        return self.mode_service.training_worker(*args, **kwargs)
-
-    def _training_worker_impl(self, *args, **kwargs):
-        return self.mode_service._training_worker_impl(*args, **kwargs)
-
-    def basic_actions(self, *args, **kwargs):
-        return self.mode_service.basic_actions(*args, **kwargs)
-
-    def _restore_directory_display(self, *args, **kwargs):
-        return self.storage_service._restore_directory_display(*args, **kwargs)
-
-    def _try_open_local_data_directory(self, *args, **kwargs):
-        return self.storage_service._try_open_local_data_directory(*args, **kwargs)
-
-    def choose_data_directory(self, *args, **kwargs):
-        return self.storage_service.choose_data_directory(*args, **kwargs)
-
-    def _commit_prepared_directory(self, *args, **kwargs):
-        return self.storage_service._commit_prepared_directory(*args, **kwargs)
-
-    def _ai_worker_failed(self, *args, **kwargs):
-        return self.storage_service._ai_worker_failed(*args, **kwargs)
-
-    def _start_ai_worker(self, *args, **kwargs):
-        return self.storage_service._start_ai_worker(*args, **kwargs)
-
     def _base_update_runtime_status_strict(self, *args, **kwargs):
         return self.storage_service._update_runtime_status(*args, **kwargs)
 
     def _update_runtime_status(self, *args, **kwargs):
         return _strict_update_runtime_status(self)
-
-    def require_ai_runtime(self, *args, **kwargs):
-        return self.storage_service.require_ai_runtime(*args, **kwargs)
-
-    def start_integrity_check(self, *args, **kwargs):
-        return self.storage_service.start_integrity_check(*args, **kwargs)
-
-    def integrity_check_worker(self, *args, **kwargs):
-        return self.storage_service.integrity_check_worker(*args, **kwargs)
 
     @property
     def mode_state(self):
@@ -21685,11 +21968,11 @@ class App:
         self.window_detail = tk.StringVar(value='PID：-  类名：-  客户区：-')
         self.capture_text = tk.StringVar(value='采集方式：未检测')
         self.sample_text = tk.StringVar(value='样本：有效0  废弃0  数据0 KB')
-        self.model_text = tk.StringVar(value='单游戏模型：无  需要睡眠：否')
+        self.model_text = tk.StringVar(value='单游戏模型：无  需要升级：否')
         self.confidence_text = tk.StringVar(value='离线AI运行库：未检查')
         self.capability_text = tk.StringVar(value='视觉后端：未检查；策略后端：未检查；线程：-；当前截图：- FPS；语义分析：-；队列占用：0%\n模型范围：单游戏模型；泛化基准：未安装；GPU回退原因：尚未执行后端基准测试')
         self.input_text = tk.StringVar(value='自动输入：已锁定')
-        self.capture_options = CaptureOptions()
+        self.capture_options = CaptureOptions(mouse=True, keyboard=True, gamepad=False, audio=False)
         self.progress_value = tk.DoubleVar(value=0.0)
         self.escape_metrics = {'pressed': 0.0, 'input_locked': 0.0, 'cleanup_started': 0.0, 'finished': 0.0, 'fallback_used': False}
         self.keyboard_monitor = None
@@ -21909,8 +22192,8 @@ class ReviewProcessHost:
     def __init__(self, payload, stop_event, connection):
         self.selected_game = dict(payload['game'])
         self.store = ReviewProcessStore(payload)
-        self.sleep_seed = safe_int(payload.get('sleep_seed'), 0, 0, 2 ** 63 - 1)
-        self.sleep_seed_evidence = dict(payload.get('sleep_seed_evidence', {}))
+        self.upgrade_seed = safe_int(payload.get('upgrade_seed'), 0, 0, 2 ** 63 - 1)
+        self.upgrade_seed_evidence = dict(payload.get('upgrade_seed_evidence', {}))
         self.lifecycle = ReviewProcessLifecycle(stop_event)
         self.review_distance_cache = BoundedLRU(payload.get('cache_capacity', 50000))
         self.candidate_cache = BoundedLRU(64)
@@ -21926,7 +22209,7 @@ class ReviewProcessHost:
 
     def require_game(self):
         if not self.selected_game:
-            raise RuntimeError('睡眠子进程缺少游戏')
+            raise RuntimeError('升级子进程缺少游戏')
         return self.selected_game
 
     def should_stop(self):
@@ -21934,7 +22217,7 @@ class ReviewProcessHost:
 
     def wait_escape_release(self):
         if self.should_stop():
-            raise InputStopped('睡眠已停止')
+            raise InputStopped('升级已停止')
         return True
 
     def set_progress(self, value):
@@ -22579,6 +22862,94 @@ def validate_data_directory_selection(path, source_store=None, source_base=None)
     _filesystem_capability_check(probe_root)
     return {'path': str(destination), 'free': free, 'required': required}
 
+def _stage_directory_source(staging, source_store, source_path, reopening, stop_event, progress):
+    if source_store is not None and source_path is not None:
+        source_inventory = database_inventory(source_store.db_path, source_path)
+        destination_db = staging / 'universal_game_ai.db'
+        with source_store.lock:
+            source_connection = source_store.db.current()
+            target_connection = sqlite3.connect(str(destination_db), timeout=10.0)
+            try:
+                source_connection.backup(target_connection, pages=256)
+                target_connection.commit()
+            finally:
+                target_connection.close()
+        if progress is not None:
+            progress(20.0)
+        copy_migration_files(source_path, staging, stop_event, progress)
+        return source_inventory
+    if reopening and source_path is not None:
+        source_inventory = database_inventory(source_path / 'universal_game_ai.db', source_path)
+        source_connection = sqlite3.connect(str(source_path / 'universal_game_ai.db'), timeout=10.0)
+        target_connection = sqlite3.connect(str(staging / 'universal_game_ai.db'), timeout=10.0)
+        try:
+            source_connection.backup(target_connection, pages=256)
+            target_connection.commit()
+        finally:
+            target_connection.close()
+            source_connection.close()
+        if progress is not None:
+            progress(20.0)
+        copy_migration_files(source_path, staging, stop_event, progress)
+        return source_inventory
+    return None
+
+def _materialize_directory_layout(staging, progress):
+    for name in ('runtime.current', 'models', 'models/vision', 'models/ocr', 'cache', 'cache/pip', 'cache/pycache', 'cache/torch_extensions', 'cache/cuda', 'cache/numba', 'cache/matplotlib', 'temp', 'backups', 'quarantine', 'audit'):
+        (staging / name).mkdir(parents=True, exist_ok=True)
+    main_hash = materialize_entry_script(staging)
+    if progress is not None:
+        progress(70.0)
+    return main_hash
+
+def _validate_directory_candidate(staging, source_inventory):
+    candidate = DataStore(staging)
+    try:
+        if candidate.read_only:
+            raise RuntimeError(candidate.read_only_reason or '数据库只读')
+        candidate.sample_write_barrier()
+        with candidate.lock:
+            candidate.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        target_inventory = database_inventory(candidate.db_path, staging)
+        if target_inventory.get('schema_version') != DATABASE_SCHEMA_VERSION:
+            raise RuntimeError('数据库结构升级失败')
+        if source_inventory is not None:
+            for key in ('games', 'game_count', 'sample_count', 'model_count', 'vision_model_count', 'selected_game', 'model_files'):
+                if target_inventory.get(key) != source_inventory.get(key):
+                    raise RuntimeError('迁移校验不一致：' + str(key))
+        second = sqlite3.connect(str(candidate.db_path), timeout=0.1)
+        try:
+            candidate.db.execute('BEGIN IMMEDIATE')
+            locked = False
+            try:
+                second.execute('BEGIN IMMEDIATE')
+            except sqlite3.OperationalError:
+                locked = True
+            finally:
+                try:
+                    second.rollback()
+                except RECOVERABLE_ERRORS as error:
+                    record_cleanup_error('BEST_EFFORT_EXCEPTION', error)
+                candidate.db.rollback()
+            if not locked:
+                raise RuntimeError('SQLite写锁测试失败')
+        finally:
+            second.close()
+        runtime_manifest = directory_runtime_manifest(staging)
+        sha_manifest = data_tree_manifest(staging)
+        verify_data_tree_manifest(staging, sha_manifest)
+        return candidate, target_inventory, runtime_manifest, sha_manifest
+    except RECOVERABLE_ERRORS:
+        try:
+            candidate.close(5.0)
+        except RECOVERABLE_ERRORS as error:
+            record_cleanup_error('BEST_EFFORT_EXCEPTION', error)
+        raise
+
+def _write_directory_migration_manifest(staging, source_path, destination, target_inventory, sha_manifest, main_hash):
+    payload = {'source': str(source_path) if source_path is not None else None, 'destination': str(destination), 'inventory': target_inventory, 'sha256': sha_manifest, 'main_py': {'path': 'main.py', 'sha256': main_hash}, 'entry_script_materialized': True}
+    (staging / '.ugai_migration_manifest.json').write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')), encoding='utf-8')
+
 def prepare_data_directory(path, stop_event=None, progress=None, source_store=None, source_base=None, destination_existed=None):
     destination = Path(path).expanduser().resolve()
     source_path = Path(source_base).expanduser().resolve() if source_base is not None else None
@@ -22620,74 +22991,10 @@ def prepare_data_directory(path, stop_event=None, progress=None, source_store=No
         if source_store is not None and source_path is not None:
             source_store.pause_sample_writes('正在把原文件夹迁移到新目录')
             paused = True
-            source_inventory = database_inventory(source_store.db_path, source_path)
-            destination_db = staging / 'universal_game_ai.db'
-            with source_store.lock:
-                source_connection = source_store.db.current()
-                target_connection = sqlite3.connect(str(destination_db), timeout=10.0)
-                try:
-                    source_connection.backup(target_connection, pages=256)
-                    target_connection.commit()
-                finally:
-                    target_connection.close()
-            if progress is not None:
-                progress(20.0)
-            copy_migration_files(source_path, staging, stop_event, progress)
-        elif reopening and source_path is not None:
-            source_inventory = database_inventory(source_path / 'universal_game_ai.db', source_path)
-            source_connection = sqlite3.connect(str(source_path / 'universal_game_ai.db'), timeout=10.0)
-            target_connection = sqlite3.connect(str(staging / 'universal_game_ai.db'), timeout=10.0)
-            try:
-                source_connection.backup(target_connection, pages=256)
-                target_connection.commit()
-            finally:
-                target_connection.close()
-                source_connection.close()
-            if progress is not None:
-                progress(20.0)
-            copy_migration_files(source_path, staging, stop_event, progress)
-        else:
-            source_inventory = None
-        for name in ('runtime.current', 'models', 'models/vision', 'models/ocr', 'cache', 'cache/pip', 'cache/pycache', 'cache/torch_extensions', 'cache/cuda', 'cache/numba', 'cache/matplotlib', 'temp', 'backups', 'quarantine', 'audit'):
-            (staging / name).mkdir(parents=True, exist_ok=True)
-        main_hash = materialize_entry_script(staging)
-        if progress is not None:
-            progress(70.0)
-        candidate = DataStore(staging)
-        if candidate.read_only:
-            raise RuntimeError(candidate.read_only_reason or '数据库只读')
-        candidate.sample_write_barrier()
-        with candidate.lock:
-            candidate.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        target_inventory = database_inventory(candidate.db_path, staging)
-        if target_inventory.get('schema_version') != DATABASE_SCHEMA_VERSION:
-            raise RuntimeError('数据库结构升级失败')
-        if source_inventory is not None:
-            for key in ('games', 'game_count', 'sample_count', 'model_count', 'vision_model_count', 'selected_game', 'model_files'):
-                if target_inventory.get(key) != source_inventory.get(key):
-                    raise RuntimeError('迁移校验不一致：' + str(key))
-        second = sqlite3.connect(str(candidate.db_path), timeout=0.1)
-        try:
-            candidate.db.execute('BEGIN IMMEDIATE')
-            locked = False
-            try:
-                second.execute('BEGIN IMMEDIATE')
-            except sqlite3.OperationalError:
-                locked = True
-            finally:
-                try:
-                    second.rollback()
-                except RECOVERABLE_ERRORS as error:
-                    record_cleanup_error('BEST_EFFORT_EXCEPTION', error)
-                candidate.db.rollback()
-            if not locked:
-                raise RuntimeError('SQLite写锁测试失败')
-        finally:
-            second.close()
-        runtime_manifest = directory_runtime_manifest(staging)
-        sha_manifest = data_tree_manifest(staging)
-        verify_data_tree_manifest(staging, sha_manifest)
-        (staging / '.ugai_migration_manifest.json').write_text(json.dumps({'source': str(source_path) if source_path is not None else None, 'destination': str(destination), 'inventory': target_inventory, 'sha256': sha_manifest, 'main_py': {'path': 'main.py', 'sha256': main_hash}, 'entry_script_materialized': True}, ensure_ascii=False, sort_keys=True, separators=(',', ':')), encoding='utf-8')
+        source_inventory = _stage_directory_source(staging, source_store, source_path, reopening, stop_event, progress)
+        main_hash = _materialize_directory_layout(staging, progress)
+        candidate, target_inventory, runtime_manifest, sha_manifest = _validate_directory_candidate(staging, source_inventory)
+        _write_directory_migration_manifest(staging, source_path, destination, target_inventory, sha_manifest, main_hash)
         if progress is not None:
             progress(100.0)
         return PreparedDataDirectory(destination, staging, candidate, runtime_manifest, source_store, source_path, source_inventory, target_inventory, sha_manifest, False, created)
@@ -22889,7 +23196,7 @@ def _runtime_write_require_hashes_lock(path, entries, wheelhouse):
     Path(path).write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 def _runtime_backend_validation(python, env, family):
-    source = '\nimport gc, hashlib, json, math, os, statistics, subprocess, sys, tempfile, threading, time\nimport numpy as np\nfrom PIL import Image, ImageDraw\nimport cv2\nimport torch\nimport torchvision\nimport setuptools\nfrom omegaconf import OmegaConf\nfrom safetensors.torch import save_file, load_file\nfrom rapidocr import RapidOCR\nfamily = __FAMILY__\nif family.startswith(\'windows-x64-nvidia\'):\n    if not torch.cuda.is_available():\n        raise RuntimeError(\'CUDA运行库已安装但torch.cuda.is_available为False\')\n    device = torch.device(\'cuda\')\n    device_name = str(torch.cuda.get_device_name(0))\n    device_type = \'cuda\'\n    torch.backends.cuda.matmul.allow_tf32 = True\n    torch.backends.cudnn.allow_tf32 = True\nelif family == \'windows-x64-directml\':\n    import torch_directml\n    device = torch_directml.device()\n    device_name = str(device)\n    device_type = \'privateuseone\'\nelse:\n    device = torch.device(\'cpu\')\n    device_name = \'CPU\'\n    device_type = \'cpu\'\n\ndef sync(value=None):\n    if family.startswith(\'windows-x64-nvidia\'):\n        torch.cuda.synchronize()\n    elif value is not None and family == \'windows-x64-directml\':\n        value.reshape(-1)[:1].to(\'cpu\')\n\ndef percentile(values, q):\n    ordered = sorted((float(v) for v in values))\n    return ordered[min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * q))))]\n\ndef process_rss():\n    try:\n        import ctypes\n        from ctypes import wintypes\n\n        class PMC(ctypes.Structure):\n            _fields_ = [\n                (\'cb\', wintypes.DWORD),\n                (\'PageFaultCount\', wintypes.DWORD),\n                (\'PeakWorkingSetSize\', ctypes.c_size_t),\n                (\'WorkingSetSize\', ctypes.c_size_t),\n                (\'QuotaPeakPagedPoolUsage\', ctypes.c_size_t),\n                (\'QuotaPagedPoolUsage\', ctypes.c_size_t),\n                (\'QuotaPeakNonPagedPoolUsage\', ctypes.c_size_t),\n                (\'QuotaNonPagedPoolUsage\', ctypes.c_size_t),\n                (\'PagefileUsage\', ctypes.c_size_t),\n                (\'PeakPagefileUsage\', ctypes.c_size_t),\n            ]\n        kernel = ctypes.WinDLL(\'kernel32\', use_last_error=True)\n        psapi = ctypes.WinDLL(\'psapi\', use_last_error=True)\n        counters = PMC()\n        counters.cb = ctypes.sizeof(counters)\n        if not psapi.GetProcessMemoryInfo(kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb):\n            return 0\n        return int(counters.WorkingSetSize)\n    except Exception:\n        return 0\n\ndef dml_telemetry():\n    if family != \'windows-x64-directml\':\n        return {}\n    command = (\n        "$p=@(\'\\GPU Engine(*)\\Utilization Percentage\',"\n        "\'\\GPU Adapter Memory(*)\\Dedicated Usage\',"\n        "\'\\GPU Adapter Memory(*)\\Shared Usage\');"\n        "$s=(Get-Counter -Counter $p -MaxSamples 1 -ErrorAction Stop).CounterSamples;"\n        "$s|Select-Object Path,CookedValue|ConvertTo-Json -Compress"\n    )\n    try:\n        raw = subprocess.check_output(\n            [\n                \'powershell.exe\',\n                \'-NoProfile\',\n                \'-NonInteractive\',\n                \'-Command\',\n                command,\n            ],\n            text=True,\n            encoding=\'utf-8\',\n            errors=\'replace\',\n            timeout=6,\n            creationflags=134217728,\n            stderr=subprocess.DEVNULL,\n        ).strip()\n        rows = json.loads(raw) if raw else []\n        if isinstance(rows, dict):\n            rows = [rows]\n        util = []\n        dedicated = []\n        shared = []\n        for row in rows:\n            path = str(row.get(\'Path\', \'\')).lower()\n            value = max(0.0, float(row.get(\'CookedValue\', 0.0) or 0.0))\n            if \'utilization percentage\' in path:\n                util.append(value)\n            elif \'dedicated usage\' in path:\n                dedicated.append(value)\n            elif \'shared usage\' in path:\n                shared.append(value)\n        reset_command = (\n            "$e=Get-WinEvent -FilterHashtable @{LogName=\'System\';StartTime=(Get-Date).AddHours(-24)} "\n            "-ErrorAction SilentlyContinue;"\n            "@($e|Where-Object {$_.Id -eq 4101}).Count"\n        )\n        try:\n            reset_count = int(\n                subprocess.check_output(\n                    [\n                        \'powershell.exe\',\n                        \'-NoProfile\',\n                        \'-NonInteractive\',\n                        \'-Command\',\n                        reset_command,\n                    ],\n                    text=True,\n                    encoding=\'utf-8\',\n                    errors=\'replace\',\n                    timeout=6,\n                    creationflags=134217728,\n                    stderr=subprocess.DEVNULL,\n                ).strip()\n                or 0\n            )\n        except Exception:\n            reset_count = 0\n        return {\n            \'gpu_engine_utilization\': min(100.0, sum(util)),\n            \'dedicated_vram_used\': int(max(dedicated) if dedicated else 0),\n            \'shared_vram_used\': int(max(shared) if shared else 0),\n            \'device_removed_count\': 0,\n            \'device_reset_count\': reset_count,\n            \'source\': \'windows_performance_counters_and_system_events\',\n        }\n    except Exception as error:\n        return {\'source\': \'windows_performance_counters\', \'error\': type(error).__name__ + \':\' + str(error)}\nimage = Image.new(\'RGB\', (640, 360), \'white\')\ndraw = ImageDraw.Draw(image)\ndraw.rectangle((30, 30, 230, 120), fill=(40, 90, 180))\ndraw.text((55, 62), \'PLAY 12345\', fill=\'white\')\ndraw.rectangle((360, 210, 610, 330), fill=(180, 50, 50))\ndraw.text((405, 250), \'CONFIRM\', fill=\'white\')\nbase_array = np.asarray(image, dtype=np.uint8)\nocr_roi = base_array[30:125, 30:250].copy()\nengine = RapidOCR()\nocr_probe = engine(ocr_roi)\nassert ocr_probe is not None\nassert OmegaConf.create({\'strict\': True}).strict is True\nprecision = \'fp32\'\nif family.startswith(\'windows-x64-nvidia\'):\n    precision = \'fp16_tf32\'\nelif family == \'windows-x64-directml\':\n    try:\n        probe = torch.randn(1, 3, 16, 16, dtype=torch.float16).to(device)\n        layer = torch.nn.Conv2d(3, 4, 3, padding=1).to(device).half()\n        out = layer(probe)\n        sync(out)\n        precision = \'fp16\'\n        del probe, layer, out\n    except Exception:\n        precision = \'fp32\'\nelif family == \'windows-x64-cpu\':\n    precision = \'int8_onnx_policy_fp32_vision\'\nfast = torch.nn.Sequential(\n    torch.nn.Conv2d(3, 24, 3, padding=1),\n    torch.nn.Hardswish(),\n    torch.nn.Conv2d(24, 32, 3, padding=1, groups=8),\n    torch.nn.Hardswish(),\n    torch.nn.AdaptiveAvgPool2d(1),\n).to(device).eval()\nsemantic = torch.nn.Sequential(\n    torch.nn.Conv2d(3, 32, 5, stride=2, padding=2),\n    torch.nn.Hardswish(),\n    torch.nn.Conv2d(32, 64, 3, stride=2, padding=1),\n    torch.nn.Hardswish(),\n    torch.nn.AdaptiveAvgPool2d((6, 10)),\n).to(device).eval()\n\nclass Policy(torch.nn.Module):\n\n    def __init__(self):\n        super().__init__()\n        self.net = torch.nn.Sequential(\n            torch.nn.Linear(224, 256),\n            torch.nn.Tanh(),\n            torch.nn.Linear(256, 128),\n            torch.nn.Tanh(),\n            torch.nn.Linear(128, 5),\n        )\n\n    def forward(self, x):\n        return self.net(x)\npolicies = [Policy().to(device).eval() for _ in range(5)]\ngru = torch.nn.GRUCell(160, 256).to(device).eval()\nworld_head = torch.nn.Linear(256, 128).to(device).eval()\ninference_dtype = (\n    torch.float16\n    if precision in {\'fp16\', \'fp16_tf32\'}\n    else torch.float32\n)\nif inference_dtype == torch.float16:\n    fast.half()\n    semantic.half()\n    for member in policies:\n        member.half()\n    gru.half()\n    world_head.half()\ntrainer = torch.nn.Sequential(torch.nn.Linear(224, 256), torch.nn.GELU(), torch.nn.Linear(256, 5)).to(device)\noptimizer = torch.optim.AdamW(trainer.parameters(), lr=0.001)\ntrain_x = torch.randn(32, 224, device=device)\ntrain_y = torch.randn(32, 5, device=device)\nwith tempfile.TemporaryDirectory() as folder:\n    path = folder + \'/probe.safetensors\'\n    save_file({\'x\': torch.ones(2, 2)}, path)\n    assert tuple(load_file(path)[\'x\'].shape) == (2, 2)\n\ndef training_step():\n    optimizer.zero_grad(set_to_none=True)\n    loss = (trainer(train_x) - train_y).pow(2).mean()\n    loss.backward()\n    optimizer.step()\n    sync(loss)\n\ndef pipeline(run_training=False):\n    stage = {}\n    queue_wait_ms = 0.0\n    started = time.perf_counter()\n    capture_started = time.perf_counter()\n    captured = base_array.copy()\n    stage[\'simulated_window_capture_ms\'] = (time.perf_counter() - capture_started) * 1000.0\n    prep_started = time.perf_counter()\n    rgb = cv2.cvtColor(captured, cv2.COLOR_RGB2BGR)\n    fast_np = cv2.resize(rgb, (128, 72), interpolation=cv2.INTER_AREA)\n    semantic_np = cv2.resize(rgb, (384, 216), interpolation=cv2.INTER_LINEAR)\n    stage[\'resize_color_conversion_ms\'] = (time.perf_counter() - prep_started) * 1000.0\n    transfer_started = time.perf_counter()\n    fast_tensor = torch.from_numpy(fast_np.copy()).permute(2, 0, 1).unsqueeze(0).to(device, dtype=inference_dtype) / 255.0\n    semantic_tensor = (\n        torch.from_numpy(semantic_np.copy())\n        .permute(2, 0, 1)\n        .unsqueeze(0)\n        .to(device, dtype=inference_dtype)\n        / 255.0\n    )\n    queue_started = time.perf_counter()\n    sync(fast_tensor)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'cpu_to_gpu_copy_ms\'] = (time.perf_counter() - transfer_started) * 1000.0\n    vision_started = time.perf_counter()\n    with torch.inference_mode():\n        fast_out = fast(fast_tensor)\n    queue_started = time.perf_counter()\n    sync(fast_out)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'fast_visual_encoding_ms\'] = (time.perf_counter() - vision_started) * 1000.0\n    semantic_started = time.perf_counter()\n    with torch.inference_mode():\n        semantic_out = semantic(semantic_tensor)\n    queue_started = time.perf_counter()\n    sync(semantic_out)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'high_resolution_semantic_visual_ms\'] = (time.perf_counter() - semantic_started) * 1000.0\n    ocr_started = time.perf_counter()\n    ocr_value = engine(ocr_roi)\n    stage[\'ocr_region_processing_ms\'] = (time.perf_counter() - ocr_started) * 1000.0\n    detect_started = time.perf_counter()\n    gray = cv2.cvtColor(captured, cv2.COLOR_RGB2GRAY)\n    _, binary = cv2.threshold(gray, 210, 255, cv2.THRESH_BINARY_INV)\n    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)\n    objects = []\n    for contour in contours[:24]:\n        x, y, w, h = cv2.boundingRect(contour)\n        if w * h >= 36:\n            objects.append((x, y, w, h))\n    relations = []\n    for i, a in enumerate(objects):\n        for j, b in enumerate(objects):\n            if i != j and a[0] + a[2] <= b[0]:\n                relations.append((i, \'left_of\', j))\n    stage[\'object_detection_scene_graph_ms\'] = (time.perf_counter() - detect_started) * 1000.0\n    state_cpu = np.zeros((1, 224), dtype=np.float32)\n    state_cpu[0, :min(64, fast_out.numel())] = fast_out.detach().reshape(-1)[:64].to(\'cpu\', dtype=torch.float32).numpy()\n    state_cpu[0, 64:128] = semantic_out.detach().reshape(-1)[:64].to(\'cpu\', dtype=torch.float32).numpy()\n    state_cpu[0, 128] = len(objects) / 24.0\n    state_cpu[0, 129] = len(relations) / 576.0\n    state_cpu[0, 130] = 1.0 if ocr_value is not None else 0.0\n    policy_started = time.perf_counter()\n    state = torch.from_numpy(state_cpu).to(device, dtype=inference_dtype)\n    member_outputs = []\n    with torch.inference_mode():\n        for member in policies:\n            member_outputs.append(member(state))\n    policy_stack = torch.stack(member_outputs)\n    queue_started = time.perf_counter()\n    sync(policy_stack)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'five_member_policy_inference_ms\'] = (time.perf_counter() - policy_started) * 1000.0\n    world_started = time.perf_counter()\n    hidden = torch.zeros(1, 256, device=device, dtype=inference_dtype)\n    action = torch.zeros(1, 32, device=device, dtype=inference_dtype)\n    rollout = []\n    with torch.inference_mode():\n        for _ in range(6):\n            hidden = gru(torch.cat([state[:, :128], action], dim=1), hidden)\n            predicted = world_head(hidden)\n            rollout.append(predicted)\n            action = torch.tanh(predicted[:, :32])\n    rollout_stack = torch.stack(rollout)\n    queue_started = time.perf_counter()\n    sync(rollout_stack)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'world_model_six_step_rollout_ms\'] = (time.perf_counter() - world_started) * 1000.0\n    rank_started = time.perf_counter()\n    mean = policy_stack.mean(dim=0)\n    std = policy_stack.std(dim=0, unbiased=False)\n    rollout_value = rollout_stack.mean()\n    scores = mean[:, 0] + mean[:, 1] - mean[:, 3] - std.mean(dim=1) + 0.01 * rollout_value\n    ordering = torch.argsort(scores, descending=True)\n    queue_started = time.perf_counter()\n    sync(ordering)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'candidate_action_ranking_ms\'] = (time.perf_counter() - rank_started) * 1000.0\n    stage[\'gpu_queue_wait_ms\'] = queue_wait_ms\n    if run_training:\n        train_started = time.perf_counter()\n        training_step()\n        stage[\'training_step_ms\'] = (time.perf_counter() - train_started) * 1000.0\n    stage[\'end_to_end_ms\'] = (time.perf_counter() - started) * 1000.0\n    return stage\nfor _ in range(2):\n    pipeline(False)\nstages = []\nfailures = 0\nfor _ in range(9):\n    try:\n        stages.append(pipeline(False))\n    except Exception:\n        failures += 1\ntraining_stages = []\ntraining_errors = []\ntraining_stop = threading.Event()\n\ndef background_training():\n    while not training_stop.is_set():\n        try:\n            training_step()\n        except Exception as error:\n            training_errors.append(type(error).__name__ + \':\' + str(error))\n            break\n\ntraining_worker = threading.Thread(target=background_training, daemon=True)\ntraining_worker.start()\ntime.sleep(0.05)\nfor _ in range(5):\n    try:\n        training_stages.append(pipeline(False))\n    except Exception:\n        failures += 1\ntraining_stop.set()\ntraining_worker.join(3.0)\nfailures += len(training_errors)\nif training_worker.is_alive():\n    failures += 1\nif not stages:\n    raise RuntimeError(\'完整端到端候选后端基准没有成功样本\')\nlatencies = [row[\'end_to_end_ms\'] for row in stages]\ntraining_latencies = [row[\'end_to_end_ms\'] for row in training_stages] or latencies\np50 = percentile(latencies, 0.5)\np95 = percentile(latencies, 0.95)\np99 = percentile(latencies, 0.99)\njitter = max(0.0, p99 - p95)\ntraining_p95 = percentile(training_latencies, 0.95)\ntraining_interference = max(0.0, training_p95 - p95)\nrss = process_rss()\nmemory_penalty = max(0.0, (rss - 1536 * 1024 * 1024) / (256 * 1024 * 1024)) * 5.0\ntelemetry = dml_telemetry()\ndriver_penalty = 50.0 * (\n    failures\n    + int(telemetry.get(\'device_removed_count\', 0) or 0)\n    + int(telemetry.get(\'device_reset_count\', 0) or 0)\n)\nif family.startswith(\'windows-x64-nvidia\'):\n    try:\n        free_vram, total_vram = torch.cuda.mem_get_info(device)\n        telemetry.update(\n            {\n                \'free_vram\': int(free_vram),\n                \'total_vram\': int(total_vram),\n                \'allocated_vram\': int(torch.cuda.memory_allocated(device)),\n            }\n        )\n        memory_penalty += max(0.0, (768 * 1024 * 1024 - free_vram) / (256 * 1024 * 1024)) * 5.0\n    except Exception:\n        pass\nelif family == \'windows-x64-directml\':\n    shared = int(telemetry.get(\'shared_vram_used\', 0) or 0)\n    memory_penalty += max(0.0, (shared - 2 * 1024 * 1024 * 1024) / (512 * 1024 * 1024)) * 4.0\nscore = p95 + 0.75 * jitter + memory_penalty + training_interference + driver_penalty\nstage_metrics = {}\nfor key in stages[0]:\n    values = [row[key] for row in stages if key in row]\n    stage_metrics[key] = {\n        \'p50_ms\': percentile(values, 0.5),\n        \'p95_ms\': percentile(values, 0.95),\n        \'p99_ms\': percentile(values, 0.99),\n    }\nstable = failures == 0 and all((math.isfinite(float(value)) for value in (p50, p95, p99, score))) and (p99 < 10000.0)\nif family.startswith(\'windows-x64-nvidia\') and p95 <= 42 and (score <= 85):\n    model_tier = \'Large\'\nelif family == \'windows-x64-directml\' and p95 <= 48 and (score <= 95):\n    model_tier = \'Large\'\nelif p95 <= 80 and score <= 160:\n    model_tier = \'Base\'\nelse:\n    model_tier = \'Tiny\'\nmodel_specs = {\n    \'Tiny\': {\n        \'state_size\': 192,\n        \'hidden_size\': 128,\n        \'ensemble_size\': 5,\n        \'temporal_context\': 32,\n        \'planning_horizon\': 3,\n        \'object_slots\': 24,\n    },\n    \'Base\': {\n        \'state_size\': 384,\n        \'hidden_size\': 256,\n        \'ensemble_size\': 5,\n        \'temporal_context\': 64,\n        \'planning_horizon\': 6,\n        \'object_slots\': 48,\n    },\n    \'Large\': {\n        \'state_size\': 512,\n        \'hidden_size\': 512,\n        \'ensemble_size\': 7,\n        \'temporal_context\': 128,\n        \'planning_horizon\': 16,\n        \'object_slots\': 72,\n    },\n}\npayload = b\'UniversalGameAI complete end-to-end backend benchmark v2\'\nresult = {\n    \'python\': sys.version,\n    \'family\': family,\n    \'backend\': \'torch\',\n    \'device\': device_name,\n    \'device_type\': device_type,\n    \'precision\': precision,\n    \'numpy\': np.__version__,\n    \'pillow\': getattr(Image, \'__version__\', \'loaded\'),\n    \'opencv\': cv2.__version__,\n    \'torch\': torch.__version__,\n    \'torchvision\': torchvision.__version__,\n    \'rapidocr\': \'functional\',\n    \'safetensors\': \'functional\',\n    \'omegaconf\': \'functional\',\n    \'setuptools\': setuptools.__version__,\n    \'end_to_end_p50_ms\': p50,\n    \'end_to_end_p95_ms\': p95,\n    \'end_to_end_p99_ms\': p99,\n    \'p99_jitter_ms\': jitter,\n    \'training_interference_ms\': training_interference,\n    \'training_interference_mode\': \'concurrent_background_training\',\n    \'process_rss_bytes\': rss,\n    \'telemetry\': telemetry,\n    \'stage_metrics\': stage_metrics,\n    \'pipeline\': [\n        \'simulated_window_capture\',\n        \'resize_and_color_conversion\',\n        \'fast_visual_encoding\',\n        \'high_resolution_semantic_visual\',\n        \'ocr_region_processing\',\n        \'object_detection_and_scene_graph\',\n        \'five_member_policy_inference\',\n        \'six_step_world_model_rollout\',\n        \'candidate_action_ranking\',\n        \'cpu_gpu_synchronization_and_transfer\',\n    ],\n    \'score_components\': {\n        \'p95_end_to_end_latency_ms\': p95,\n        \'p99_jitter_penalty_ms\': 0.75 * jitter,\n        \'memory_vram_pressure_penalty_ms\': memory_penalty,\n        \'training_interference_penalty_ms\': training_interference,\n        \'driver_instability_penalty_ms\': driver_penalty,\n    },\n    \'score_formula\': (\n        \'p95+0.75*(p99-p95)+memory_pressure+\'\n        \'training_interference+driver_instability\'\n    ),\n    \'score_ms\': score,\n    \'model_tier\': model_tier,\n    \'model_spec\': model_specs[model_tier],\n    \'motion_capture_fps\': 45 if p95 <= 33 else 30 if p95 <= 55 else 20,\n    \'stable\': stable,\n    \'failures\': failures,\n    \'self_test_sha256\': hashlib.sha256(payload).hexdigest(),\n}\nprint(json.dumps(result, ensure_ascii=False))\n'.replace('__FAMILY__', repr(str(family)))
+    source = '\nimport gc, hashlib, json, math, os, statistics, subprocess, sys, tempfile, threading, time\nimport numpy as np\nfrom PIL import Image, ImageDraw\nimport cv2\nimport torch\nimport torchvision\nimport setuptools\nfrom omegaconf import OmegaConf\nfrom safetensors.torch import save_file, load_file\nfrom rapidocr import RapidOCR\nfamily = __FAMILY__\nif family.startswith(\'windows-x64-nvidia\'):\n    if not torch.cuda.is_available():\n        raise RuntimeError(\'CUDA运行库已安装但torch.cuda.is_available为False\')\n    device = torch.device(\'cuda\')\n    device_name = str(torch.cuda.get_device_name(0))\n    device_type = \'cuda\'\n    torch.backends.cuda.matmul.allow_tf32 = True\n    torch.backends.cudnn.allow_tf32 = True\nelif family == \'windows-x64-directml\':\n    import torch_directml\n    device = torch_directml.device()\n    device_name = str(device)\n    device_type = \'privateuseone\'\nelse:\n    device = torch.device(\'cpu\')\n    device_name = \'CPU\'\n    device_type = \'cpu\'\n\ndef sync(value=None):\n    if family.startswith(\'windows-x64-nvidia\'):\n        torch.cuda.synchronize()\n    elif value is not None and family == \'windows-x64-directml\':\n        value.reshape(-1)[:1].to(\'cpu\')\n\ndef percentile(values, q):\n    ordered = sorted((float(v) for v in values))\n    return ordered[min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * q))))]\n\ndef process_rss():\n    try:\n        import ctypes\n        from ctypes import wintypes\n\n        class PMC(ctypes.Structure):\n            _fields_ = [\n                (\'cb\', wintypes.DWORD),\n                (\'PageFaultCount\', wintypes.DWORD),\n                (\'PeakWorkingSetSize\', ctypes.c_size_t),\n                (\'WorkingSetSize\', ctypes.c_size_t),\n                (\'QuotaPeakPagedPoolUsage\', ctypes.c_size_t),\n                (\'QuotaPagedPoolUsage\', ctypes.c_size_t),\n                (\'QuotaPeakNonPagedPoolUsage\', ctypes.c_size_t),\n                (\'QuotaNonPagedPoolUsage\', ctypes.c_size_t),\n                (\'PagefileUsage\', ctypes.c_size_t),\n                (\'PeakPagefileUsage\', ctypes.c_size_t),\n            ]\n        kernel = ctypes.WinDLL(\'kernel32\', use_last_error=True)\n        psapi = ctypes.WinDLL(\'psapi\', use_last_error=True)\n        counters = PMC()\n        counters.cb = ctypes.sizeof(counters)\n        if not psapi.GetProcessMemoryInfo(kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb):\n            return 0\n        return int(counters.WorkingSetSize)\n    except Exception:\n        return 0\n\ndef dml_telemetry():\n    if family != \'windows-x64-directml\':\n        return {}\n    command = (\n        "$p=@(\'\\GPU Engine(*)\\Utilization Percentage\',"\n        "\'\\GPU Adapter Memory(*)\\Dedicated Usage\',"\n        "\'\\GPU Adapter Memory(*)\\Shared Usage\');"\n        "$s=(Get-Counter -Counter $p -MaxSamples 1 -ErrorAction Stop).CounterSamples;"\n        "$s|Select-Object Path,CookedValue|ConvertTo-Json -Compress"\n    )\n    try:\n        raw = subprocess.check_output(\n            [\n                \'powershell.exe\',\n                \'-NoProfile\',\n                \'-NonInteractive\',\n                \'-Command\',\n                command,\n            ],\n            text=True,\n            encoding=\'utf-8\',\n            errors=\'replace\',\n            timeout=6,\n            creationflags=134217728,\n            stderr=subprocess.DEVNULL,\n        ).strip()\n        rows = json.loads(raw) if raw else []\n        if isinstance(rows, dict):\n            rows = [rows]\n        util = []\n        dedicated = []\n        shared = []\n        for row in rows:\n            path = str(row.get(\'Path\', \'\')).lower()\n            value = max(0.0, float(row.get(\'CookedValue\', 0.0) or 0.0))\n            if \'utilization percentage\' in path:\n                util.append(value)\n            elif \'dedicated usage\' in path:\n                dedicated.append(value)\n            elif \'shared usage\' in path:\n                shared.append(value)\n        reset_command = (\n            "$e=Get-WinEvent -FilterHashtable @{LogName=\'System\';StartTime=(Get-Date).AddHours(-24)} "\n            "-ErrorAction SilentlyContinue;"\n            "@($e|Where-Object {$_.Id -eq 4101}).Count"\n        )\n        try:\n            reset_count = int(\n                subprocess.check_output(\n                    [\n                        \'powershell.exe\',\n                        \'-NoProfile\',\n                        \'-NonInteractive\',\n                        \'-Command\',\n                        reset_command,\n                    ],\n                    text=True,\n                    encoding=\'utf-8\',\n                    errors=\'replace\',\n                    timeout=6,\n                    creationflags=134217728,\n                    stderr=subprocess.DEVNULL,\n                ).strip()\n                or 0\n            )\n        except Exception:\n            reset_count = 0\n        return {\n            \'gpu_engine_utilization\': min(100.0, sum(util)),\n            \'dedicated_vram_used\': int(max(dedicated) if dedicated else 0),\n            \'shared_vram_used\': int(max(shared) if shared else 0),\n            \'device_removed_count\': 0,\n            \'device_reset_count\': reset_count,\n            \'source\': \'windows_performance_counters_and_system_events\',\n        }\n    except Exception as error:\n        return {\'source\': \'windows_performance_counters\', \'error\': type(error).__name__ + \':\' + str(error)}\nimage = Image.new(\'RGB\', (640, 360), \'white\')\ndraw = ImageDraw.Draw(image)\ndraw.rectangle((30, 30, 230, 120), fill=(40, 90, 180))\ndraw.text((55, 62), \'PLAY 12345\', fill=\'white\')\ndraw.rectangle((360, 210, 610, 330), fill=(180, 50, 50))\ndraw.text((405, 250), \'CONFIRM\', fill=\'white\')\nbase_array = np.asarray(image, dtype=np.uint8)\nocr_roi = base_array[30:125, 30:250].copy()\nengine = RapidOCR()\nocr_probe = engine(ocr_roi)\nassert ocr_probe is not None\nassert OmegaConf.create({\'strict\': True}).strict is True\nprecision = \'fp32\'\nif family.startswith(\'windows-x64-nvidia\'):\n    precision = \'fp16_tf32\'\nelif family == \'windows-x64-directml\':\n    try:\n        probe = torch.randn(1, 3, 16, 16, dtype=torch.float16).to(device)\n        layer = torch.nn.Conv2d(3, 4, 3, padding=1).to(device).half()\n        out = layer(probe)\n        sync(out)\n        precision = \'fp16\'\n        del probe, layer, out\n    except Exception:\n        precision = \'fp32\'\nelif family == \'windows-x64-cpu\':\n    precision = \'int8_onnx_policy_fp32_vision\'\nfast = torch.nn.Sequential(\n    torch.nn.Conv2d(3, 24, 3, padding=1),\n    torch.nn.Hardswish(),\n    torch.nn.Conv2d(24, 32, 3, padding=1, groups=8),\n    torch.nn.Hardswish(),\n    torch.nn.AdaptiveAvgPool2d(1),\n).to(device).eval()\nsemantic = torch.nn.Sequential(\n    torch.nn.Conv2d(3, 32, 5, stride=2, padding=2),\n    torch.nn.Hardswish(),\n    torch.nn.Conv2d(32, 64, 3, stride=2, padding=1),\n    torch.nn.Hardswish(),\n    torch.nn.AdaptiveAvgPool2d((6, 10)),\n).to(device).eval()\n\nclass Policy(torch.nn.Module):\n\n    def __init__(self):\n        super().__init__()\n        self.net = torch.nn.Sequential(\n            torch.nn.Linear(224, 256),\n            torch.nn.Tanh(),\n            torch.nn.Linear(256, 128),\n            torch.nn.Tanh(),\n            torch.nn.Linear(128, 5),\n        )\n\n    def forward(self, x):\n        return self.net(x)\npolicies = [Policy().to(device).eval() for _ in range(5)]\ngru = torch.nn.GRUCell(160, 256).to(device).eval()\nworld_head = torch.nn.Linear(256, 128).to(device).eval()\ninference_dtype = (\n    torch.float16\n    if precision in {\'fp16\', \'fp16_tf32\'}\n    else torch.float32\n)\nif inference_dtype == torch.float16:\n    fast.half()\n    semantic.half()\n    for member in policies:\n        member.half()\n    gru.half()\n    world_head.half()\ntrainer = torch.nn.Sequential(torch.nn.Linear(224, 256), torch.nn.GELU(), torch.nn.Linear(256, 5)).to(device)\noptimizer = torch.optim.AdamW(trainer.parameters(), lr=0.001)\ntrain_x = torch.randn(32, 224, device=device)\ntrain_y = torch.randn(32, 5, device=device)\nwith tempfile.TemporaryDirectory() as folder:\n    path = folder + \'/probe.safetensors\'\n    save_file({\'x\': torch.ones(2, 2)}, path)\n    assert tuple(load_file(path)[\'x\'].shape) == (2, 2)\n\ndef training_step():\n    optimizer.zero_grad(set_to_none=True)\n    loss = (trainer(train_x) - train_y).pow(2).mean()\n    loss.backward()\n    optimizer.step()\n    sync(loss)\n\ndef pipeline(run_training=False):\n    stage = {}\n    queue_wait_ms = 0.0\n    started = time.perf_counter()\n    capture_started = time.perf_counter()\n    captured = base_array.copy()\n    stage[\'simulated_window_capture_ms\'] = (time.perf_counter() - capture_started) * 1000.0\n    prep_started = time.perf_counter()\n    rgb = cv2.cvtColor(captured, cv2.COLOR_RGB2BGR)\n    fast_np = cv2.resize(rgb, (128, 72), interpolation=cv2.INTER_AREA)\n    semantic_np = cv2.resize(rgb, (384, 216), interpolation=cv2.INTER_LINEAR)\n    stage[\'resize_color_conversion_ms\'] = (time.perf_counter() - prep_started) * 1000.0\n    transfer_started = time.perf_counter()\n    fast_tensor = torch.from_numpy(fast_np.copy()).permute(2, 0, 1).unsqueeze(0).to(device, dtype=inference_dtype) / 255.0\n    semantic_tensor = (\n        torch.from_numpy(semantic_np.copy())\n        .permute(2, 0, 1)\n        .unsqueeze(0)\n        .to(device, dtype=inference_dtype)\n        / 255.0\n    )\n    queue_started = time.perf_counter()\n    sync(fast_tensor)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'cpu_to_gpu_copy_ms\'] = (time.perf_counter() - transfer_started) * 1000.0\n    vision_started = time.perf_counter()\n    with torch.inference_mode():\n        fast_out = fast(fast_tensor)\n    queue_started = time.perf_counter()\n    sync(fast_out)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'fast_visual_encoding_ms\'] = (time.perf_counter() - vision_started) * 1000.0\n    semantic_started = time.perf_counter()\n    with torch.inference_mode():\n        semantic_out = semantic(semantic_tensor)\n    queue_started = time.perf_counter()\n    sync(semantic_out)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'high_resolution_semantic_visual_ms\'] = (time.perf_counter() - semantic_started) * 1000.0\n    ocr_started = time.perf_counter()\n    ocr_value = engine(ocr_roi)\n    stage[\'ocr_region_processing_ms\'] = (time.perf_counter() - ocr_started) * 1000.0\n    detect_started = time.perf_counter()\n    gray = cv2.cvtColor(captured, cv2.COLOR_RGB2GRAY)\n    _, binary = cv2.threshold(gray, 210, 255, cv2.THRESH_BINARY_INV)\n    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)\n    objects = []\n    for contour in contours[:24]:\n        x, y, w, h = cv2.boundingRect(contour)\n        if w * h >= 36:\n            objects.append((x, y, w, h))\n    relations = []\n    for i, a in enumerate(objects):\n        for j, b in enumerate(objects):\n            if i != j and a[0] + a[2] <= b[0]:\n                relations.append((i, \'left_of\', j))\n    stage[\'object_detection_scene_graph_ms\'] = (time.perf_counter() - detect_started) * 1000.0\n    state_cpu = np.zeros((1, 224), dtype=np.float32)\n    state_cpu[0, :min(64, fast_out.numel())] = fast_out.detach().reshape(-1)[:64].to(\'cpu\', dtype=torch.float32).numpy()\n    state_cpu[0, 64:128] = semantic_out.detach().reshape(-1)[:64].to(\'cpu\', dtype=torch.float32).numpy()\n    state_cpu[0, 128] = len(objects) / 24.0\n    state_cpu[0, 129] = len(relations) / 576.0\n    state_cpu[0, 130] = 1.0 if ocr_value is not None else 0.0\n    policy_started = time.perf_counter()\n    state = torch.from_numpy(state_cpu).to(device, dtype=inference_dtype)\n    member_outputs = []\n    with torch.inference_mode():\n        for member in policies:\n            member_outputs.append(member(state))\n    policy_stack = torch.stack(member_outputs)\n    queue_started = time.perf_counter()\n    sync(policy_stack)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'five_member_policy_inference_ms\'] = (time.perf_counter() - policy_started) * 1000.0\n    world_started = time.perf_counter()\n    hidden = torch.zeros(1, 256, device=device, dtype=inference_dtype)\n    action = torch.zeros(1, 32, device=device, dtype=inference_dtype)\n    rollout = []\n    with torch.inference_mode():\n        for _ in range(6):\n            hidden = gru(torch.cat([state[:, :128], action], dim=1), hidden)\n            predicted = world_head(hidden)\n            rollout.append(predicted)\n            action = torch.tanh(predicted[:, :32])\n    rollout_stack = torch.stack(rollout)\n    queue_started = time.perf_counter()\n    sync(rollout_stack)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'world_model_six_step_rollout_ms\'] = (time.perf_counter() - world_started) * 1000.0\n    rank_started = time.perf_counter()\n    mean = policy_stack.mean(dim=0)\n    std = policy_stack.std(dim=0, unbiased=False)\n    rollout_value = rollout_stack.mean()\n    scores = mean[:, 0] + mean[:, 1] - mean[:, 3] - std.mean(dim=1) + 0.01 * rollout_value\n    ordering = torch.argsort(scores, descending=True)\n    queue_started = time.perf_counter()\n    sync(ordering)\n    queue_wait_ms += (time.perf_counter() - queue_started) * 1000.0\n    stage[\'candidate_action_ranking_ms\'] = (time.perf_counter() - rank_started) * 1000.0\n    stage[\'gpu_queue_wait_ms\'] = queue_wait_ms\n    if run_training:\n        train_started = time.perf_counter()\n        training_step()\n        stage[\'training_step_ms\'] = (time.perf_counter() - train_started) * 1000.0\n    stage[\'end_to_end_ms\'] = (time.perf_counter() - started) * 1000.0\n    return stage\nfor _ in range(2):\n    pipeline(False)\nstages = []\nfailures = 0\nfor _ in range(9):\n    try:\n        stages.append(pipeline(False))\n    except Exception:\n        failures += 1\ntraining_stages = []\ntraining_errors = []\ntraining_stop = threading.Event()\n\ndef background_training():\n    while not training_stop.is_set():\n        try:\n            training_step()\n        except Exception as error:\n            training_errors.append(type(error).__name__ + \':\' + str(error))\n            break\n\ntraining_worker = threading.Thread(target=background_training, daemon=True)\ntraining_worker.start()\nthreading.Event().wait(0.05)\nfor _ in range(5):\n    try:\n        training_stages.append(pipeline(False))\n    except Exception:\n        failures += 1\ntraining_stop.set()\ntraining_worker.join(3.0)\nfailures += len(training_errors)\nif training_worker.is_alive():\n    failures += 1\nif not stages:\n    raise RuntimeError(\'完整端到端候选后端基准没有成功样本\')\nlatencies = [row[\'end_to_end_ms\'] for row in stages]\ntraining_latencies = [row[\'end_to_end_ms\'] for row in training_stages] or latencies\np50 = percentile(latencies, 0.5)\np95 = percentile(latencies, 0.95)\np99 = percentile(latencies, 0.99)\njitter = max(0.0, p99 - p95)\ntraining_p95 = percentile(training_latencies, 0.95)\ntraining_interference = max(0.0, training_p95 - p95)\nrss = process_rss()\nmemory_penalty = max(0.0, (rss - 1536 * 1024 * 1024) / (256 * 1024 * 1024)) * 5.0\ntelemetry = dml_telemetry()\ndriver_penalty = 50.0 * (\n    failures\n    + int(telemetry.get(\'device_removed_count\', 0) or 0)\n    + int(telemetry.get(\'device_reset_count\', 0) or 0)\n)\nif family.startswith(\'windows-x64-nvidia\'):\n    try:\n        free_vram, total_vram = torch.cuda.mem_get_info(device)\n        telemetry.update(\n            {\n                \'free_vram\': int(free_vram),\n                \'total_vram\': int(total_vram),\n                \'allocated_vram\': int(torch.cuda.memory_allocated(device)),\n            }\n        )\n        memory_penalty += max(0.0, (768 * 1024 * 1024 - free_vram) / (256 * 1024 * 1024)) * 5.0\n    except Exception:\n        pass\nelif family == \'windows-x64-directml\':\n    shared = int(telemetry.get(\'shared_vram_used\', 0) or 0)\n    memory_penalty += max(0.0, (shared - 2 * 1024 * 1024 * 1024) / (512 * 1024 * 1024)) * 4.0\nscore = p95 + 0.75 * jitter + memory_penalty + training_interference + driver_penalty\nstage_metrics = {}\nfor key in stages[0]:\n    values = [row[key] for row in stages if key in row]\n    stage_metrics[key] = {\n        \'p50_ms\': percentile(values, 0.5),\n        \'p95_ms\': percentile(values, 0.95),\n        \'p99_ms\': percentile(values, 0.99),\n    }\nstable = failures == 0 and all((math.isfinite(float(value)) for value in (p50, p95, p99, score))) and (p99 < 10000.0)\nif family.startswith(\'windows-x64-nvidia\') and p95 <= 42 and (score <= 85):\n    model_tier = \'Large\'\nelif family == \'windows-x64-directml\' and p95 <= 48 and (score <= 95):\n    model_tier = \'Large\'\nelif p95 <= 80 and score <= 160:\n    model_tier = \'Base\'\nelse:\n    model_tier = \'Tiny\'\nmodel_specs = {\n    \'Tiny\': {\n        \'state_size\': 192,\n        \'hidden_size\': 128,\n        \'ensemble_size\': 5,\n        \'temporal_context\': 32,\n        \'planning_horizon\': 3,\n        \'object_slots\': 24,\n    },\n    \'Base\': {\n        \'state_size\': 384,\n        \'hidden_size\': 256,\n        \'ensemble_size\': 5,\n        \'temporal_context\': 64,\n        \'planning_horizon\': 6,\n        \'object_slots\': 48,\n    },\n    \'Large\': {\n        \'state_size\': 512,\n        \'hidden_size\': 512,\n        \'ensemble_size\': 7,\n        \'temporal_context\': 128,\n        \'planning_horizon\': 16,\n        \'object_slots\': 72,\n    },\n}\npayload = b\'UniversalGameAI complete end-to-end backend benchmark v2\'\nresult = {\n    \'python\': sys.version,\n    \'family\': family,\n    \'backend\': \'torch\',\n    \'device\': device_name,\n    \'device_type\': device_type,\n    \'precision\': precision,\n    \'numpy\': np.__version__,\n    \'pillow\': getattr(Image, \'__version__\', \'loaded\'),\n    \'opencv\': cv2.__version__,\n    \'torch\': torch.__version__,\n    \'torchvision\': torchvision.__version__,\n    \'rapidocr\': \'functional\',\n    \'safetensors\': \'functional\',\n    \'omegaconf\': \'functional\',\n    \'setuptools\': setuptools.__version__,\n    \'end_to_end_p50_ms\': p50,\n    \'end_to_end_p95_ms\': p95,\n    \'end_to_end_p99_ms\': p99,\n    \'p99_jitter_ms\': jitter,\n    \'training_interference_ms\': training_interference,\n    \'training_interference_mode\': \'concurrent_background_training\',\n    \'process_rss_bytes\': rss,\n    \'telemetry\': telemetry,\n    \'stage_metrics\': stage_metrics,\n    \'pipeline\': [\n        \'simulated_window_capture\',\n        \'resize_and_color_conversion\',\n        \'fast_visual_encoding\',\n        \'high_resolution_semantic_visual\',\n        \'ocr_region_processing\',\n        \'object_detection_and_scene_graph\',\n        \'five_member_policy_inference\',\n        \'six_step_world_model_rollout\',\n        \'candidate_action_ranking\',\n        \'cpu_gpu_synchronization_and_transfer\',\n    ],\n    \'score_components\': {\n        \'p95_end_to_end_latency_ms\': p95,\n        \'p99_jitter_penalty_ms\': 0.75 * jitter,\n        \'memory_vram_pressure_penalty_ms\': memory_penalty,\n        \'training_interference_penalty_ms\': training_interference,\n        \'driver_instability_penalty_ms\': driver_penalty,\n    },\n    \'score_formula\': (\n        \'p95+0.75*(p99-p95)+memory_pressure+\'\n        \'training_interference+driver_instability\'\n    ),\n    \'score_ms\': score,\n    \'model_tier\': model_tier,\n    \'model_spec\': model_specs[model_tier],\n    \'motion_capture_fps\': 45 if p95 <= 33 else 30 if p95 <= 55 else 20,\n    \'stable\': stable,\n    \'failures\': failures,\n    \'self_test_sha256\': hashlib.sha256(payload).hexdigest(),\n}\nprint(json.dumps(result, ensure_ascii=False))\n'.replace('__FAMILY__', repr(str(family)))
     output = subprocess.check_output([str(python), '-c', source], env=env, text=True, encoding='utf-8', errors='replace', stderr=subprocess.STDOUT, timeout=300)
     value = json.loads(output.strip().splitlines()[-1])
     if value.get('stable') is not True or str(value.get('family')) != str(family):
@@ -23605,20 +23912,22 @@ class RuntimeInstaller:
         delete_owned_paths(self.base, [item for item in (self.base / 'temp').glob('runtime.staging.*') if item.exists()], 'runtime_interrupted_staging')
         recover_runtime_layout(self.base)
 
-    def run(self, stop_event, on_progress=None, on_line=None):
-        self.cancelled = False
+    def _validated_existing_runtime(self, stop_event, on_progress, on_line):
         if stop_event is not None and stop_event.is_set():
             raise InputStopped('文件完整性检查已停止')
         try:
             existing = validate_runtime_manifest(self.base, True, True)
         except RuntimeError:
             existing = None
-        if isinstance(existing, dict):
-            if on_line is not None:
-                on_line('现有运行库的文件SHA-256、wheel锁、依赖闭包与版本清单校验通过')
-            if on_progress is not None:
-                on_progress(100.0)
-            return dict(existing)
+        if not isinstance(existing, dict):
+            return None
+        if on_line is not None:
+            on_line('现有运行库的文件SHA-256、wheel锁、依赖闭包与版本清单校验通过')
+        if on_progress is not None:
+            on_progress(100.0)
+        return dict(existing)
+
+    def _prepare_install_request(self):
         wheels, _, _ = embedded_runtime_lock()
         locked_bytes = sum((safe_int(item.get('size'), 0, 0) for item in wheels)) + safe_int(FIXED_RUNTIME_PYTHON_ARTIFACT.get('size'), 0, 0)
         ensure_free_space(self.base, required_runtime_space(self.base, locked_bytes), '运行库下载与安装')
@@ -23628,10 +23937,13 @@ class RuntimeInstaller:
         request_path = self.base / 'temp' / ('runtime_request_' + uuid.uuid4().hex + '.json')
         request_path.parent.mkdir(parents=True, exist_ok=True)
         request_path.write_text(json.dumps({'base': str(self.base), 'staging': str(staging), 'hardware': self._hardware_probe(), 'vendor': self._gpu_vendor(), 'protocol_version': RUNTIME_INSTALL_PROTOCOL_VERSION, 'stage': WorkerStage.STARTING.value}, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
-        creationflags = 134217728 | 512
         env = os.environ.copy()
         env['PYTHONNOUSERSITE'] = '1'
         command = [sys.executable, str(self.base / 'main.py'), 'runtime-install-worker', str(request_path)]
+        return request_path, env, command
+
+    def _launch_install_worker(self, command, env):
+        creationflags = 134217728 | 512
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', env=env, creationflags=creationflags)
         with self.lock:
             self.process = process
@@ -23646,71 +23958,85 @@ class RuntimeInstaller:
             finally:
                 messages.put(None)
         threading.Thread(target=reader, name='UniversalGameAI-RuntimeInstallerOutput', daemon=True).start()
+        return process, messages
+
+    def _consume_install_worker(self, process, messages, stop_event, on_progress, on_line):
         result = None
         error_message = ''
-        try:
-            while True:
-                if stop_event is not None and stop_event.is_set():
-                    self.cancelled = True
-                    self.stop()
-                try:
-                    line = messages.get(timeout=0.1)
-                except queue.Empty:
-                    line = ''
-                if line is None:
-                    if process.poll() is not None:
-                        break
-                elif line:
-                    try:
-                        packet = json.loads(line)
-                    except RECOVERABLE_ERRORS:
-                        packet = {'kind': WorkerMessageKind.LINE.value, 'message': line.strip()}
-                    if packet.get('kind') != WorkerMessageKind.LINE.value and (safe_int(packet.get('protocol_version'), 0) != RUNTIME_INSTALL_PROTOCOL_VERSION or packet.get('stage') not in {stage.value for stage in WorkerStage if stage is not WorkerStage.READY}):
-                        error_message = '运行库子进程返回了无效协议包'
-                        continue
-                    kind = packet.get('kind')
-                    if kind == WorkerMessageKind.PROGRESS.value and on_progress is not None:
-                        on_progress(safe_float(packet.get('value'), 0.0, 0.0, 100.0))
-                    line_kinds = {WorkerMessageKind.STATUS.value, WorkerMessageKind.LINE.value, WorkerMessageKind.PROGRESS.value}
-                    if kind in line_kinds and on_line is not None and packet.get('message'):
-                        on_line(str(packet['message']))
-                    if kind == WorkerMessageKind.RESULT.value:
-                        result = packet.get('manifest')
-                    if kind == WorkerMessageKind.ERROR.value:
-                        error_message = str(packet.get('message', ''))
-                if process.poll() is not None and messages.empty():
-                    break
-            code = process.wait()
-            if self.cancelled or (stop_event is not None and stop_event.is_set()):
-                raise InputStopped('已停止；已验证的部分下载保留供下次断点续传')
-            if code != 0 or not isinstance(result, dict):
-                raise RuntimeError(error_message or '下载子进程失败，退出码' + str(code))
-            validate_runtime_manifest(self.base, True, True)
-            if on_progress is not None:
-                on_progress(100.0)
-            return result
-        finally:
-            with self.lock:
-                self.process = None
-                handle = self.job_handle
-                self.job_handle = None
-            if handle:
-                try:
-                    ctypes.WinDLL('kernel32', use_last_error=True).CloseHandle(handle)
-                except RECOVERABLE_ERRORS as error:
-                    store = APP_CONTEXT.store
-                    if store is not None:
-                        store.log_error('RUNTIME_JOB_HANDLE_CLOSE_FAILED', error)
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                self.cancelled = True
+                self.stop()
             try:
-                request_path.unlink()
-            except FileNotFoundError:
-                pass
+                line = messages.get(timeout=0.1)
+            except queue.Empty:
+                line = ''
+            if line is None:
+                if process.poll() is not None:
+                    break
+            elif line:
+                try:
+                    packet = json.loads(line)
+                except RECOVERABLE_ERRORS:
+                    packet = {'kind': WorkerMessageKind.LINE.value, 'message': line.strip()}
+                if packet.get('kind') != WorkerMessageKind.LINE.value and (safe_int(packet.get('protocol_version'), 0) != RUNTIME_INSTALL_PROTOCOL_VERSION or packet.get('stage') not in {stage.value for stage in WorkerStage if stage is not WorkerStage.READY}):
+                    error_message = '运行库子进程返回了无效协议包'
+                    continue
+                kind = packet.get('kind')
+                if kind == WorkerMessageKind.PROGRESS.value and on_progress is not None:
+                    on_progress(safe_float(packet.get('value'), 0.0, 0.0, 100.0))
+                if kind in {WorkerMessageKind.STATUS.value, WorkerMessageKind.LINE.value, WorkerMessageKind.PROGRESS.value} and on_line is not None and packet.get('message'):
+                    on_line(str(packet['message']))
+                if kind == WorkerMessageKind.RESULT.value:
+                    result = packet.get('manifest')
+                if kind == WorkerMessageKind.ERROR.value:
+                    error_message = str(packet.get('message', ''))
+            if process.poll() is not None and messages.empty():
+                break
+        code = process.wait()
+        if self.cancelled or (stop_event is not None and stop_event.is_set()):
+            raise InputStopped('已停止；已验证的部分下载保留供下次断点续传')
+        if code != 0 or not isinstance(result, dict):
+            raise RuntimeError(error_message or '下载子进程失败，退出码' + str(code))
+        validate_runtime_manifest(self.base, True, True)
+        if on_progress is not None:
+            on_progress(100.0)
+        return result
+
+    def _finalize_install_worker(self, process, request_path):
+        with self.lock:
+            self.process = None
+            handle = self.job_handle
+            self.job_handle = None
+        if handle:
+            try:
+                ctypes.WinDLL('kernel32', use_last_error=True).CloseHandle(handle)
             except RECOVERABLE_ERRORS as error:
                 store = APP_CONTEXT.store
                 if store is not None:
-                    store.log_error('RUNTIME_REQUEST_CLEANUP_FAILED', error)
-            if self.cancelled or process.returncode not in (0, None):
-                self._cleanup_staging()
+                    store.log_error('RUNTIME_JOB_HANDLE_CLOSE_FAILED', error)
+        try:
+            request_path.unlink()
+        except FileNotFoundError:
+            pass
+        except RECOVERABLE_ERRORS as error:
+            store = APP_CONTEXT.store
+            if store is not None:
+                store.log_error('RUNTIME_REQUEST_CLEANUP_FAILED', error)
+        if self.cancelled or process.returncode not in (0, None):
+            self._cleanup_staging()
+
+    def run(self, stop_event, on_progress=None, on_line=None):
+        self.cancelled = False
+        existing = self._validated_existing_runtime(stop_event, on_progress, on_line)
+        if existing is not None:
+            return existing
+        request_path, env, command = self._prepare_install_request()
+        process, messages = self._launch_install_worker(command, env)
+        try:
+            return self._consume_install_worker(process, messages, stop_event, on_progress, on_line)
+        finally:
+            self._finalize_install_worker(process, request_path)
 
     def stop(self):
         self.cancelled = True
@@ -23776,8 +24102,8 @@ class GameSpecificVisionTrainer:
         self.progress = progress
         default_total = len(samples) if hasattr(samples, '__len__') else 0
         self.sample_total = max(0, safe_int(total_count, default_total, 0, MAX_SAMPLES))
-        default_seed = int(hashlib.sha256((str(game_id) + '|sleep').encode()).hexdigest()[:16], 16)
-        self.sleep_seed = safe_int(seed, default_seed, 0, 2 ** 63 - 1)
+        default_seed = int(hashlib.sha256((str(game_id) + '|upgrade').encode()).hexdigest()[:16], 16)
+        self.upgrade_seed = safe_int(seed, default_seed, 0, 2 ** 63 - 1)
 
     def train(self):
         self.runtime.require_ready()
@@ -23828,7 +24154,7 @@ class GameSpecificVisionTrainer:
         self.runtime.activate_game(self.game_id)
         state = dict(self.runtime.builtin_state or self.runtime._builtin_default_state(self.game_id))
         weights = self._builtin_weights(state)
-        generator = random.Random(self.sleep_seed)
+        generator = random.Random(self.upgrade_seed)
         learning_rate = 0.035
         total_steps = max(40, min(320, len(valid) * 3))
         for step in range(total_steps):
@@ -23879,7 +24205,7 @@ class GameSpecificVisionTrainer:
 
     def _update_builtin_state(self, state, weights, valid):
         sample_hashes = [hashlib.sha256(value.rgb).hexdigest() for value in valid]
-        state.update({'trained_steps': self.runtime.trained_steps, 'updated': time.time(), 'sleep_seed': self.sleep_seed, **weights, 'sample_hash': hashlib.sha256(canonical_bytes(sample_hashes)).hexdigest(), 'training_objectives': ['learned_linear_autoencoder', 'same_state_brightness_scale_compression_consistency', 'action_conditioned_transition_statistics', 'different_action_hard_negative_statistics', 'interactive_object_and_terminal_statistics', 'explicit_session_trajectory_support'], 'action_vocabulary': sorted({value.action for value in valid if value.action})[:128], 'object_supervision_count': sum((1 for value in valid if value.object_count > 0)), 'terminal_supervision_count': sum((1 for value in valid if value.terminal in {1, 2})), 'backend': 'builtin_cpu_trainable'})
+        state.update({'trained_steps': self.runtime.trained_steps, 'updated': time.time(), 'upgrade_seed': self.upgrade_seed, **weights, 'sample_hash': hashlib.sha256(canonical_bytes(sample_hashes)).hexdigest(), 'training_objectives': ['learned_linear_autoencoder', 'same_state_brightness_scale_compression_consistency', 'action_conditioned_transition_statistics', 'different_action_hard_negative_statistics', 'interactive_object_and_terminal_statistics', 'explicit_session_trajectory_support'], 'action_vocabulary': sorted({value.action for value in valid if value.action})[:128], 'object_supervision_count': sum((1 for value in valid if value.object_count > 0)), 'terminal_supervision_count': sum((1 for value in valid if value.terminal in {1, 2})), 'backend': 'builtin_cpu_trainable'})
 
     def _save_shared_builtin_state(self, state):
         shared_state = dict(state)
@@ -23975,13 +24301,13 @@ class GameSpecificVisionTrainer:
         arrays = self.runtime.np.stack([self.runtime.np.frombuffer(item.rgb, dtype=self.runtime.np.uint8).reshape(FEATURE_H, FEATURE_W, 3) for item in valid]).astype(self.runtime.np.float32) / 255.0
         arrays = self.runtime.np.ascontiguousarray(arrays.transpose(0, 3, 1, 2))
         temporal_pairs, negative_pairs = self._training_pairs(valid)
-        generator = random.Random(self.sleep_seed)
+        generator = random.Random(self.upgrade_seed)
         family = str((self.runtime.runtime_manifest or {}).get('runtime_family', 'windows-x64-cpu'))
         amp_enabled = bool(family.startswith('windows-x64-nvidia') and torch.cuda.is_available())
         torch_generator = None
         if family != 'windows-x64-directml':
             torch_generator = torch.Generator(device='cuda' if amp_enabled else 'cpu')
-            torch_generator.manual_seed(self.sleep_seed)
+            torch_generator.manual_seed(self.upgrade_seed)
         scaler = None
         if amp_enabled:
             try:
@@ -24126,7 +24452,7 @@ class GameSpecificVisionTrainer:
         return torch.nn.functional.smooth_l1_loss(prediction, second_embedding)
 
     def _torch_metadata(self, action_vocabulary, data):
-        return {'architecture_version': VISION_ARCHITECTURE_VERSION, 'model_tier': normalize_model_tier(self.runtime.model_tier), 'game_id': str(self.game_id), 'trained_steps': self.runtime.trained_steps, 'updated': time.time(), 'preprocess_hash': VISION_PREPROCESS_HASH, 'preprocess_signature': preprocess_signature(), 'runtime_fingerprint': self.runtime.runtime_fingerprint(), 'training_objectives': ['reconstruction', 'brightness_scale_compression_consistency', 'action_prediction', 'state_action_next_state_prediction', 'different_action_hard_negative_separation', 'interactive_object_recognition', 'terminal_state_recognition', 'explicit_adjacent_session_temporal_pairs'], 'action_vocabulary': action_vocabulary, 'raw_feature_preserved': True, 'neural_feature_version': NEURAL_FEATURE_VERSION, 'sleep_seed': self.sleep_seed, 'shared_base': False, 'training_backend': str(self.runtime.device_name), 'automatic_mixed_precision': bool(data.amp_enabled), 'final_batch_size': int(data.batch_size), 'torch_threads': int(RESOURCE_GOVERNOR.current_plan().torch_threads)}
+        return {'architecture_version': VISION_ARCHITECTURE_VERSION, 'model_tier': normalize_model_tier(self.runtime.model_tier), 'game_id': str(self.game_id), 'trained_steps': self.runtime.trained_steps, 'updated': time.time(), 'preprocess_hash': VISION_PREPROCESS_HASH, 'preprocess_signature': preprocess_signature(), 'runtime_fingerprint': self.runtime.runtime_fingerprint(), 'training_objectives': ['reconstruction', 'brightness_scale_compression_consistency', 'action_prediction', 'state_action_next_state_prediction', 'different_action_hard_negative_separation', 'interactive_object_recognition', 'terminal_state_recognition', 'explicit_adjacent_session_temporal_pairs'], 'action_vocabulary': action_vocabulary, 'raw_feature_preserved': True, 'neural_feature_version': NEURAL_FEATURE_VERSION, 'upgrade_seed': self.upgrade_seed, 'shared_base': False, 'training_backend': str(self.runtime.device_name), 'automatic_mixed_precision': bool(data.amp_enabled), 'final_batch_size': int(data.batch_size), 'torch_threads': int(RESOURCE_GOVERNOR.current_plan().torch_threads)}
 
     def _raise_if_stopped(self, message):
         if self.stop_event is not None and self.stop_event.is_set():
@@ -25674,7 +26000,7 @@ def ai_worker_main(base, address, auth_text, family, protocol_version=None):
 
                     def progress(amount):
                         connection.send({'kind': WorkerMessageKind.PROGRESS.value, 'id': request_id, 'value': float(amount)})
-                    value = vision.train(str(payload.get('game_id', '')), snapshot_rows, stop, progress, payload.get('sleep_seed'), len(snapshot_rows))
+                    value = vision.train(str(payload.get('game_id', '')), snapshot_rows, stop, progress, payload.get('upgrade_seed'), len(snapshot_rows))
                 elif operation == 'load_candidate_index':
                     token = str(payload.get('token', '')).strip()
                     prototypes = list(payload.get('prototypes', []))
@@ -26028,10 +26354,10 @@ class VisionRuntimeProxy:
     def train(self, game_id, samples, stop_event=None, progress=None, seed=None):
         self.require_ready()
         if stop_event is not None and stop_event.is_set():
-            raise InputStopped('睡眠已停止')
+            raise InputStopped('升级已停止')
         snapshot = create_training_snapshot(self.worker.base, game_id, samples)
         try:
-            return self.worker.request('train', {'game_id': str(game_id), 'snapshot': snapshot, 'sleep_seed': safe_int(seed, 0, 0, 2 ** 63 - 1)}, 7200.0, progress)
+            return self.worker.request('train', {'game_id': str(game_id), 'snapshot': snapshot, 'upgrade_seed': safe_int(seed, 0, 0, 2 ** 63 - 1)}, 7200.0, progress)
         finally:
             remove_training_snapshot(self.worker.base, snapshot)
 
@@ -26585,28 +26911,388 @@ class OCRMonitor:
         self.thread.start()
         return self
 
+    def _initialize_regions(self, game):
+        definitions = [dict(item) for item in self.app.store.list_ocr_regions(game['id'], True)]
+        definitions.sort(key=lambda item: (safe_int(item.get('priority'), 0), safe_float(item.get('created'), 0.0), str(item.get('id', ''))))
+        for priority, definition in enumerate(definitions):
+            definition['priority'] = priority
+        if not definitions:
+            return
+        previous_snapshot = {}
+        frame_sequence = 0
+        states = {}
+        for item in definitions:
+            region_id = str(item['id'])
+            norm = _clamp_region_norm(item.get('region_norm'))
+            templates = _decode_tracking_templates(item)
+            config = normalize_relation_config(item.get('relation_config', {}))
+            stored_profile = config.get('numeric_visual_profile') if isinstance(config.get('numeric_visual_profile'), dict) else {}
+            persistent_value = config.get('last_reliable_numeric_value')
+            prediction = NumericPredictionState()
+            if finite_number(persistent_value):
+                prediction.last_observed_value = safe_float(persistent_value)
+                prediction.predicted_value = safe_float(persistent_value)
+                prediction.prediction_confidence = safe_float(config.get('last_reliable_numeric_confidence'), 0.55, 0.0, 1.0)
+                prediction.last_observation_confidence = prediction.prediction_confidence
+                prediction.trusted_observations = 1
+                prediction.prediction_source = 'persistent_last_session'
+            states[region_id] = {'norm': norm, 'templates': templates, 'template': templates[0] if templates else b'', 'lost': 0, 'pending_norm': None, 'pending_count': 0, 'high_confidence_frames': 0, 'stable_tracking_frames': 0, 'persisted_norm': list(norm), 'last_persisted': 0.0, 'last_profile_persisted': 0.0, 'last_value_persisted': 0.0, 'persistent_value': safe_float(persistent_value) if finite_number(persistent_value) else None, 'profile_checksum': hashlib.sha256(canonical_bytes(stored_profile)).hexdigest() if stored_profile else '', 'prediction': prediction}
+
+        return definitions, states
+
+    def _generate_candidates(self, game, definitions, states, frame, frame_sequence, frame_deadline, frame_id):
+        eligible = []
+        request_contexts = {}
+        for definition in definitions:
+            region_id = str(definition['id'])
+            state = states[region_id]
+            priority = safe_int(definition.get('priority'), 0, 0)
+            stable = safe_int(state.get('stable_tracking_frames'), 0, 0)
+            divisor = 1 if priority <= 1 else min(5, 1 + priority // 2 + (1 if stable >= 16 else 0))
+            if divisor > 1 and frame_sequence % divisor:
+                continue
+            context = {'game_id': str(game['id']), 'region_id': region_id, 'definition': dict(definition), 'lost_frames': safe_int(state.get('lost'), 0, 0), 'purpose': self.purpose, 'frame_id': frame_id, 'commit_tracking_feedback': False}
+            request_contexts[region_id] = context
+            eligible.append(definition)
+        tracked_results = {}
+        if eligible and time.monotonic() < frame_deadline:
+            tracking_requests = [{'norm': list(states[str(definition['id'])]['norm']), 'region_id': str(definition['id']), 'context': request_contexts[str(definition['id'])]} for definition in eligible]
+            try:
+                values = self.app.ocr_runtime.track_numeric_regions(frame, tracking_requests)
+                for value in values or []:
+                    if isinstance(value, dict) and value.get('region_id'):
+                        tracked_results[str(value.get('region_id'))] = value
+            except RECOVERABLE_ERRORS as error:
+                self.app.store.log_error('OCR_AI_TRACKING_FAILED', error, mode=self.app.mode, game_id=game['id'])
+        ranked_by_region = {}
+        for definition in eligible:
+            region_id = str(definition['id'])
+            state = states[region_id]
+            stable = safe_int(state.get('stable_tracking_frames'), 0, 0)
+            candidate_budget = 7 if state.get('lost', 0) else 3 if stable >= 16 else 5
+            ranked = []
+            tracked = tracked_results.get(region_id, {})
+            for candidate in list(tracked.get('candidates', []))[:candidate_budget]:
+                if not isinstance(candidate, dict):
+                    continue
+                norm = _clamp_region_norm(candidate.get('norm'))
+                metadata = dict(candidate)
+                metadata['tracking_model'] = str(tracked.get('tracking_model', ''))
+                metadata['box_regression_updates'] = safe_int(tracked.get('box_regression_updates'), 0, 0)
+                metadata['box_regression_error'] = safe_float(tracked.get('box_regression_error'), 1.0)
+                ranked.append({'norm': norm, 'distance': safe_float(candidate.get('distance'), 1.0, 0.0, 2.0), 'score': safe_float(candidate.get('score'), 0.0, 0.0, 1.0), 'source': str(candidate.get('source', 'learned_multi_hypothesis')), 'descriptor': _region_descriptor(preview_rgb_bytes(frame.get('preview_rgb')), safe_int(frame.get('preview_width'), PREVIEW_W, 1, 8192), safe_int(frame.get('preview_height'), PREVIEW_H, 1, 8192), norm), 'metadata': metadata})
+            if not ranked:
+                for distance, norm, descriptor in _adaptive_region_candidates(frame, definition, state)[:candidate_budget]:
+                    ranked.append({'norm': _clamp_region_norm(norm), 'distance': safe_float(distance, 1.0, 0.0, 2.0), 'score': max(0.0, min(1.0, 1.0 - safe_float(distance, 1.0))), 'source': 'stable_anchor_template_fallback', 'descriptor': descriptor, 'metadata': {'tracking_model': 'stable_ui_anchor_template_fallback', 'anchor_similarity': max(0.0, 1.0 - safe_float(distance, 1.0))}})
+            unique = []
+            for candidate in sorted(ranked, key=lambda item: item.get('score', 0.0), reverse=True):
+                if any((_rect_iou(candidate['norm'], old['norm']) >= 0.96 for old in unique)):
+                    continue
+                unique.append(candidate)
+            ranked_by_region[region_id] = unique[:candidate_budget]
+
+        return eligible, request_contexts, ranked_by_region
+
+    def _batch_recognize(self, game, frame, eligible, ranked_by_region, request_contexts, frame_deadline):
+        batch_results = {}
+        if eligible and time.monotonic() < frame_deadline:
+            batch_definitions = [definition for definition in eligible if ranked_by_region.get(str(definition['id']))]
+            requests = [{'norm': list(ranked_by_region[str(definition['id'])][0]['norm']), 'context': {**request_contexts[str(definition['id'])], 'tracking_candidate': dict(ranked_by_region[str(definition['id'])][0].get('metadata', {})), 'tracking_source': str(ranked_by_region[str(definition['id'])][0].get('source', ''))}} for definition in batch_definitions]
+            try:
+                values = self.app.ocr_runtime.recognize_regions(frame, requests)
+                for definition, value in zip(batch_definitions, values):
+                    batch_results[str(definition['id'])] = value
+            except RECOVERABLE_ERRORS as error:
+                self.app.store.log_error('OCR_BATCH_RECOGNITION_FAILED', error, mode=self.app.mode, game_id=game['id'])
+
+        return batch_results
+
+    def _commit_region_state(self, game, frame, definition, state, candidate, candidate_norm, descriptor, recognized, parsed, best_payload, observed_valid, consensus_confidence, tracking_confident, frame_deadline):
+        feedback = {}
+        if observed_valid and time.monotonic() < frame_deadline:
+            try:
+                feedback = self.app.ocr_runtime.commit_tracking_feedback(frame, candidate_norm, best_payload['context'], recognized)
+            except RECOVERABLE_ERRORS as error:
+                self.app.store.log_error('OCR_TRACKING_FEEDBACK_FAILED', error, mode=self.app.mode, game_id=game['id'])
+        if tracking_confident:
+            pending = state.get('pending_norm')
+            if pending is not None and _rect_iou(pending, candidate_norm) >= 0.58:
+                state['pending_count'] = min(1000, state.get('pending_count', 0) + 1)
+                state['pending_norm'] = _clamp_region_norm([pending[index] * 0.58 + candidate_norm[index] * 0.42 for index in range(4)])
+            else:
+                state['pending_norm'] = _clamp_region_norm(candidate_norm)
+                state['pending_count'] = 1
+            state['lost'] = 0
+            state['high_confidence_frames'] = min(1000, state.get('high_confidence_frames', 0) + 1) if consensus_confidence >= 0.7 else 0
+            if state['pending_count'] >= NUMERIC_TRACKING_CONFIRM_FRAMES:
+                committed = _clamp_region_norm(state['pending_norm'])
+                previous = list(state['norm'])
+                state['norm'] = committed
+                definition['region_norm'] = list(committed)
+                state['stable_tracking_frames'] = min(10000, state.get('stable_tracking_frames', 0) + 1) if _rect_iou(previous, committed) >= 0.88 else 1
+            if descriptor and state['high_confidence_frames'] >= NUMERIC_TRACKING_TEMPLATE_UPDATE_FRAMES and (consensus_confidence >= 0.72):
+                templates = list(state.get('templates', []))
+                nearest = min((_descriptor_distance(template, descriptor) for template in templates), default=2.0)
+                if nearest >= 0.035:
+                    templates.insert(0, bytes(descriptor))
+                elif templates:
+                    closest_index = min(range(len(templates)), key=lambda index: _descriptor_distance(templates[index], descriptor))
+                    old = templates[closest_index]
+                    templates[closest_index] = bytes((int(old_value * 0.88 + new_value * 0.12) for old_value, new_value in zip(old, descriptor)))
+                else:
+                    templates = [bytes(descriptor)]
+                state['templates'] = templates[:NUMERIC_TRACKING_HISTORY_LIMIT]
+                state['template'] = state['templates'][0]
+                config = normalize_relation_config(definition.get('relation_config', {}))
+                encoded = [_encode_tracking_template(value) for value in state['templates'] if value]
+                config['tracking_templates'] = encoded
+                config['tracking_template'] = encoded[0] if encoded else ''
+                config['tracking_anchor_excludes_numeric_content'] = True
+                config['tracking_model'] = 'stable_ui_anchor+pyramidal_lk_ransac+learned_roi_embedding+online_neural_box_regression+multi_hypothesis+ocr_relocalization'
+                definition['relation_config'] = config
+                state['high_confidence_frames'] = 0
+        else:
+            state['lost'] = min(1000, state.get('lost', 0) + 1)
+            state['pending_norm'] = None
+            state['pending_count'] = 0
+            state['high_confidence_frames'] = 0
+            state['stable_tracking_frames'] = 0
+        profile = {}
+        if isinstance(feedback, dict) and isinstance(feedback.get('region_profile'), dict):
+            profile = dict(feedback.get('region_profile'))
+        elif isinstance(recognized.get('region_profile'), dict):
+            profile = dict(recognized.get('region_profile'))
+        now = time.monotonic()
+        profile_changed = False
+        if observed_valid and safe_int(profile.get('samples'), 0, 0) >= 3:
+            profile_checksum = hashlib.sha256(canonical_bytes(profile)).hexdigest()
+            if profile_checksum != state.get('profile_checksum') and now - state.get('last_profile_persisted', 0.0) >= 20.0:
+                config = normalize_relation_config(definition.get('relation_config', {}))
+                config['numeric_visual_profile'] = profile
+                config['numeric_profile_model'] = 'neural_visual_embedding+adaptive_font_color_format_statistics'
+                config['tracking_model'] = str(candidate.get('metadata', {}).get('tracking_model', config.get('tracking_model', '')))
+                definition['relation_config'] = config
+                state['profile_checksum'] = profile_checksum
+                state['last_profile_persisted'] = now
+                profile_changed = True
+        config = normalize_relation_config(definition.get('relation_config', {}))
+        should_persist_norm = bool(config.get('tracking_persist_stable', False))
+        moved = _rect_iou(state.get('persisted_norm', state['norm']), state['norm']) < 0.88
+        norm_changed = bool(should_persist_norm and moved and (state.get('stable_tracking_frames', 0) >= NUMERIC_TRACKING_PERSIST_FRAMES) and (now - state.get('last_persisted', 0.0) >= 30.0))
+        value_changed = bool(observed_valid and finite_number(parsed.get('value')) and (now - state.get('last_value_persisted', 0.0) >= 5.0) and (not finite_number(state.get('persistent_value')) or not numeric_values_equal(state.get('persistent_value'), parsed.get('value'))))
+        if value_changed:
+            config = normalize_relation_config(definition.get('relation_config', {}))
+            config['last_reliable_numeric_value'] = safe_float(parsed.get('value'))
+            config['last_reliable_numeric_confidence'] = consensus_confidence
+            config['last_reliable_numeric_updated'] = time.time()
+            definition['relation_config'] = config
+            state['persistent_value'] = safe_float(parsed.get('value'))
+            state['last_value_persisted'] = now
+        if profile_changed or norm_changed or value_changed:
+            persisted = dict(definition)
+            persisted['region_norm'] = list(state['norm'])
+            self.app.store.save_ocr_region(game['id'], persisted)
+            if norm_changed:
+                state['persisted_norm'] = list(state['norm'])
+                state['last_persisted'] = now
+
+    def _evaluate_consensus(self, game, frame, eligible, states, ranked_by_region, request_contexts, batch_results, frame_deadline):
+        observations = {}
+        for definition in eligible:
+            if self.stop_event.is_set() or self.app.should_stop() or time.monotonic() >= frame_deadline:
+                break
+            region_id = str(definition['id'])
+            state = states[region_id]
+            was_lost = state.get('lost', 0) > 0
+            ranked = ranked_by_region.get(region_id, [])
+            best_payload = None
+            best_quality = -10.0
+            for rank, candidate in enumerate(ranked):
+                if time.monotonic() >= frame_deadline:
+                    break
+                candidate_norm = candidate['norm']
+                context = {**request_contexts[region_id], 'tracking_candidate': dict(candidate.get('metadata', {})), 'tracking_source': str(candidate.get('source', ''))}
+                try:
+                    recognized = batch_results.get(region_id) if rank == 0 else None
+                    if recognized is None:
+                        recognized = self.app.ocr_runtime.recognize_region(frame, candidate_norm, context)
+                except RECOVERABLE_ERRORS as error:
+                    if rank == 0:
+                        self.app.store.log_error('OCR_TRACKING_RECOGNITION_FAILED', error, mode=self.app.mode, game_id=game['id'])
+                    continue
+                worker_parsed = recognized.get('parsed') if isinstance(recognized, dict) and isinstance(recognized.get('parsed'), dict) else {}
+                if definition.get('region_type') == 'number':
+                    parsed = dict(worker_parsed) if worker_parsed.get('valid') and finite_number(worker_parsed.get('value')) else parse_ocr_number(recognized.get('text'), definition.get('number_format', 'auto'))
+                else:
+                    parsed = {'valid': False}
+                ocr_confidence = safe_float(recognized.get('confidence'), 0.0, 0.0, 1.0)
+                parse_confidence = safe_float(parsed.get('confidence'), 0.0, 0.0, 1.0)
+                agreement = safe_float(recognized.get('ensemble_agreement'), 0.0, 0.0, 1.0)
+                profile_confidence = safe_float(recognized.get('profile_confidence'), 0.0, 0.0, 1.0)
+                tracking_score = safe_float(candidate.get('score'), max(0.0, 1.0 - safe_float(candidate.get('distance'), 1.0)), 0.0, 1.0)
+                token_coverage = safe_float(parsed.get('token_coverage'), 0.0, 0.0, 1.0)
+                token_count = safe_int(parsed.get('token_count'), 0, 0, 32)
+                ambiguity_count = len(parsed.get('ambiguities', [])) if isinstance(parsed.get('ambiguities'), list) else 0
+                quality = ocr_confidence * 0.27 + parse_confidence * 0.18 + agreement * 0.22 + profile_confidence * 0.13 + tracking_score * 0.15 + token_coverage * 0.05 + (0.08 if parsed.get('valid') else 0.0) - max(0, token_count - 1) * 0.045 - ambiguity_count * 0.018 - rank * 0.012
+                if candidate.get('source') == 'online_neural_box_regression':
+                    quality += 0.015
+                if best_payload is None or quality > best_quality:
+                    best_quality = quality
+                    best_payload = {'recognized': recognized, 'parsed': parsed, 'candidate': candidate, 'context': context, 'quality': quality}
+                if parsed.get('valid') and quality >= 0.78 and (ocr_confidence >= 0.68) and (agreement >= 0.5):
+                    break
+            if best_payload is None:
+                state['lost'] = min(1000, state.get('lost', 0) + 1)
+                state['pending_norm'] = None
+                state['pending_count'] = 0
+                state['high_confidence_frames'] = 0
+                state['stable_tracking_frames'] = 0
+                continue
+            recognized = best_payload['recognized']
+            parsed = best_payload['parsed']
+            candidate = best_payload['candidate']
+            candidate_norm = list(candidate['norm'])
+            descriptor = candidate.get('descriptor', b'')
+            distance = safe_float(candidate.get('distance'), 1.0, 0.0, 2.0)
+            ocr_confidence = safe_float(recognized.get('confidence'), 0.0, 0.0, 1.0)
+            parse_confidence = safe_float(parsed.get('confidence'), 0.0, 0.0, 1.0)
+            agreement = safe_float(recognized.get('ensemble_agreement'), 0.0, 0.0, 1.0)
+            profile_confidence = safe_float(recognized.get('profile_confidence'), 0.0, 0.0, 1.0)
+            candidates = recognized.get('candidates', []) if isinstance(recognized.get('candidates'), list) else []
+            grouped = bool(candidates and isinstance(candidates[0], dict) and candidates[0].get('grouped'))
+            consensus = self.consensus.update(region_id, recognized.get('text', ''), parsed.get('value') if isinstance(parsed, dict) else None, ocr_confidence, parse_confidence, agreement, profile_confidence, parsed.get('format_signature', ''), parsed.get('digit_count', 0), parsed.get('decimal_places', 0), parsed.get('separator', ''), parsed.get('has_thousands_separator', False), parsed.get('token_coverage', 0.0), grouped)
+            if parsed.get('valid') and finite_number(consensus.get('value')):
+                parsed = dict(parsed)
+                parsed['value'] = safe_float(consensus.get('value'))
+                parsed['confidence'] = max(parse_confidence, safe_float(consensus.get('confidence'), 0.0))
+                parsed['consensus_text'] = str(consensus.get('text', ''))
+                parsed['stable_frames'] = safe_int(consensus.get('stable_frames'), 0)
+                parsed['temporal_disagreement'] = bool(consensus.get('conflict'))
+                parsed['format_consistency'] = safe_float(consensus.get('format_consistency'), 0.0)
+            consensus_confidence = safe_float(consensus.get('confidence'), 0.0, 0.0, 1.0)
+            observation_quality = safe_float(consensus.get('observation_quality'), 0.0, 0.0, 1.0)
+            tracking_score = safe_float(candidate.get('score'), max(0.0, 1.0 - distance), 0.0, 1.0)
+            branch_support = safe_int(recognized.get('branch_support'), 0, 0)
+            visual_evidence = bool(agreement >= 0.25 or branch_support >= 2 or (ocr_confidence >= 0.88 and parse_confidence >= 0.78 and (profile_confidence >= 0.52)))
+            observed_valid = bool(parsed.get('valid') and finite_number(parsed.get('value')) and (consensus_confidence >= NUMERIC_OBSERVATION_MIN_CONFIDENCE) and (observation_quality >= 0.58) and (ocr_confidence >= 0.5) and (parse_confidence >= 0.46) and (profile_confidence >= 0.25) and (tracking_score >= 0.34) and (safe_float(consensus.get('format_consistency'), 0.0) >= 0.24) and (not consensus.get('conflict')) and visual_evidence)
+            rejection_reasons = []
+            if not parsed.get('valid') or not finite_number(parsed.get('value')):
+                rejection_reasons.append('unparseable')
+            if consensus_confidence < NUMERIC_OBSERVATION_MIN_CONFIDENCE:
+                rejection_reasons.append('below_minimum_confidence')
+            if consensus.get('conflict'):
+                rejection_reasons.append('temporal_conflict')
+            if not visual_evidence:
+                rejection_reasons.append('insufficient_model_agreement')
+            if tracking_score < 0.34:
+                rejection_reasons.append('tracking_uncertain')
+            tracking_confident = bool(parsed.get('valid') and finite_number(parsed.get('value')) and (consensus_confidence >= 0.57) and (tracking_score >= 0.38) and (not consensus.get('conflict')) and visual_evidence)
+            self._commit_region_state(game, frame, definition, state, candidate, candidate_norm, descriptor, recognized, parsed, best_payload, observed_valid, consensus_confidence, tracking_confident, frame_deadline)
+            parsed = dict(parsed)
+            parsed['observed_valid'] = observed_valid
+            parsed['observation_confidence'] = consensus_confidence
+            parsed['observation_quality'] = observation_quality
+            parsed['observation_rejection_reason'] = ','.join(rejection_reasons)
+            parsed['ensemble_agreement'] = agreement
+            parsed['profile_confidence'] = profile_confidence
+            parsed['tracking_score'] = tracking_score
+            observations[region_id] = {'definition': definition, 'recognized': recognized, 'parsed': parsed, 'consensus': consensus, 'observed_valid': observed_valid, 'observation_rejection_reason': ','.join(rejection_reasons), 'tracked_norm': list(state['norm']), 'candidate_norm': list(candidate_norm), 'candidate_confirm_frames': state.get('pending_count', 0), 'lost_frames': state['lost'], 'tracking_distance': distance, 'tracking_score': tracking_score, 'tracking_source': str(candidate.get('source', '')), 'tracking_model': str(candidate.get('metadata', {}).get('tracking_model', '')), 'tracking_metadata': dict(candidate.get('metadata', {})), 'recovered': bool(was_lost and tracking_confident)}
+
+        return observations
+
+    def _predict_regions(self, definitions, states, observations, frame_started, frame_id, previous_snapshot):
+        current_snapshot = {}
+        prediction_time = frame_started
+        for definition in definitions:
+            region_id = str(definition['id'])
+            state = states[region_id]
+            item = observations.get(region_id)
+            parsed = item.get('parsed', {}) if isinstance(item, dict) else {}
+            consensus = item.get('consensus', {}) if isinstance(item, dict) else {}
+            stable_frames = safe_int(consensus.get('stable_frames'), 0)
+            conflict = bool(consensus.get('conflict'))
+            observed_valid = bool(item.get('observed_valid')) if isinstance(item, dict) else False
+            consensus_value = consensus.get('value') if isinstance(consensus, dict) else None
+            if not finite_number(consensus_value) and isinstance(parsed, dict) and parsed.get('valid'):
+                consensus_value = parsed.get('value')
+            consensus_confidence = safe_float(consensus.get('confidence', parsed.get('confidence', 0.0)) if isinstance(consensus, dict) else 0.0, 0.0, 0.0, 1.0)
+            if conflict:
+                consensus_confidence *= 0.35
+            if observed_valid:
+                snapshot = state['prediction'].observe(parsed.get('value'), prediction_time, consensus_confidence)
+            else:
+                visual_value = consensus_value if finite_number(consensus_value) and consensus_confidence >= 0.3 else None
+                snapshot = state['prediction'].predict(prediction_time, visual_value, consensus_confidence)
+            snapshot.update({'stable_frames': stable_frames, 'occluded': not isinstance(item, dict) or safe_int(item.get('lost_frames'), 0) > 0, 'recovered': bool(item.get('recovered')) if isinstance(item, dict) else False, 'temporal_disagreement': conflict, 'observed_valid': observed_valid, 'observation_confidence': consensus_confidence, 'observation_rejection_reason': str(item.get('observation_rejection_reason', 'not_observed')) if isinstance(item, dict) else 'not_observed', 'persistent_value': state.get('persistent_value'), 'last_session_value': state.get('persistent_value'), 'frame_id': frame_id})
+            current_snapshot[region_id] = snapshot
+        comparison = compare_numeric_snapshots_detailed(definitions, previous_snapshot, current_snapshot) if previous_snapshot else {'reward': 0.0, 'winning_region_id': '', 'status': 'initial_snapshot', 'priority': None}
+
+        return current_snapshot, comparison
+
+    def _publish_rewards(self, game, frame, definitions, observations, current_snapshot, comparison, previous_snapshot, frame_id):
+        region_values = {region_id: snapshot.get('value') for region_id, snapshot in current_snapshot.items() if snapshot.get('valid') and finite_number(snapshot.get('value'))}
+        event_summaries = []
+        terminal = ''
+        for definition in definitions:
+            region_id = str(definition['id'])
+            item = observations.get(region_id)
+            if item is None:
+                snapshot_value = current_snapshot.get(region_id, {})
+                event_summaries.append({'region_id': region_id, 'priority': safe_int(definition.get('priority'), 0), 'status': 'predicted' if snapshot_value.get('valid') else str(snapshot_value.get('prediction_source', 'unreadable')), 'terminal': '', 'reset': '', 'valid': bool(snapshot_value.get('valid')), 'predicted': bool(snapshot_value.get('predicted')), 'confidence': safe_float(snapshot_value.get('confidence'), 0.0, 0.0, 1.0)})
+                continue
+            parsed = item['parsed']
+            consensus = item['consensus']
+            runtime_context = {'task_phase': str(frame.get('task_phase', 'unknown')), 'subgoal_id': str(frame.get('subgoal_id', '')), 'terminal_state': str(frame.get('terminal_state', '')), 'recent_actions': list(frame.get('recent_actions', []))[-8:], 'region_values': region_values, 'tracked_norm': item['tracked_norm'], 'candidate_norm': item['candidate_norm'], 'candidate_confirm_frames': item['candidate_confirm_frames'], 'lost_frames': item['lost_frames'], 'tracking_distance': item['tracking_distance'], 'tracking_score': item['tracking_score'], 'tracking_source': item['tracking_source'], 'tracking_model': item['tracking_model'], 'frame_id': frame_id}
+            semantic_parsed = parsed if item.get('observed_valid') else {'valid': False, 'rejection_reason': item.get('observation_rejection_reason', 'low_confidence')}
+            event = OCR_SEMANTIC_ENGINE.evaluate(definition, semantic_parsed, runtime_context) if definition.get('region_type') == 'number' else {'terminal': '', 'progress': 0.0, 'status': 'text_only', 'reset': '', 'semantic_version': OCR_SEMANTIC_VERSION}
+            event['progress'] = 0.0
+            event['ocr_observed_valid'] = bool(item.get('observed_valid'))
+            event['ocr_observation_rejection_reason'] = str(item.get('observation_rejection_reason', ''))
+            event['ocr_temporal_disagreement'] = bool(consensus.get('conflict'))
+            event['ocr_ensemble_agreement'] = safe_float(item['recognized'].get('ensemble_agreement'), 0.0)
+            event['ocr_profile_confidence'] = safe_float(item['recognized'].get('profile_confidence'), 0.0)
+            event['ocr_preprocessing_branches'] = list(item['recognized'].get('preprocessing_branches', []))
+            event['stable_frames'] = safe_int(consensus.get('stable_frames'), 0)
+            event['tracked_region_norm'] = item['tracked_norm']
+            event['tracking_candidate_norm'] = item['candidate_norm']
+            event['tracking_candidate_confirm_frames'] = item['candidate_confirm_frames']
+            event['tracking_lost_frames'] = item['lost_frames']
+            event['tracking_template_distance'] = item['tracking_distance']
+            event['tracking_score'] = item['tracking_score']
+            event['tracking_source'] = item['tracking_source']
+            event['tracking_model'] = item['tracking_model']
+            event['tracking_recovered'] = bool(item.get('recovered'))
+            event['frame_id'] = frame_id
+            event['priority'] = safe_int(definition.get('priority'), 0)
+            event['snapshot_reward'] = safe_float(comparison.get('reward'), 0.0, -1.0, 1.0)
+            event['snapshot_status'] = str(comparison.get('status', 'neutral'))
+            event['snapshot_winning_region_id'] = str(comparison.get('winning_region_id', ''))
+            event['snapshot_value'] = dict(current_snapshot.get(region_id, {}))
+            event['numeric_predicted'] = bool(event['snapshot_value'].get('predicted'))
+            event['numeric_prediction_confidence'] = safe_float(event['snapshot_value'].get('confidence'), 0.0, 0.0, 1.0)
+            event['numeric_prediction_error'] = event['snapshot_value'].get('prediction_error')
+            event['numeric_prediction_source'] = str(event['snapshot_value'].get('prediction_source', ''))
+            if not terminal and event.get('terminal') in {'success', 'failure'}:
+                terminal = str(event.get('terminal'))
+            event_summaries.append({'region_id': region_id, 'priority': event['priority'], 'status': str(event.get('status', 'neutral')), 'terminal': str(event.get('terminal', '')), 'reset': str(event.get('reset', '')), 'valid': bool(current_snapshot.get(region_id, {}).get('valid')), 'predicted': bool(current_snapshot.get(region_id, {}).get('predicted')), 'confidence': safe_float(current_snapshot.get(region_id, {}).get('confidence'), 0.0, 0.0, 1.0), 'observed_valid': bool(item.get('observed_valid'))})
+            saved_at = time.monotonic()
+            if saved_at - self.last_saved[region_id] >= 0.8:
+                self.last_saved[region_id] = saved_at
+                self.app.store.append_ocr_observation(game['id'], region_id, item['recognized'].get('text', ''), parsed, consensus.get('confidence', item['recognized'].get('confidence', 0.0)), consensus.get('stable_frames', 0), event)
+        snapshot_event = {'terminal': terminal, 'progress': safe_float(comparison.get('reward'), 0.0, -1.0, 1.0), 'numeric_progress': safe_float(comparison.get('reward'), 0.0, -1.0, 1.0), 'status': str(comparison.get('status', 'neutral')), 'winning_region_id': str(comparison.get('winning_region_id', '')), 'winning_priority': comparison.get('priority'), 'used_prediction': bool(comparison.get('used_prediction')), 'events': event_summaries, 'before_snapshot': previous_snapshot, 'now_snapshot': current_snapshot, 'frame_id': frame_id}
+        SEMANTIC_EVENT_HUB.publish_snapshot(game['id'], frame_id, snapshot_event)
+
     def _run(self):
         try:
             game = self.app.require_game()
-            definitions = [dict(item) for item in self.app.store.list_ocr_regions(game['id'], True)]
-            definitions.sort(key=lambda item: (safe_int(item.get('priority'), 0), safe_float(item.get('created'), 0.0), str(item.get('id', ''))))
-            for priority, definition in enumerate(definitions):
-                definition['priority'] = priority
+            definitions, states = self._initialize_regions(game)
             if not definitions:
                 return
             previous_snapshot = {}
             frame_sequence = 0
-            states = {}
-            for item in definitions:
-                region_id = str(item['id'])
-                norm = _clamp_region_norm(item.get('region_norm'))
-                templates = _decode_tracking_templates(item)
-                config = normalize_relation_config(item.get('relation_config', {}))
-                stored_profile = config.get('numeric_visual_profile') if isinstance(config.get('numeric_visual_profile'), dict) else {}
-                states[region_id] = {'norm': norm, 'templates': templates, 'template': templates[0] if templates else b'', 'lost': 0, 'pending_norm': None, 'pending_count': 0, 'high_confidence_frames': 0, 'stable_tracking_frames': 0, 'persisted_norm': list(norm), 'last_persisted': 0.0, 'last_profile_persisted': 0.0, 'profile_checksum': hashlib.sha256(canonical_bytes(stored_profile)).hexdigest() if stored_profile else '', 'prediction': NumericPredictionState()}
-            while not self.stop_event.is_set() and (not self.app.should_stop()):
+            while not self.stop_event.is_set() and not self.app.should_stop():
                 frame = self.frame_buffer.latest(None, 1.0)
-                if frame is None or frame.get('time') == self.last_stamp or (not frame.get('capture_valid')):
+                if frame is None or frame.get('time') == self.last_stamp or not frame.get('capture_valid'):
                     self.stop_event.wait(0.12)
                     continue
                 self.last_stamp = frame.get('time')
@@ -26615,318 +27301,11 @@ class OCRMonitor:
                 frame_budget = min(1.25, 0.34 + len(definitions) * (0.09 if self.purpose == 'training' else 0.065))
                 frame_deadline = frame_started + frame_budget
                 frame_id = str(frame.get('frame_id') or str(game['id']) + '|' + format(safe_float(frame.get('time'), time.time()), '.9f'))
-                observations = {}
-                eligible = []
-                request_contexts = {}
-                for definition in definitions:
-                    region_id = str(definition['id'])
-                    state = states[region_id]
-                    priority = safe_int(definition.get('priority'), 0, 0)
-                    stable = safe_int(state.get('stable_tracking_frames'), 0, 0)
-                    divisor = 1 if priority <= 1 else min(5, 1 + priority // 2 + (1 if stable >= 16 else 0))
-                    if divisor > 1 and frame_sequence % divisor:
-                        continue
-                    context = {'game_id': str(game['id']), 'region_id': region_id, 'definition': dict(definition), 'lost_frames': safe_int(state.get('lost'), 0, 0), 'purpose': self.purpose, 'frame_id': frame_id, 'commit_tracking_feedback': False}
-                    request_contexts[region_id] = context
-                    eligible.append(definition)
-                tracked_results = {}
-                if eligible and time.monotonic() < frame_deadline:
-                    tracking_requests = [{'norm': list(states[str(definition['id'])]['norm']), 'region_id': str(definition['id']), 'context': request_contexts[str(definition['id'])]} for definition in eligible]
-                    try:
-                        values = self.app.ocr_runtime.track_numeric_regions(frame, tracking_requests)
-                        for value in values or []:
-                            if isinstance(value, dict) and value.get('region_id'):
-                                tracked_results[str(value.get('region_id'))] = value
-                    except RECOVERABLE_ERRORS as error:
-                        self.app.store.log_error('OCR_AI_TRACKING_FAILED', error, mode=self.app.mode, game_id=game['id'])
-                ranked_by_region = {}
-                for definition in eligible:
-                    region_id = str(definition['id'])
-                    state = states[region_id]
-                    stable = safe_int(state.get('stable_tracking_frames'), 0, 0)
-                    candidate_budget = 7 if state.get('lost', 0) else 3 if stable >= 16 else 5
-                    ranked = []
-                    tracked = tracked_results.get(region_id, {})
-                    for candidate in list(tracked.get('candidates', []))[:candidate_budget]:
-                        if not isinstance(candidate, dict):
-                            continue
-                        norm = _clamp_region_norm(candidate.get('norm'))
-                        metadata = dict(candidate)
-                        metadata['tracking_model'] = str(tracked.get('tracking_model', ''))
-                        metadata['box_regression_updates'] = safe_int(tracked.get('box_regression_updates'), 0, 0)
-                        metadata['box_regression_error'] = safe_float(tracked.get('box_regression_error'), 1.0)
-                        ranked.append({'norm': norm, 'distance': safe_float(candidate.get('distance'), 1.0, 0.0, 2.0), 'score': safe_float(candidate.get('score'), 0.0, 0.0, 1.0), 'source': str(candidate.get('source', 'learned_multi_hypothesis')), 'descriptor': _region_descriptor(preview_rgb_bytes(frame.get('preview_rgb')), safe_int(frame.get('preview_width'), PREVIEW_W, 1, 8192), safe_int(frame.get('preview_height'), PREVIEW_H, 1, 8192), norm), 'metadata': metadata})
-                    if not ranked:
-                        for distance, norm, descriptor in _adaptive_region_candidates(frame, definition, state)[:candidate_budget]:
-                            ranked.append({'norm': _clamp_region_norm(norm), 'distance': safe_float(distance, 1.0, 0.0, 2.0), 'score': max(0.0, min(1.0, 1.0 - safe_float(distance, 1.0))), 'source': 'stable_anchor_template_fallback', 'descriptor': descriptor, 'metadata': {'tracking_model': 'stable_ui_anchor_template_fallback', 'anchor_similarity': max(0.0, 1.0 - safe_float(distance, 1.0))}})
-                    unique = []
-                    for candidate in sorted(ranked, key=lambda item: item.get('score', 0.0), reverse=True):
-                        if any((_rect_iou(candidate['norm'], old['norm']) >= 0.96 for old in unique)):
-                            continue
-                        unique.append(candidate)
-                    ranked_by_region[region_id] = unique[:candidate_budget]
-                batch_results = {}
-                if eligible and time.monotonic() < frame_deadline:
-                    batch_definitions = [definition for definition in eligible if ranked_by_region.get(str(definition['id']))]
-                    requests = [{'norm': list(ranked_by_region[str(definition['id'])][0]['norm']), 'context': {**request_contexts[str(definition['id'])], 'tracking_candidate': dict(ranked_by_region[str(definition['id'])][0].get('metadata', {})), 'tracking_source': str(ranked_by_region[str(definition['id'])][0].get('source', ''))}} for definition in batch_definitions]
-                    try:
-                        values = self.app.ocr_runtime.recognize_regions(frame, requests)
-                        for definition, value in zip(batch_definitions, values):
-                            batch_results[str(definition['id'])] = value
-                    except RECOVERABLE_ERRORS as error:
-                        self.app.store.log_error('OCR_BATCH_RECOGNITION_FAILED', error, mode=self.app.mode, game_id=game['id'])
-                for definition in eligible:
-                    if self.stop_event.is_set() or self.app.should_stop() or time.monotonic() >= frame_deadline:
-                        break
-                    region_id = str(definition['id'])
-                    state = states[region_id]
-                    was_lost = state.get('lost', 0) > 0
-                    ranked = ranked_by_region.get(region_id, [])
-                    best_payload = None
-                    best_quality = -10.0
-                    for rank, candidate in enumerate(ranked):
-                        if time.monotonic() >= frame_deadline:
-                            break
-                        candidate_norm = candidate['norm']
-                        context = {**request_contexts[region_id], 'tracking_candidate': dict(candidate.get('metadata', {})), 'tracking_source': str(candidate.get('source', ''))}
-                        try:
-                            recognized = batch_results.get(region_id) if rank == 0 else None
-                            if recognized is None:
-                                recognized = self.app.ocr_runtime.recognize_region(frame, candidate_norm, context)
-                        except RECOVERABLE_ERRORS as error:
-                            if rank == 0:
-                                self.app.store.log_error('OCR_TRACKING_RECOGNITION_FAILED', error, mode=self.app.mode, game_id=game['id'])
-                            continue
-                        worker_parsed = recognized.get('parsed') if isinstance(recognized, dict) and isinstance(recognized.get('parsed'), dict) else {}
-                        if definition.get('region_type') == 'number':
-                            parsed = dict(worker_parsed) if worker_parsed.get('valid') and finite_number(worker_parsed.get('value')) else parse_ocr_number(recognized.get('text'), definition.get('number_format', 'auto'))
-                        else:
-                            parsed = {'valid': False}
-                        ocr_confidence = safe_float(recognized.get('confidence'), 0.0, 0.0, 1.0)
-                        parse_confidence = safe_float(parsed.get('confidence'), 0.0, 0.0, 1.0)
-                        agreement = safe_float(recognized.get('ensemble_agreement'), 0.0, 0.0, 1.0)
-                        profile_confidence = safe_float(recognized.get('profile_confidence'), 0.0, 0.0, 1.0)
-                        tracking_score = safe_float(candidate.get('score'), max(0.0, 1.0 - safe_float(candidate.get('distance'), 1.0)), 0.0, 1.0)
-                        token_coverage = safe_float(parsed.get('token_coverage'), 0.0, 0.0, 1.0)
-                        token_count = safe_int(parsed.get('token_count'), 0, 0, 32)
-                        ambiguity_count = len(parsed.get('ambiguities', [])) if isinstance(parsed.get('ambiguities'), list) else 0
-                        quality = ocr_confidence * 0.27 + parse_confidence * 0.18 + agreement * 0.22 + profile_confidence * 0.13 + tracking_score * 0.15 + token_coverage * 0.05 + (0.08 if parsed.get('valid') else 0.0) - max(0, token_count - 1) * 0.045 - ambiguity_count * 0.018 - rank * 0.012
-                        if candidate.get('source') == 'online_neural_box_regression':
-                            quality += 0.015
-                        if best_payload is None or quality > best_quality:
-                            best_quality = quality
-                            best_payload = {'recognized': recognized, 'parsed': parsed, 'candidate': candidate, 'context': context, 'quality': quality}
-                        if parsed.get('valid') and quality >= 0.78 and (ocr_confidence >= 0.68) and (agreement >= 0.5):
-                            break
-                    if best_payload is None:
-                        state['lost'] = min(1000, state.get('lost', 0) + 1)
-                        state['pending_norm'] = None
-                        state['pending_count'] = 0
-                        state['high_confidence_frames'] = 0
-                        state['stable_tracking_frames'] = 0
-                        continue
-                    recognized = best_payload['recognized']
-                    parsed = best_payload['parsed']
-                    candidate = best_payload['candidate']
-                    candidate_norm = list(candidate['norm'])
-                    descriptor = candidate.get('descriptor', b'')
-                    distance = safe_float(candidate.get('distance'), 1.0, 0.0, 2.0)
-                    ocr_confidence = safe_float(recognized.get('confidence'), 0.0, 0.0, 1.0)
-                    parse_confidence = safe_float(parsed.get('confidence'), 0.0, 0.0, 1.0)
-                    agreement = safe_float(recognized.get('ensemble_agreement'), 0.0, 0.0, 1.0)
-                    profile_confidence = safe_float(recognized.get('profile_confidence'), 0.0, 0.0, 1.0)
-                    candidates = recognized.get('candidates', []) if isinstance(recognized.get('candidates'), list) else []
-                    grouped = bool(candidates and isinstance(candidates[0], dict) and candidates[0].get('grouped'))
-                    consensus = self.consensus.update(region_id, recognized.get('text', ''), parsed.get('value') if isinstance(parsed, dict) else None, ocr_confidence, parse_confidence, agreement, profile_confidence, parsed.get('format_signature', ''), parsed.get('digit_count', 0), parsed.get('decimal_places', 0), parsed.get('separator', ''), parsed.get('has_thousands_separator', False), parsed.get('token_coverage', 0.0), grouped)
-                    if parsed.get('valid') and finite_number(consensus.get('value')):
-                        parsed = dict(parsed)
-                        parsed['value'] = safe_float(consensus.get('value'))
-                        parsed['confidence'] = max(parse_confidence, safe_float(consensus.get('confidence'), 0.0))
-                        parsed['consensus_text'] = str(consensus.get('text', ''))
-                        parsed['stable_frames'] = safe_int(consensus.get('stable_frames'), 0)
-                        parsed['temporal_disagreement'] = bool(consensus.get('conflict'))
-                        parsed['format_consistency'] = safe_float(consensus.get('format_consistency'), 0.0)
-                    consensus_confidence = safe_float(consensus.get('confidence'), 0.0, 0.0, 1.0)
-                    observation_quality = safe_float(consensus.get('observation_quality'), 0.0, 0.0, 1.0)
-                    tracking_score = safe_float(candidate.get('score'), max(0.0, 1.0 - distance), 0.0, 1.0)
-                    branch_support = safe_int(recognized.get('branch_support'), 0, 0)
-                    visual_evidence = bool(agreement >= 0.25 or branch_support >= 2 or (ocr_confidence >= 0.88 and parse_confidence >= 0.78 and (profile_confidence >= 0.52)))
-                    observed_valid = bool(parsed.get('valid') and finite_number(parsed.get('value')) and (consensus_confidence >= NUMERIC_OBSERVATION_MIN_CONFIDENCE) and (observation_quality >= 0.58) and (ocr_confidence >= 0.5) and (parse_confidence >= 0.46) and (profile_confidence >= 0.25) and (tracking_score >= 0.34) and (safe_float(consensus.get('format_consistency'), 0.0) >= 0.24) and (not consensus.get('conflict')) and visual_evidence)
-                    rejection_reasons = []
-                    if not parsed.get('valid') or not finite_number(parsed.get('value')):
-                        rejection_reasons.append('unparseable')
-                    if consensus_confidence < NUMERIC_OBSERVATION_MIN_CONFIDENCE:
-                        rejection_reasons.append('below_minimum_confidence')
-                    if consensus.get('conflict'):
-                        rejection_reasons.append('temporal_conflict')
-                    if not visual_evidence:
-                        rejection_reasons.append('insufficient_model_agreement')
-                    if tracking_score < 0.34:
-                        rejection_reasons.append('tracking_uncertain')
-                    tracking_confident = bool(parsed.get('valid') and finite_number(parsed.get('value')) and (consensus_confidence >= 0.57) and (tracking_score >= 0.38) and (not consensus.get('conflict')) and visual_evidence)
-                    feedback = {}
-                    if observed_valid and time.monotonic() < frame_deadline:
-                        try:
-                            feedback = self.app.ocr_runtime.commit_tracking_feedback(frame, candidate_norm, best_payload['context'], recognized)
-                        except RECOVERABLE_ERRORS as error:
-                            self.app.store.log_error('OCR_TRACKING_FEEDBACK_FAILED', error, mode=self.app.mode, game_id=game['id'])
-                    if tracking_confident:
-                        pending = state.get('pending_norm')
-                        if pending is not None and _rect_iou(pending, candidate_norm) >= 0.58:
-                            state['pending_count'] = min(1000, state.get('pending_count', 0) + 1)
-                            state['pending_norm'] = _clamp_region_norm([pending[index] * 0.58 + candidate_norm[index] * 0.42 for index in range(4)])
-                        else:
-                            state['pending_norm'] = _clamp_region_norm(candidate_norm)
-                            state['pending_count'] = 1
-                        state['lost'] = 0
-                        state['high_confidence_frames'] = min(1000, state.get('high_confidence_frames', 0) + 1) if consensus_confidence >= 0.7 else 0
-                        if state['pending_count'] >= NUMERIC_TRACKING_CONFIRM_FRAMES:
-                            committed = _clamp_region_norm(state['pending_norm'])
-                            previous = list(state['norm'])
-                            state['norm'] = committed
-                            definition['region_norm'] = list(committed)
-                            state['stable_tracking_frames'] = min(10000, state.get('stable_tracking_frames', 0) + 1) if _rect_iou(previous, committed) >= 0.88 else 1
-                        if descriptor and state['high_confidence_frames'] >= NUMERIC_TRACKING_TEMPLATE_UPDATE_FRAMES and (consensus_confidence >= 0.72):
-                            templates = list(state.get('templates', []))
-                            nearest = min((_descriptor_distance(template, descriptor) for template in templates), default=2.0)
-                            if nearest >= 0.035:
-                                templates.insert(0, bytes(descriptor))
-                            elif templates:
-                                closest_index = min(range(len(templates)), key=lambda index: _descriptor_distance(templates[index], descriptor))
-                                old = templates[closest_index]
-                                templates[closest_index] = bytes((int(old_value * 0.88 + new_value * 0.12) for old_value, new_value in zip(old, descriptor)))
-                            else:
-                                templates = [bytes(descriptor)]
-                            state['templates'] = templates[:NUMERIC_TRACKING_HISTORY_LIMIT]
-                            state['template'] = state['templates'][0]
-                            config = normalize_relation_config(definition.get('relation_config', {}))
-                            encoded = [_encode_tracking_template(value) for value in state['templates'] if value]
-                            config['tracking_templates'] = encoded
-                            config['tracking_template'] = encoded[0] if encoded else ''
-                            config['tracking_anchor_excludes_numeric_content'] = True
-                            config['tracking_model'] = 'stable_ui_anchor+pyramidal_lk_ransac+learned_roi_embedding+online_neural_box_regression+multi_hypothesis+ocr_relocalization'
-                            definition['relation_config'] = config
-                            state['high_confidence_frames'] = 0
-                    else:
-                        state['lost'] = min(1000, state.get('lost', 0) + 1)
-                        state['pending_norm'] = None
-                        state['pending_count'] = 0
-                        state['high_confidence_frames'] = 0
-                        state['stable_tracking_frames'] = 0
-                    profile = {}
-                    if isinstance(feedback, dict) and isinstance(feedback.get('region_profile'), dict):
-                        profile = dict(feedback.get('region_profile'))
-                    elif isinstance(recognized.get('region_profile'), dict):
-                        profile = dict(recognized.get('region_profile'))
-                    now = time.monotonic()
-                    profile_changed = False
-                    if observed_valid and safe_int(profile.get('samples'), 0, 0) >= 3:
-                        profile_checksum = hashlib.sha256(canonical_bytes(profile)).hexdigest()
-                        if profile_checksum != state.get('profile_checksum') and now - state.get('last_profile_persisted', 0.0) >= 20.0:
-                            config = normalize_relation_config(definition.get('relation_config', {}))
-                            config['numeric_visual_profile'] = profile
-                            config['numeric_profile_model'] = 'neural_visual_embedding+adaptive_font_color_format_statistics'
-                            config['tracking_model'] = str(candidate.get('metadata', {}).get('tracking_model', config.get('tracking_model', '')))
-                            definition['relation_config'] = config
-                            state['profile_checksum'] = profile_checksum
-                            state['last_profile_persisted'] = now
-                            profile_changed = True
-                    config = normalize_relation_config(definition.get('relation_config', {}))
-                    should_persist_norm = bool(config.get('tracking_persist_stable', False))
-                    moved = _rect_iou(state.get('persisted_norm', state['norm']), state['norm']) < 0.88
-                    norm_changed = bool(should_persist_norm and moved and (state.get('stable_tracking_frames', 0) >= NUMERIC_TRACKING_PERSIST_FRAMES) and (now - state.get('last_persisted', 0.0) >= 30.0))
-                    if profile_changed or norm_changed:
-                        persisted = dict(definition)
-                        persisted['region_norm'] = list(state['norm'])
-                        self.app.store.save_ocr_region(game['id'], persisted)
-                        if norm_changed:
-                            state['persisted_norm'] = list(state['norm'])
-                            state['last_persisted'] = now
-                    parsed = dict(parsed)
-                    parsed['observed_valid'] = observed_valid
-                    parsed['observation_confidence'] = consensus_confidence
-                    parsed['observation_quality'] = observation_quality
-                    parsed['observation_rejection_reason'] = ','.join(rejection_reasons)
-                    parsed['ensemble_agreement'] = agreement
-                    parsed['profile_confidence'] = profile_confidence
-                    parsed['tracking_score'] = tracking_score
-                    observations[region_id] = {'definition': definition, 'recognized': recognized, 'parsed': parsed, 'consensus': consensus, 'observed_valid': observed_valid, 'observation_rejection_reason': ','.join(rejection_reasons), 'tracked_norm': list(state['norm']), 'candidate_norm': list(candidate_norm), 'candidate_confirm_frames': state.get('pending_count', 0), 'lost_frames': state['lost'], 'tracking_distance': distance, 'tracking_score': tracking_score, 'tracking_source': str(candidate.get('source', '')), 'tracking_model': str(candidate.get('metadata', {}).get('tracking_model', '')), 'tracking_metadata': dict(candidate.get('metadata', {})), 'recovered': bool(was_lost and tracking_confident)}
-                current_snapshot = {}
-                prediction_time = frame_started
-                for definition in definitions:
-                    region_id = str(definition['id'])
-                    state = states[region_id]
-                    item = observations.get(region_id)
-                    parsed = item.get('parsed', {}) if isinstance(item, dict) else {}
-                    consensus = item.get('consensus', {}) if isinstance(item, dict) else {}
-                    stable_frames = safe_int(consensus.get('stable_frames'), 0)
-                    conflict = bool(consensus.get('conflict'))
-                    observed_valid = bool(item.get('observed_valid')) if isinstance(item, dict) else False
-                    consensus_value = consensus.get('value') if isinstance(consensus, dict) else None
-                    if not finite_number(consensus_value) and isinstance(parsed, dict) and parsed.get('valid'):
-                        consensus_value = parsed.get('value')
-                    consensus_confidence = safe_float(consensus.get('confidence', parsed.get('confidence', 0.0)) if isinstance(consensus, dict) else 0.0, 0.0, 0.0, 1.0)
-                    if conflict:
-                        consensus_confidence *= 0.35
-                    if observed_valid:
-                        snapshot = state['prediction'].observe(parsed.get('value'), prediction_time, consensus_confidence)
-                    else:
-                        visual_value = consensus_value if finite_number(consensus_value) and consensus_confidence >= 0.3 else None
-                        snapshot = state['prediction'].predict(prediction_time, visual_value, consensus_confidence)
-                    snapshot.update({'stable_frames': stable_frames, 'occluded': not isinstance(item, dict) or safe_int(item.get('lost_frames'), 0) > 0, 'recovered': bool(item.get('recovered')) if isinstance(item, dict) else False, 'temporal_disagreement': conflict, 'observed_valid': observed_valid, 'observation_confidence': consensus_confidence, 'observation_rejection_reason': str(item.get('observation_rejection_reason', 'not_observed')) if isinstance(item, dict) else 'not_observed', 'frame_id': frame_id})
-                    current_snapshot[region_id] = snapshot
-                comparison = compare_numeric_snapshots_detailed(definitions, previous_snapshot, current_snapshot) if previous_snapshot else {'reward': 0.0, 'winning_region_id': '', 'status': 'initial_snapshot', 'priority': None}
-                region_values = {region_id: snapshot.get('value') for region_id, snapshot in current_snapshot.items() if snapshot.get('valid') and finite_number(snapshot.get('value'))}
-                event_summaries = []
-                terminal = ''
-                for definition in definitions:
-                    region_id = str(definition['id'])
-                    item = observations.get(region_id)
-                    if item is None:
-                        snapshot_value = current_snapshot.get(region_id, {})
-                        event_summaries.append({'region_id': region_id, 'priority': safe_int(definition.get('priority'), 0), 'status': 'predicted' if snapshot_value.get('valid') else str(snapshot_value.get('prediction_source', 'unreadable')), 'terminal': '', 'reset': '', 'valid': bool(snapshot_value.get('valid')), 'predicted': bool(snapshot_value.get('predicted')), 'confidence': safe_float(snapshot_value.get('confidence'), 0.0, 0.0, 1.0)})
-                        continue
-                    parsed = item['parsed']
-                    consensus = item['consensus']
-                    runtime_context = {'task_phase': str(frame.get('task_phase', 'unknown')), 'subgoal_id': str(frame.get('subgoal_id', '')), 'terminal_state': str(frame.get('terminal_state', '')), 'recent_actions': list(frame.get('recent_actions', []))[-8:], 'region_values': region_values, 'tracked_norm': item['tracked_norm'], 'candidate_norm': item['candidate_norm'], 'candidate_confirm_frames': item['candidate_confirm_frames'], 'lost_frames': item['lost_frames'], 'tracking_distance': item['tracking_distance'], 'tracking_score': item['tracking_score'], 'tracking_source': item['tracking_source'], 'tracking_model': item['tracking_model'], 'frame_id': frame_id}
-                    semantic_parsed = parsed if item.get('observed_valid') else {'valid': False, 'rejection_reason': item.get('observation_rejection_reason', 'low_confidence')}
-                    event = OCR_SEMANTIC_ENGINE.evaluate(definition, semantic_parsed, runtime_context) if definition.get('region_type') == 'number' else {'terminal': '', 'progress': 0.0, 'status': 'text_only', 'reset': '', 'semantic_version': OCR_SEMANTIC_VERSION}
-                    event['progress'] = 0.0
-                    event['ocr_observed_valid'] = bool(item.get('observed_valid'))
-                    event['ocr_observation_rejection_reason'] = str(item.get('observation_rejection_reason', ''))
-                    event['ocr_temporal_disagreement'] = bool(consensus.get('conflict'))
-                    event['ocr_ensemble_agreement'] = safe_float(item['recognized'].get('ensemble_agreement'), 0.0)
-                    event['ocr_profile_confidence'] = safe_float(item['recognized'].get('profile_confidence'), 0.0)
-                    event['ocr_preprocessing_branches'] = list(item['recognized'].get('preprocessing_branches', []))
-                    event['stable_frames'] = safe_int(consensus.get('stable_frames'), 0)
-                    event['tracked_region_norm'] = item['tracked_norm']
-                    event['tracking_candidate_norm'] = item['candidate_norm']
-                    event['tracking_candidate_confirm_frames'] = item['candidate_confirm_frames']
-                    event['tracking_lost_frames'] = item['lost_frames']
-                    event['tracking_template_distance'] = item['tracking_distance']
-                    event['tracking_score'] = item['tracking_score']
-                    event['tracking_source'] = item['tracking_source']
-                    event['tracking_model'] = item['tracking_model']
-                    event['tracking_recovered'] = bool(item.get('recovered'))
-                    event['frame_id'] = frame_id
-                    event['priority'] = safe_int(definition.get('priority'), 0)
-                    event['snapshot_reward'] = safe_float(comparison.get('reward'), 0.0, -1.0, 1.0)
-                    event['snapshot_status'] = str(comparison.get('status', 'neutral'))
-                    event['snapshot_winning_region_id'] = str(comparison.get('winning_region_id', ''))
-                    event['snapshot_value'] = dict(current_snapshot.get(region_id, {}))
-                    event['numeric_predicted'] = bool(event['snapshot_value'].get('predicted'))
-                    event['numeric_prediction_confidence'] = safe_float(event['snapshot_value'].get('confidence'), 0.0, 0.0, 1.0)
-                    event['numeric_prediction_error'] = event['snapshot_value'].get('prediction_error')
-                    event['numeric_prediction_source'] = str(event['snapshot_value'].get('prediction_source', ''))
-                    if not terminal and event.get('terminal') in {'success', 'failure'}:
-                        terminal = str(event.get('terminal'))
-                    event_summaries.append({'region_id': region_id, 'priority': event['priority'], 'status': str(event.get('status', 'neutral')), 'terminal': str(event.get('terminal', '')), 'reset': str(event.get('reset', '')), 'valid': bool(current_snapshot.get(region_id, {}).get('valid')), 'predicted': bool(current_snapshot.get(region_id, {}).get('predicted')), 'confidence': safe_float(current_snapshot.get(region_id, {}).get('confidence'), 0.0, 0.0, 1.0), 'observed_valid': bool(item.get('observed_valid'))})
-                    saved_at = time.monotonic()
-                    if saved_at - self.last_saved[region_id] >= 0.8:
-                        self.last_saved[region_id] = saved_at
-                        self.app.store.append_ocr_observation(game['id'], region_id, item['recognized'].get('text', ''), parsed, consensus.get('confidence', item['recognized'].get('confidence', 0.0)), consensus.get('stable_frames', 0), event)
-                snapshot_event = {'terminal': terminal, 'progress': safe_float(comparison.get('reward'), 0.0, -1.0, 1.0), 'numeric_progress': safe_float(comparison.get('reward'), 0.0, -1.0, 1.0), 'status': str(comparison.get('status', 'neutral')), 'winning_region_id': str(comparison.get('winning_region_id', '')), 'winning_priority': comparison.get('priority'), 'used_prediction': bool(comparison.get('used_prediction')), 'events': event_summaries, 'before_snapshot': previous_snapshot, 'now_snapshot': current_snapshot, 'frame_id': frame_id}
-                SEMANTIC_EVENT_HUB.publish_snapshot(game['id'], frame_id, snapshot_event)
+                eligible, request_contexts, ranked_by_region = self._generate_candidates(game, definitions, states, frame, frame_sequence, frame_deadline, frame_id)
+                batch_results = self._batch_recognize(game, frame, eligible, ranked_by_region, request_contexts, frame_deadline)
+                observations = self._evaluate_consensus(game, frame, eligible, states, ranked_by_region, request_contexts, batch_results, frame_deadline)
+                current_snapshot, comparison = self._predict_regions(definitions, states, observations, frame_started, frame_id, previous_snapshot)
+                self._publish_rewards(game, frame, definitions, observations, current_snapshot, comparison, previous_snapshot, frame_id)
                 previous_snapshot = current_snapshot
                 elapsed = time.monotonic() - frame_started
                 target_interval = 0.2 if self.purpose == 'training' else 0.32
@@ -26937,12 +27316,13 @@ class OCRMonitor:
 
     def stop(self, timeout=1.0):
         self.stop_event.set()
-        if self.thread and self.thread.is_alive() and (self.thread is not threading.current_thread()) and (timeout > 0):
+        if self.thread and self.thread.is_alive() and self.thread is not threading.current_thread() and timeout > 0:
             self.thread.join(max(0.0, float(timeout)))
         return not bool(self.thread and self.thread.is_alive())
 
     def alive(self):
         return bool(self.thread and self.thread.is_alive())
+
 
 def show_acknowledge_only_startup(message):
     try:
@@ -27014,7 +27394,7 @@ STRUCTURED_MEMORY_LENGTH = 96
 ACTION_LEASE_MIN_SECONDS = 0.1
 ACTION_LEASE_MAX_SECONDS = 0.3
 CAPABILITY_LEVEL_NAMES = {0: '仅鼠标', 1: '鼠标+OCR', 2: '鼠标+OCR+语义键盘', 3: '鼠标+OCR+语义键盘+声音事件', 4: '鼠标+OCR+语义键盘+声音事件+手柄与连续控制'}
-SEMANTIC_KEY_ACTIONS = frozenset({'move_left', 'move_right', 'move_up', 'move_down', 'jump', 'interact', 'open_menu', 'pause'})
+SEMANTIC_KEY_ACTIONS = frozenset({'move_left', 'move_right', 'move_up', 'move_down', 'jump', 'interact', 'open_menu', 'pause'} | {'vk_' + str(value) for value in range(1, 256)})
 ACTIVE_LEARNING_RESUME = BoundedTTLMap(64, 3600.0)
 
 class PerceptionEvidenceHub:
@@ -27190,7 +27570,7 @@ class CrossFrameObjectTracker:
         with self.lock:
             self._prune_locked(time.monotonic())
             return len(self.scenes)
-OBJECT_TRACKER = CrossFrameObjectTracker()
+OBJECT_TRACKER = LazyRuntimeObject(CrossFrameObjectTracker, 'CrossFrameObjectTracker')
 
 def runtime_isolation_key(game_id='', session_id='', target=None, window_generation=0):
     return PerceptionIsolationKey.from_values(game_id, session_id, target, window_generation).encode()
@@ -27533,7 +27913,7 @@ class AutonomousObjectCenterDetector(ObjectDetector):
             except (TypeError, ValueError, OverflowError):
                 continue
         return tuple(sorted(slots, key=lambda slot: (slot.object_class, slot.instance, slot.text.casefold(), slot.bbox)))
-AUTONOMOUS_OBJECT_DETECTOR = AutonomousObjectCenterDetector()
+AUTONOMOUS_OBJECT_DETECTOR = LazyRuntimeObject(AutonomousObjectCenterDetector, 'AutonomousObjectCenterDetector')
 
 def build_scene_graph(objects):
     canonical = [dict(item) for item in objects or [] if isinstance(item, dict) and str(item.get('source')) != 'compatibility_alias']
@@ -27884,7 +28264,7 @@ class StructuredTemporalMemory:
                 self.failure_recovery_stacks.pop(token, None)
                 self.long_term_variables.pop(token, None)
                 self.completed_subgoals.pop(token, None)
-STRUCTURED_MEMORY = StructuredTemporalMemory()
+STRUCTURED_MEMORY = LazyRuntimeObject(StructuredTemporalMemory, 'StructuredTemporalMemory')
 
 def shared_multiscale_feature_maps(frame):
     item = dict(frame) if isinstance(frame, dict) else {'f': frame}
@@ -29717,7 +30097,7 @@ class CapabilityProfile:
         permissions = source.get('modality_permissions', {}) if isinstance(source.get('modality_permissions'), dict) else {}
         requested = safe_int(source.get('capability_level', 0), 0, 0, 4)
         mouse = bool(source.get('mouse_enabled', True))
-        keyboard = bool(source.get('keyboard_enabled', False))
+        keyboard = bool(source.get('keyboard_enabled', True))
         sound = bool(source.get('sound_enabled', False))
         gamepad = bool(source.get('gamepad_enabled', False))
         self.level = max(requested, 2 if keyboard else 0, 3 if sound else 0, 4 if gamepad else 0)
@@ -29805,7 +30185,7 @@ class CapabilityProfile:
         return result
 
     def to_dict(self):
-        return {'capability_level': self.level, 'capability_name': CAPABILITY_LEVEL_NAMES[self.level], 'mouse_enabled': self.mouse_enabled, 'keyboard_enabled': self.keyboard_enabled, 'sound_enabled': self.sound_enabled, 'gamepad_enabled': self.gamepad_enabled, 'semantic_keymap': dict(self.semantic_keymap), 'semantic_key_actions': sorted(SEMANTIC_KEY_ACTIONS), 'modality_permissions': self.permissions, 'minimum_levels': dict(self.minimum_levels), 'required_input_modalities': list(self.required_input_modalities), 'minimum_frame_rate': self.minimum_frame_rate, 'maximum_action_frequency': self.maximum_action_frequency, 'required_action_frequency': self.required_action_frequency, 'continuous_control_required': self.continuous_control_required, 'minimum_semantic_width': self.minimum_semantic_width, 'minimum_semantic_height': self.minimum_semantic_height, 'game_type': self.game_type, 'supported_scope': list(self.supported_scope), 'unsupported_scope': list(self.unsupported_scope), 'audio_representation': 'event_only_no_raw_audio', 'keyboard_representation': 'semantic_action_to_user_keymap_no_free_keycodes', 'gamepad_representation': 'semantic_action_with_xinput_axis', 'execution_support': {'mouse': 'execute', 'keyboard': 'SendInput_scancode_with_leases', 'sound': 'perception_only', 'gamepad': 'ViGEm_XInput_when_available'}, 'default_capability': 'mouse_only', 'scope': 'runtime_gated_multi_modal_game_ai'}
+        return {'capability_level': self.level, 'capability_name': CAPABILITY_LEVEL_NAMES[self.level], 'mouse_enabled': self.mouse_enabled, 'keyboard_enabled': self.keyboard_enabled, 'sound_enabled': self.sound_enabled, 'gamepad_enabled': self.gamepad_enabled, 'semantic_keymap': dict(self.semantic_keymap), 'semantic_key_actions': sorted(SEMANTIC_KEY_ACTIONS), 'modality_permissions': self.permissions, 'minimum_levels': dict(self.minimum_levels), 'required_input_modalities': list(self.required_input_modalities), 'minimum_frame_rate': self.minimum_frame_rate, 'maximum_action_frequency': self.maximum_action_frequency, 'required_action_frequency': self.required_action_frequency, 'continuous_control_required': self.continuous_control_required, 'minimum_semantic_width': self.minimum_semantic_width, 'minimum_semantic_height': self.minimum_semantic_height, 'game_type': self.game_type, 'supported_scope': list(self.supported_scope), 'unsupported_scope': list(self.unsupported_scope), 'audio_representation': 'event_only_no_raw_audio', 'keyboard_representation': 'per_game_discovered_semantic_action_to_exact_virtual_key', 'gamepad_representation': 'semantic_action_with_xinput_axis', 'execution_support': {'mouse': 'execute', 'keyboard': 'SendInput_scancode_with_leases', 'sound': 'perception_only', 'gamepad': 'ViGEm_XInput_when_available'}, 'default_capability': 'mouse_keyboard_auto_discovery', 'scope': 'runtime_gated_multi_modal_game_ai'}
 
 class AdapterHierarchyManager:
 
@@ -31235,81 +31615,10 @@ class ModelPromotionGate:
                 reasons.append('generalization_scope_regressed')
         return {'schema_version': MODEL_PROMOTION_SCHEMA_VERSION, 'role': 'challenger', 'champion_present': bool(isinstance(champion, dict) and champion), 'promote': not reasons, 'reasons': reasons, 'champion_metrics': champion_metrics, 'challenger_metrics': challenger_metrics, 'model_scope': challenger_metrics['model_scope'], 'human_ai_benchmark': paired, 'display_label': '通用模型' if challenger_metrics['model_scope'] == 'general_model' else '单游戏模型', 'atomic_switch_required': True, 'pending_online_acceptance': bool(paired.get('pending_online_acceptance')), 'discard_on_failure': not bool(paired.get('pending_online_acceptance')), 'general_scope_requires_real_level_3_and_4': True}
 
-def top_level_symbol_inventory(source):
-    tree = ast.parse(str(source))
-    inventory = defaultdict(list)
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            inventory[node.name].append(node.lineno)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    inventory[target.id].append(node.lineno)
-    return dict(inventory)
-
-def assert_no_duplicate_top_level_symbols(path=None):
-    target = Path(path or __file__).resolve()
-    inventory = top_level_symbol_inventory(target.read_text(encoding='utf-8'))
-    duplicates = {name: lines for name, lines in inventory.items() if len(lines) > 1}
-    if duplicates:
-        raise AssertionError('重复顶层符号：' + json.dumps(duplicates, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
-    return True
-
-def assert_no_duplicate_class_methods(path=None):
-    target = Path(path or __file__).resolve()
-    tree = ast.parse(target.read_text(encoding='utf-8'))
-    duplicates = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        methods = defaultdict(list)
-        for child in node.body:
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                methods[child.name].append(child)
-        invalid = {}
-        for name, definitions in methods.items():
-            if len(definitions) < 2:
-                continue
-            accessors = set()
-            for definition in definitions:
-                for decorator in definition.decorator_list:
-                    if isinstance(decorator, ast.Name) and decorator.id == 'property':
-                        accessors.add('getter')
-                    elif isinstance(decorator, ast.Attribute) and decorator.attr in {'setter', 'deleter'}:
-                        accessors.add(decorator.attr)
-            if len(definitions) == len(accessors) and 'getter' in accessors and (accessors <= {'getter', 'setter', 'deleter'}):
-                continue
-            invalid[name] = [definition.lineno for definition in definitions]
-        if invalid:
-            duplicates[node.name] = invalid
-    if duplicates:
-        raise AssertionError('类包含重复方法：' + json.dumps(duplicates, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
-    return True
-
-def assert_single_default_component_assignment(path=None):
-    target = Path(path or __file__).resolve()
-    inventory = top_level_symbol_inventory(target.read_text(encoding='utf-8'))
-    expected = ('DEFAULT_OBSERVATION_ENCODER', 'DEFAULT_TASK_PLANNER', 'DEFAULT_SKILL_POLICY', 'DEFAULT_SAFETY_SHIELD')
-    invalid = {name: inventory.get(name, []) for name in expected if len(inventory.get(name, [])) != 1}
-    if invalid:
-        raise AssertionError('默认组件必须且只能赋值一次：' + json.dumps(invalid, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
-    return True
-_SOURCE_CONTRACTS_VALIDATED = False
-
-def validate_source_contracts_once(path=None):
-    global _SOURCE_CONTRACTS_VALIDATED
-    if _SOURCE_CONTRACTS_VALIDATED:
-        return True
-    assert_no_duplicate_top_level_symbols(path)
-    assert_no_duplicate_class_methods(path)
-    assert_single_default_component_assignment(path)
-    _SOURCE_CONTRACTS_VALIDATED = True
-    return True
-DEFAULT_OBSERVATION_ENCODER = ObjectCentricObservationEncoder()
-DEFAULT_TASK_PLANNER = HierarchicalTaskPlanner()
-DEFAULT_SKILL_POLICY = ReusableSkillPolicy()
-DEFAULT_SAFETY_SHIELD = IndependentSafetyShield()
+DEFAULT_OBSERVATION_ENCODER = LazyRuntimeObject(ObjectCentricObservationEncoder, 'ObjectCentricObservationEncoder')
+DEFAULT_TASK_PLANNER = LazyRuntimeObject(HierarchicalTaskPlanner, 'HierarchicalTaskPlanner')
+DEFAULT_SKILL_POLICY = LazyRuntimeObject(ReusableSkillPolicy, 'ReusableSkillPolicy')
+DEFAULT_SAFETY_SHIELD = LazyRuntimeObject(IndependentSafetyShield, 'IndependentSafetyShield')
 
 class StructuredRuntimeEventLogger:
 
@@ -31557,7 +31866,7 @@ class DXGIVideoMemoryTelemetry:
         selected['source'] = 'dxgi_adapter3_query_video_memory_info'
         selected['adapters'] = rows
         return selected
-DXGI_VIDEO_MEMORY_TELEMETRY = DXGIVideoMemoryTelemetry()
+DXGI_VIDEO_MEMORY_TELEMETRY = LazyRuntimeObject(DXGIVideoMemoryTelemetry, 'DXGIVideoMemoryTelemetry')
 
 def _strict_memory_values():
 
@@ -31605,143 +31914,7 @@ def _resource_worker_pid():
     process = getattr(worker, 'process', None)
     return safe_int(getattr(process, 'pid', 0), os.getpid(), 1)
 
-def _strict_governor_sample_once(self):
-    cpu, process_cpu = self._cpu_values()
-    memory = _strict_memory_values()
-    backend = self._manifest_backend()
-    gpu = WINDOWS_GPU_TELEMETRY.sample(backend, _resource_worker_pid())
-    queue_ratio, queue_oldest = self._queue_values()
-    perception_p95 = self._series_p95('end_to_end_perception_ms')
-    decision_p95 = self._series_p95('end_to_end_decision_ms')
-    end_to_end_p95 = max(perception_p95, decision_p95)
-    end_to_end_p99 = max(RUNTIME_METRICS.percentile('end_to_end_perception_ms', 0.99, 0.75), RUNTIME_METRICS.percentile('end_to_end_decision_ms', 0.99, 0.75))
-    now = time.monotonic()
-    counts = {'removed': int(RUNTIME_METRICS.counters.get('gpu_device_removed', 0)), 'reset': int(RUNTIME_METRICS.counters.get('gpu_device_reset', 0)), 'oom': int(RUNTIME_METRICS.counters.get('gpu_oom', 0))}
-    with self.lock:
-        deltas = {key: max(0, counts[key] - safe_int(self._fault_counter_baseline.get(key), 0)) for key in counts}
-        self._fault_counter_baseline = dict(counts)
-        if any(deltas.values()):
-            details = {'oom': deltas['oom'] > 0, 'device_removed': deltas['removed'] > 0, 'device_reset': deltas['reset'] > 0, 'signature': hashlib.sha256(canonical_bytes({'backend': backend, 'counts': counts})).hexdigest()}
-            self._record_accelerator_fault_locked(backend, details, now)
-        last_fault = self.last_accelerator_fault_at
-        fault_age = None if last_fault is None else max(0.0, now - last_fault)
-        self_test = self.accelerator_self_tests.get(str(backend), {})
-        self_test_passed = bool(self_test.get('passed') and safe_float(self_test.get('monotonic'), 0.0) >= safe_float(last_fault, 0.0))
-        backend_blacklisted = str(backend) in self.backend_blacklist
-        total_vram = gpu.get('total_vram', self.benchmark_profile.get('total_vram'))
-        tested_peak_vram = self.benchmark_profile.get('tested_peak_vram')
-        probe_bytes = self.benchmark_profile.get('probe_bytes')
-        probe_passed = bool(self.benchmark_profile.get('probe_passed', self.benchmark_profile.get('vram_test_passed', False)))
-    provisional = HardwareSnapshot(cpu_percent=round(cpu, 3), process_cpu_percent=round(process_cpu, 3), available_ram=int(memory['available_ram']), process_rss=int(memory['process_rss']), gpu_backend=str(backend), gpu_utilization=gpu.get('gpu_utilization'), free_vram=gpu.get('free_vram'), capture_p95_ms=round(self._series_p95('capture_latency_ms'), 3), queue_ratio=round(queue_ratio, 5), queue_oldest_ms=round(queue_oldest, 3), disk_write_p95_ms=round(self._disk_p95(), 3), end_to_end_p95_ms=round(end_to_end_p95, 3), end_to_end_p99_ms=round(end_to_end_p99, 3), dedicated_vram_used=gpu.get('dedicated_vram_used', gpu.get('local_current_usage')), shared_vram_used=gpu.get('shared_vram_used', gpu.get('nonlocal_current_usage')), gpu_queue_wait_p95_ms=round(self._series_p95('gpu_queue_wait_ms'), 3), cpu_to_gpu_copy_p95_ms=round(self._series_p95('cpu_to_gpu_copy_ms'), 3), device_removed_count=counts['removed'], device_reset_count=counts['reset'], gpu_oom_count=counts['oom'], device_removed_delta=deltas['removed'], device_reset_delta=deltas['reset'], gpu_oom_delta=deltas['oom'], last_accelerator_fault_monotonic=last_fault, accelerator_fault_age_seconds=fault_age, accelerator_self_test_passed=self_test_passed, backend_blacklisted=backend_blacklisted, available_ram_known=int(memory['available_ram']) > 0, free_vram_known=gpu.get('free_vram') is not None, total_vram=None if total_vram is None else safe_int(total_vram, 0, 0), tested_peak_vram=None if tested_peak_vram is None else safe_int(tested_peak_vram, 0, 0), total_ram=int(memory['total_ram']), total_commit=int(memory['total_commit']), available_commit=int(memory['available_commit']), process_private_bytes=int(memory['process_private_bytes']), commit_pressure=round(float(memory['commit_pressure']), 6), pagefile_pressure=round(float(memory['pagefile_pressure']), 6), vram_budget=gpu.get('local_budget'), vram_current_usage=gpu.get('local_current_usage'), vram_available_for_reservation=gpu.get('local_available_for_reservation'), vram_current_reservation=gpu.get('local_current_reservation'), shared_vram_budget=gpu.get('nonlocal_budget'), shared_vram_current_usage=gpu.get('nonlocal_current_usage'), process_dedicated_vram=gpu.get('process_dedicated_vram'), process_shared_vram=gpu.get('process_shared_vram'), telemetry_source=str(gpu.get('source', '')), probe_bytes=None if probe_bytes is None else safe_int(probe_bytes, 0, 0), probe_passed=probe_passed)
-    limits = _effective_resource_thresholds(provisional)
-    values = {name: getattr(provisional, name) for name in provisional.__dataclass_fields__}
-    values.update({'effective_ram_red_bytes': limits['ram_red'], 'effective_ram_yellow_bytes': limits['ram_yellow'], 'effective_vram_red_bytes': limits['vram_red'], 'effective_vram_yellow_bytes': limits['vram_yellow']})
-    snapshot = HardwareSnapshot(**values)
-    with self.lock:
-        self.history.append(snapshot)
-        self._last_snapshot = snapshot
-        self._update_state_locked(now)
-    if any(deltas.values()) or backend_blacklisted:
-        self._persist_backend_fault_state()
-    return snapshot
 
-def _strict_governor_update_state(self, now):
-    recent = list(self.history)
-    if not recent:
-        return
-    current = recent[-1]
-    previous_snapshot = recent[-2] if len(recent) >= 2 else None
-    old_state = self.state
-    old_plans = self.plans
-    limits = _effective_resource_thresholds(current)
-    commit_pressure = safe_float(getattr(current, 'commit_pressure', 0.0), 0.0)
-    available_commit = safe_int(getattr(current, 'available_commit', 0), 0, 0)
-    pagefile_pressure = safe_float(getattr(current, 'pagefile_pressure', 0.0), 0.0)
-    shared_vram_current_usage = getattr(current, 'shared_vram_current_usage', getattr(current, 'shared_vram_used', None))
-    shared_vram_budget = getattr(current, 'shared_vram_budget', None)
-    accelerator = 'nvidia' in current.gpu_backend.casefold() or 'directml' in current.gpu_backend.casefold()
-    new_fault = bool(current.device_removed_delta or current.device_reset_delta or current.gpu_oom_delta)
-    fault_red = bool(accelerator and (current.backend_blacklisted or new_fault or (current.accelerator_fault_age_seconds is not None and current.accelerator_fault_age_seconds <= 30.0 and (not current.accelerator_self_test_passed))))
-    rapid = False
-    if previous_snapshot is not None:
-        ram_drop = previous_snapshot.available_ram - current.available_ram
-        vram_drop = 0 if previous_snapshot.free_vram is None or current.free_vram is None else previous_snapshot.free_vram - current.free_vram
-        rapid = ram_drop >= 512 * 1024 * 1024 or vram_drop >= 256 * 1024 * 1024
-    queue_red = len(recent) >= 2 and all((item.queue_ratio > 0.9 for item in recent[-2:]))
-    severe = bool(fault_red or queue_red or rapid or (current.available_ram_known and current.available_ram < limits['ram_red']) or (current.free_vram_known and current.free_vram < limits['vram_red']) or (commit_pressure >= 0.92) or (available_commit and available_commit < limits['ram_red']) or (current.capture_p95_ms > RUNTIME_THRESHOLDS.capture_red_ms) or (current.end_to_end_p95_ms > RUNTIME_THRESHOLDS.end_to_end_red_p95_ms) or (current.disk_write_p95_ms > 180.0) or (current.cpu_percent > 97.0) or (current.gpu_utilization is not None and current.gpu_utilization > 98.0) or (current.gpu_queue_wait_p95_ms > 40.0) or (current.cpu_to_gpu_copy_p95_ms > 30.0))
-    warning = bool(severe or current.queue_ratio > 0.7 or (current.available_ram_known and current.available_ram < limits['ram_yellow']) or (current.free_vram_known and current.free_vram < limits['vram_yellow']) or (commit_pressure >= 0.82) or (pagefile_pressure >= 0.7) or (current.capture_p95_ms > RUNTIME_THRESHOLDS.capture_yellow_ms) or (current.end_to_end_p95_ms > RUNTIME_THRESHOLDS.end_to_end_yellow_p95_ms) or (current.disk_write_p95_ms > 80.0) or (current.cpu_percent > 88.0) or (current.process_cpu_percent > 85.0) or (current.gpu_utilization is not None and current.gpu_utilization > 94.0) or (current.gpu_queue_wait_p95_ms > 18.0) or (current.cpu_to_gpu_copy_p95_ms > 12.0) or (shared_vram_current_usage is not None and shared_vram_budget is not None and (shared_vram_current_usage > shared_vram_budget * 0.8)))
-    self._strict_red_streak = safe_int(getattr(self, '_strict_red_streak', 0), 0) + 1 if severe else 0
-    self._strict_yellow_streak = safe_int(getattr(self, '_strict_yellow_streak', 0), 0) + 1 if warning else 0
-    immediate_red = fault_red or rapid
-    if immediate_red or self._strict_red_streak >= 3:
-        desired = ResourceState.RED
-    elif self._strict_yellow_streak >= 5:
-        desired = ResourceState.YELLOW
-    else:
-        desired = ResourceState.NORMAL
-    rank = {ResourceState.NORMAL: 0, ResourceState.YELLOW: 1, ResourceState.RED: 2}
-    if rank[desired] > rank[self.state]:
-        self.state = desired
-        self.recovery_since = None
-    elif rank[desired] < rank[self.state]:
-        if self.recovery_since is None:
-            self.recovery_since = now
-        elif now - self.recovery_since >= 30.0:
-            self.state = desired
-            self.recovery_since = None
-    else:
-        self.recovery_since = None
-    if self.state is ResourceState.RED:
-        if getattr(self, 'red_since', None) is None:
-            self.red_since = now
-    else:
-        self.red_since = None
-    reasons = []
-    if fault_red:
-        reasons.append('accelerator_fault')
-    if rapid:
-        reasons.append('rapid_resource_deterioration')
-    if current.available_ram_known and current.available_ram < limits['ram_red']:
-        reasons.append('available_ram')
-    if current.free_vram_known and current.free_vram < limits['vram_red']:
-        reasons.append('vram_budget_headroom')
-    if commit_pressure >= 0.92:
-        reasons.append('commit_charge')
-    if queue_red:
-        reasons.append('queue_pressure')
-    if not reasons:
-        reasons.append('resource_state_' + self.state.value.casefold())
-    self.plan_reason = '+'.join(reasons)
-    candidate_plans = self._plans_for_state(self.state, current.gpu_backend)
-    old_signature = (old_plans.ai.backend, old_plans.ai.model_tier)
-    new_signature = (candidate_plans.ai.backend, candidate_plans.ai.model_tier)
-    recent_switches = (value for value in getattr(self, '_strict_switch_times', deque()) if now - value <= 900.0)
-    self._strict_switch_times = deque(recent_switches, maxlen=16)
-    last_switch = safe_float(getattr(self, '_strict_last_switch', 0.0), 0.0)
-    if new_signature != old_signature and self.state is not ResourceState.RED and (now - last_switch < 60.0):
-        candidate_plans = old_plans
-        new_signature = old_signature
-        self.plan_reason += '+switch_rate_limited'
-    elif new_signature != old_signature:
-        self._strict_last_switch = now
-        self._strict_switch_times.append(now)
-    if len(self._strict_switch_times) >= 5:
-        self._fault_force_cpu = True
-        self.state = ResourceState.RED
-        self.plan_reason = 'oscillation_cpu_safe_mode'
-        candidate_plans = self._plans_for_state(ResourceState.RED, 'windows-x64-cpu')
-        new_signature = (candidate_plans.ai.backend, candidate_plans.ai.model_tier)
-    self.plans = candidate_plans
-    self.plan = self.plans.ai
-    plan_digest = hashlib.sha256(canonical_bytes(self.plans.to_dict())).hexdigest()
-    if plan_digest != getattr(self, '_strict_plan_digest', ''):
-        self.plan_version = safe_int(getattr(self, 'plan_version', 0), 0) + 1
-        self._strict_plan_digest = plan_digest
-        RUNTIME_EVENT_LOGGER.emit('runtime_plan_changed', plan_version=self.plan_version, plan_reason=self.plan_reason, old_state=old_state.value, new_state=self.state.value, requested_backend=self.plan.backend, requested_model_tier=self.plan.model_tier, thresholds=limits, snapshot={name: getattr(current, name) for name in current.__dataclass_fields__})
-    if self.state is ResourceState.RED and current.available_ram_known and (current.available_ram < limits['ram_red']):
-        FEATURE_ENGINE.clear_frames()
-        POLICY_TRAINING_CACHE.clear()
-        collect_garbage('resource_red_dynamic', 30.0, old_state is not ResourceState.RED)
 
 def _strict_plan_envelope(self):
     plan = self.current_plan(ModeId.AI.value)
@@ -31757,14 +31930,6 @@ def _strict_ack_worker(self, value):
         self.applied_backend = str(result.get('applied_backend', getattr(self, 'applied_backend', '')))
         self.applied_model_tier = normalize_model_tier(result.get('applied_model_tier', getattr(self, 'applied_model_tier', 'Tiny')))
     return self.worker_ack_version
-RESOURCE_GOVERNOR.plan_version = 1
-RESOURCE_GOVERNOR.plan_reason = 'startup'
-RESOURCE_GOVERNOR.worker_ack_version = 0
-RESOURCE_GOVERNOR.applied_backend = ''
-RESOURCE_GOVERNOR.applied_model_tier = 'Tiny'
-RESOURCE_GOVERNOR.red_since = None
-RESOURCE_GOVERNOR._strict_plan_digest = hashlib.sha256(canonical_bytes(RESOURCE_GOVERNOR.plans.to_dict())).hexdigest()
-RESOURCE_GOVERNOR._last_snapshot = HardwareSnapshot(cpu_percent=0.0, process_cpu_percent=0.0, available_ram=0, process_rss=0, gpu_backend='windows-x64-cpu', gpu_utilization=None, free_vram=None, capture_p95_ms=0.0, queue_ratio=0.0, queue_oldest_ms=0.0, disk_write_p95_ms=0.0)
 
 def _strict_app_init(self, *args, **kwargs):
     self._base_init_strict(*args, **kwargs)
@@ -32207,7 +32372,6 @@ def main(argv=None):
     multiprocessing.freeze_support()
     try:
         arguments = parse_cli(argv)
-        validate_source_contracts_once()
         result = dispatch_cli(arguments)
         if result is not None:
             return int(result)
