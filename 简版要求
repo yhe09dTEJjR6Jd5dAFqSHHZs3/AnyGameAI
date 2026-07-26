@@ -2,7 +2,7 @@
 
 运行环境：Windows 11 x64，Python 3.12。
 
-AnyGameAI.py中不能有与实际运行无关的内容。
+AnyGameAI.py不得包含任何与运行无关的内容。
 
 所有相关文件应尽可能统一存放在桌面的AnyGameAI文件夹中。
 
