@@ -6,7 +6,7 @@ AnyGameAI.py中不能有与实际运行无关的内容。
 
 所有东西尽量放在桌面上的AnyGameAI文件夹里。
 
-起初，用户手里只有一个AnyGameAI.py。
+初始状态下，用户仅拥有AnyGameAI.py这一个文件。
 
 用户只做：
 
