@@ -2,7 +2,7 @@
 
 文件存放在桌面上的AnyGameAI文件夹中。
 
-初始状态下，用户仅拥有AnyGameAI.py。
+运行AnyGameAI.py前，用户手里只有AnyGameAI.py，没有其他文件。
 
 AnyGameAI.py不得包含不会对运行产生影响的内容。
 
