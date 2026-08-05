@@ -45,17 +45,17 @@ except Exception:
 
 
 APP_NAME = "AnyGameAI"
-APP_VERSION = "90.1"
+APP_VERSION = "92.0"
 SCRIPT_NAME = "AnyGameAI.py"
-RELEASE_SOURCE_SHA256 = "38973ff3ac1adab874746dac3755c5ac3624718e7da20313131b0cfe8603898d"
-REQUIRED_PYTHON_VERSION = (3, 12, 10)
+RELEASE_SOURCE_SHA256 = "6879f0f0ba33ad08654a838458208f6aeef9f4b4d3c5440297276685e0df3372"
+REQUIRED_PYTHON_VERSION = (3, 12)
 MIN_WINDOWS_11_BUILD = 22000
 SUPPORTED_X64_MACHINES = frozenset({"amd64", "x86_64"})
-APP_SCHEMA = 15
-CONFIG_SCHEMA = 40
-PROFILE_SCHEMA = 24
-MODEL_SCHEMA = 25
-DATABASE_SCHEMA = 18
+APP_SCHEMA = 17
+CONFIG_SCHEMA = 43
+PROFILE_SCHEMA = 26
+MODEL_SCHEMA = 26
+DATABASE_SCHEMA = 20
 FEATURE_WIDTH = 96
 FEATURE_HEIGHT = 54
 LOW_CAPTURE_WIDTH = FEATURE_WIDTH
@@ -106,7 +106,21 @@ MODEL_PIXEL_CHANNELS = 6
 Q_TWIN_COUNT = 2
 WORLD_MODEL_MEMBERS = 3
 REWARD_MODEL_MEMBERS = 3
-REWARD_MODEL_OUTPUTS = 5
+BASE_EVENT_NAMES = (
+    "progress",
+    "score_gain",
+    "health_gain",
+    "damage",
+    "death",
+    "victory",
+    "level_complete",
+    "reset",
+    "menu",
+)
+EVENT_NAMES = BASE_EVENT_NAMES
+DISCOVERED_EVENT_SLOT_COUNT = 32
+DISCOVERED_EVENT_DIM = 64
+REWARD_MODEL_OUTPUTS = len(EVENT_NAMES) + 1  # nine events + calibrated confidence
 ACTION_EMBEDDING_SIZE = 48
 DURATION_EMBEDDING_SIZE = 8
 ACTION_CONTEXT_SCALAR_FEATURES = 11
@@ -140,7 +154,7 @@ MOUSE_GRID_HEIGHT = 18
 INTEGRITY_SCHEMA = 5
 RUNTIME_INTEGRITY_SCHEMA = 4
 GLOBAL_PRIOR_SCHEMA = 15
-GLOBAL_BACKBONE_SCHEMA = 3
+GLOBAL_BACKBONE_SCHEMA = 4
 NUMPY_REQUIREMENT = "numpy>=1.26,<3"
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 PYPI_NUMPY_JSON_URL = "https://pypi.org/pypi/numpy/json"
@@ -162,7 +176,7 @@ MAX_INDEX_JSON_BYTES = 32 * 1024 * 1024
 MAX_PROFILE_JSON_BYTES = 64 * 1024 * 1024
 MAX_MODEL_ARCHIVE_BYTES = 768 * 1024 * 1024
 MAX_MODEL_EXPANDED_BYTES = 1536 * 1024 * 1024
-MAX_MODEL_ARCHIVE_MEMBERS = 128
+MAX_MODEL_ARCHIVE_MEMBERS = 256
 TRAINING_MEMMAP_THRESHOLD_BYTES = 320 * 1024 * 1024
 GLOBAL_TRAINING_SAMPLE_LIMIT = 40_000
 GLOBAL_TRAINING_MIN_PER_PROFILE = 16
@@ -177,8 +191,18 @@ TEMPORAL_FRAMES = 4
 ACTION_HISTORY_LENGTH = 4
 TRAIN_SEQUENCE_LENGTH = 96
 TRAIN_BURN_IN_STEPS = 32
-DURATION_HEAD_SIZE = 5
-DURATION_SECONDS = (0.035, 0.070, 0.130, 0.230, 0.350)
+DURATION_SECONDS = (
+    0.035,
+    0.070,
+    0.130,
+    0.230,
+    0.350,
+    0.550,
+    0.850,
+    1.300,
+)
+DURATION_HEAD_SIZE = len(DURATION_SECONDS)
+CONTROL_DECISIONS = ("start", "continue", "release")
 KEY_HEAD_SIZE = 256
 BUTTON_HEAD_SIZE = 5
 MOUSE_HEAD_SIZE = 608
@@ -222,6 +246,11 @@ LIVE_MIN_SESSIONS = 16
 LIVE_MIN_EPISODES = 48
 LIVE_MIN_STEPS = 4096
 LIVE_HISTORY_LIMIT = 40
+HUMAN_BENCHMARK_MIN_SESSIONS = 8
+HUMAN_BENCHMARK_MIN_EPISODES = 24
+HUMAN_BENCHMARK_MIN_STEPS = 8192
+SUPERHUMAN_WIN_MARGIN = 0.10
+SUPERHUMAN_SCORE_RELATIVE_MARGIN = 0.10
 ONLINE_ADAPTER_SCALE = 0.20
 DISTILLATION_RECORD_LIMIT = 4096
 DISTILLATION_EPOCHS = 6
@@ -231,24 +260,31 @@ VALIDATION_EPISODE_FRACTION = 0.20
 TEMPORAL_STATE_MAGIC = b"AGT4"
 LEGACY_TEMPORAL_STATE_MAGIC = b"AGT3"
 LEGACY_TEMPORAL_STATE_MAGIC_V2 = b"AGT2"
-QUANTIZED_VISION_MODEL_NAME = "vision_encoder_qlinear_v2.onnx"
-SEMANTIC_VISION_MODEL_NAME = "mobilenetv2-12.onnx"
-SEMANTIC_VISION_MODEL_URL = (
-    "https://huggingface.co/onnxmodelzoo/mobilenetv2-12/resolve/"
-    "23a2a25/mobilenetv2-12.onnx"
+GAME_VISION_MODEL_NAME = "perception_student.onnx"
+GAME_VISION_TEACHER_MODEL_NAME = "perception_teacher.onnx"
+TEXT_RECOGNITION_MODEL_NAME = "text_recognition.onnx"
+SEMANTIC_ENCODER_MODEL_NAME = "semantic_encoder.onnx"
+SCENE_GLOBAL_DIM = 128
+OBJECT_SLOT_COUNT = 16
+OBJECT_SLOT_DIM = 48
+HUD_TOKEN_DIM = 96
+MOTION_TOKEN_DIM = 96
+PATCH_TOKEN_ROWS = 8
+PATCH_TOKEN_COLUMNS = 12
+PATCH_TOKEN_DIM = 64
+OBJECT_APPEARANCE_DIM = OBJECT_SLOT_DIM - 10
+GAME_PERCEPTION_VECTOR_DIM = (
+    SCENE_GLOBAL_DIM
+    + OBJECT_SLOT_COUNT * OBJECT_SLOT_DIM
+    + HUD_TOKEN_DIM
+    + MOTION_TOKEN_DIM
+    + PATCH_TOKEN_ROWS * PATCH_TOKEN_COLUMNS * PATCH_TOKEN_DIM
 )
-SEMANTIC_VISION_MODEL_SHA256 = "c0c3f76d93fa3fd6580652a45618618a220fced18babf65774ed169de0432ad5"
-SEMANTIC_VISION_MODEL_SIZE = 13_964_571
-SEMANTIC_SOURCE_DIM = 1000
-SEMANTIC_FEATURE_DIM = 256
-SEMANTIC_REFRESH_STEPS = 3
-SEMANTIC_INPUT_SIZE = 224
-SEMANTIC_SPATIAL_TOKEN_ROWS = 5
-SEMANTIC_SPATIAL_TOKEN_COLUMNS = 8
-SEMANTIC_SPATIAL_TOKEN_DIM = (
-    SEMANTIC_SPATIAL_TOKEN_ROWS * SEMANTIC_SPATIAL_TOKEN_COLUMNS * 6
-)
-SEMANTIC_GLOBAL_LOGIT_DIM = SEMANTIC_SOURCE_DIM - SEMANTIC_SPATIAL_TOKEN_DIM
+GAME_VISION_REFRESH_LOW_HZ = 5
+GAME_VISION_REFRESH_MID_HZ = 8
+GAME_VISION_REFRESH_HIGH_HZ = 10
+LOW_LEVEL_CONTROL_HZ = {"low_numpy": 30, "mid_onnx": 45, "high_directml": 60}
+HIGH_LEVEL_PLANNING_HZ = {"low_numpy": 5, "mid_onnx": 8, "high_directml": 10}
 ACTION_GENERATION_BEAM_WIDTH = 24
 ACTION_PAYLOAD_SCHEMA = 1
 MAX_ACTION_PAYLOAD_BYTES = 2048
@@ -280,7 +316,9 @@ RELEASE_SOURCE_PATTERN = re.compile(
     r'(?P<digest>[0-9a-f]{64})(?P=quote)(?P<suffix>\s*)$',
     re.MULTILINE,
 )
-STATE_MEMORY_KEY_PATTERN = re.compile(r"[0-9a-f]{8}:[0-9a-f]:[0-7]\Z")
+STATE_MEMORY_KEY_PATTERN = re.compile(
+    r"(?:[0-9a-f]{8}:[0-9a-f]:[0-7]|s2:[0-9a-f]{32})\Z"
+)
 STABLE_STATE_KEY_PATTERN = re.compile(r"v:[0-9a-f]{16}\Z")
 MODEL_ARCHIVE_V16_REQUIRED_MEMBERS = frozenset({
     "schema.npy", "input_dim.npy", "hidden_size.npy", "output_size.npy",
@@ -333,7 +371,16 @@ MODEL_ARCHIVE_REQUIRED_MEMBERS = MODEL_ARCHIVE_V20_REQUIRED_MEMBERS | frozenset(
     "world_validation_reward_mae.npy", "world_validation_done_brier.npy",
     "world_validation_latent_error.npy", "world_validation_multistep_error.npy",
     "online_adapter_w.npy", "online_adapter_b.npy",
-    "semantic_projection_w.npy", "semantic_projection_b.npy",
+    "perception_patch_w.npy", "perception_patch_b.npy",
+    "perception_scene_w.npy", "perception_scene_b.npy",
+    "perception_hud_w.npy", "perception_hud_b.npy",
+    "perception_motion_w.npy", "perception_motion_b.npy",
+    "perception_event_w.npy", "perception_event_b.npy",
+    "perception_event_confidence_w.npy", "perception_event_confidence_b.npy",
+    "policy_control_decision_w.npy", "policy_control_decision_b.npy",
+    "world_slot_w.npy", "world_slot_b.npy",
+    "world_hud_w.npy", "world_hud_b.npy",
+    "world_event_w.npy", "world_event_b.npy",
     "world_stochastic_w.npy",
     "world_prior_state_w.npy", "world_prior_action_w.npy",
     "world_prior_duration_w.npy", "world_prior_b.npy",
@@ -344,6 +391,9 @@ MODEL_ARCHIVE_REQUIRED_MEMBERS = MODEL_ARCHIVE_V20_REQUIRED_MEMBERS | frozenset(
 })
 MODEL_ARCHIVE_ALLOWED_MEMBERS = MODEL_ARCHIVE_REQUIRED_MEMBERS | frozenset({
     "updated_at.npy", "runtime_tier.npy", "validation_score.npy",
+    "world_validation_slot_error.npy", "world_validation_hud_error.npy",
+    "world_validation_event_brier.npy",
+    "discovered_event_prototypes.npy", "discovered_event_counts.npy",
 })
 GLOBAL_ARCHIVE_REQUIRED_MEMBERS = frozenset({
     "schema.npy", "policy_control_b.npy", "policy_key_b.npy",
@@ -356,10 +406,16 @@ GLOBAL_ARCHIVE_ALLOWED_MEMBERS = GLOBAL_ARCHIVE_REQUIRED_MEMBERS | frozenset({
     "updated_at.npy",
 })
 GLOBAL_BACKBONE_PARAMETER_KEYS = (
+    # The ONNX backbone is frozen but retained for deterministic export/repair.
     "conv_w", "conv_scale", "conv_b", "conv_master_w",
     "conv2_depthwise_w", "conv2_pointwise_w", "conv2_b",
     "conv3_depthwise_w", "conv3_pointwise_w", "conv3_b",
-    "semantic_projection_w", "semantic_projection_b",
+    "perception_patch_w", "perception_patch_b",
+    "perception_scene_w", "perception_scene_b",
+    "perception_hud_w", "perception_hud_b",
+    "perception_motion_w", "perception_motion_b",
+    "perception_event_w", "perception_event_b",
+    "perception_event_confidence_w", "perception_event_confidence_b",
 )
 GLOBAL_BACKBONE_REQUIRED_MEMBERS = frozenset({
     "schema.npy", "hidden_size.npy", "output_size.npy", "trained_samples.npy",
@@ -427,6 +483,15 @@ REQUIRED_SCRIPT_FUNCTIONS = frozenset({
     "forced_world_model_actions", "rssm_deterministic_transition",
     "risk_sensitive_return", "state_relevant_actions",
     "_human_episode_quality", "refresh_transition_priorities",
+    "game_perception_features", "estimate_camera_motion",
+    "match_object_slots", "controllable_object_probability",
+    "effective_human_memory_weight", "choose_control_decision",
+    "structured_world_target_from_state", "ensure_runtime_components",
+    "understand_feature", "canonical_belief_key", "goal_conditioned_reward",
+    "active_goal_hypothesis", "plan_with_understanding",
+    "load_semantic_runtime_state", "save_semantic_transition",
+    "record_human_semantic_decision", "persist_semantic_skills",
+    "load_human_preference_model",
 })
 REQUIRED_APP_METHODS = frozenset({
     "file_mode", "human_mode", "upgrade_mode", "ai_mode", "on_escape",
@@ -442,11 +507,11 @@ REQUIRED_SCRIPT_CALLS = {
     "main": frozenset({"configure_runtime_environment", "bootstrap_to_desktop", "AnyGameAIApp", "NativeAnyGameAIApp"}),
     "ensure_files": frozenset({"repair_main_script", "ensure_numpy", "ensure_accelerated_runtime", "runtime_self_check", "repair_profile", "verify_main_script_integrity"}),
     "ensure_runtime_ready": frozenset({"ensure_core_ready", "ensure_numpy", "import_numpy", "runtime_self_check"}),
-    "record_human_session": frozenset({"ensure_core_ready", "profile_identity", "observe_human_action", "build_temporal_state", "insert_transitions", "update_human_action_memory", "save_human_action_memory", "adaptive_runtime_settings", "compose_reward"}),
-    "train_all_profiles": frozenset({"ensure_runtime_ready", "load_training_data", "train_model", "refresh_global_backbone", "refresh_global_prior", "save_model"}),
-    "run_ai_session": frozenset({"ensure_runtime_ready", "profile_identity", "execute_action", "temporal_policy_blend", "load_training_data", "load_human_action_memory", "human_action_memory_biases", "soft_update_target_model", "recurrent_ensemble_outputs", "adaptive_exploration_rate", "adaptive_runtime_settings", "load_transition_graph", "load_state_value_memory", "infer_scene_context", "action_safety_penalty", "target_action_blocked", "choose_recovery_action", "state_relevant_actions", "insert_transitions", "save_model", "compose_reward", "latent_world_model_plan_values", "world_model_planning_confidence", "forced_world_model_actions", "live_session_variant", "record_live_model_session", "live_challenger_passes", "promote_live_challenger"}),
+    "record_human_session": frozenset({"ensure_core_ready", "profile_identity", "observe_human_action", "build_temporal_state", "insert_transitions", "update_human_action_memory", "save_human_action_memory", "adaptive_runtime_settings", "compose_reward", "understand_feature", "save_semantic_transition", "record_human_semantic_decision", "load_human_preference_model"}),
+    "train_all_profiles": frozenset({"ensure_runtime_ready", "load_training_data", "train_model", "refresh_global_backbone", "refresh_global_prior", "save_model", "persist_semantic_skills"}),
+    "run_ai_session": frozenset({"ensure_runtime_ready", "profile_identity", "execute_control_decision", "temporal_policy_blend", "load_training_data", "load_human_action_memory", "human_action_memory_biases", "soft_update_target_model", "recurrent_ensemble_outputs", "adaptive_exploration_rate", "adaptive_runtime_settings", "load_transition_graph", "load_state_value_memory", "infer_scene_context", "action_safety_penalty", "target_action_blocked", "choose_recovery_action", "state_relevant_actions", "insert_transitions", "save_model", "compose_reward", "latent_world_model_plan_values", "world_model_planning_confidence", "forced_world_model_actions", "live_session_variant", "record_live_model_session", "live_challenger_passes", "promote_live_challenger", "understand_feature", "active_goal_hypothesis", "plan_with_understanding", "save_semantic_transition", "load_human_preference_model"}),
     "train_model": frozenset({"sequence_training_windows", "evaluate_model_records", "soft_update_target_model", "pretrain_visual_encoder", "train_world_model_transition", "train_world_model_overshooting", "refresh_transition_priorities"}),
-    "classify_transition_reward": frozenset({"compose_reward", "recognize_hud_score"}),
+    "classify_transition_reward": frozenset({"compose_reward", "recognize_hud_score", "goal_conditioned_reward"}),
     "load_training_data": frozenset({"decode_temporal_state", "compose_reward", "contiguous_trajectory_records", "_human_episode_quality"}),
     "online_model_update": frozenset({"temporal_critic_targets", "online_adapter_hidden", "_train_factor_q", "_train_factor_policy"}),
     "distill_teacher_model": frozenset({"factorized_action_outputs_from_hidden", "factorized_twin_q_outputs_from_hidden", "_backprop_temporal_encoder"}),
@@ -454,7 +519,7 @@ REQUIRED_SCRIPT_CALLS = {
     "compose_reward": frozenset({"smooth_reward"}),
     "configure_runtime_environment": frozenset({"runtime_numeric_thread_budget"}),
     "adaptive_runtime_settings": frozenset({"hardware_capability_tier", "world_planning_budget"}),
-    "latent_world_model_plan_values": frozenset({"world_planning_budget", "rssm_deterministic_transition", "rssm_prior", "rssm_latent_from_state", "risk_sensitive_return"}),
+    "latent_world_model_plan_values": frozenset({"world_planning_budget", "rssm_deterministic_transition", "rssm_prior", "rssm_latent_from_state", "risk_sensitive_return", "plan_with_understanding"}),
     "train_world_model_overshooting": frozenset({"rssm_deterministic_transition", "rssm_prior", "rssm_latent_from_state", "world_model_latent"}),
 }
 REQUIRED_APP_CALLS = {
@@ -490,8 +555,7 @@ ACTIVE_PROCESS_LOCK = threading.RLock()
 ACTIVE_PROCESSES: set[subprocess.Popen] = set()
 ONNX_SESSION_LOCK = threading.RLock()
 ONNX_SESSION_CACHE: dict[str, object] = {}
-SEMANTIC_RUNTIME_CACHE: dict[int, dict[str, object]] = {}
-SEMANTIC_FRAME_FEATURE_CACHE: dict[bytes, object] = {}
+PERCEPTION_RUNTIME_CACHE: dict[int, dict[str, object]] = {}
 SOURCE_SCRIPT_PATH = Path(__file__).resolve()
 
 
@@ -746,6 +810,10 @@ def adaptive_runtime_settings(
         "planning_refresh_steps": max(8, min(512, planning_refresh_steps)),
         "online_checkpoint_steps": max(32, min(10000, online_checkpoint_steps)),
         "translation_search_radius": max(1, min(4, translation_search_radius)),
+        "low_level_control_hz": int(LOW_LEVEL_CONTROL_HZ.get(tier, 30)),
+        "high_level_planning_hz": int(HIGH_LEVEL_PLANNING_HZ.get(tier, 5)),
+        "low_level_control_period": 1.0 / max(1, int(LOW_LEVEL_CONTROL_HZ.get(tier, 30))),
+        "high_level_planning_period": 1.0 / max(1, int(HIGH_LEVEL_PLANNING_HZ.get(tier, 5))),
     }
 
 
@@ -879,8 +947,77 @@ TEMP_DIR = RUNTIME_DIR / "temp"
 PROFILES_DIR = APP_DIR / "profiles"
 GLOBAL_PRIOR_PATH = APP_DIR / "global_prior.npz"
 GLOBAL_BACKBONE_PATH = APP_DIR / "global_backbone.npz"
-QUANTIZED_VISION_MODEL_PATH = RUNTIME_DIR / QUANTIZED_VISION_MODEL_NAME
-SEMANTIC_VISION_MODEL_PATH = RUNTIME_DIR / SEMANTIC_VISION_MODEL_NAME
+MODELS_DIR = APP_DIR / "models"
+GAME_VISION_MODEL_PATH = MODELS_DIR / GAME_VISION_MODEL_NAME
+GAME_VISION_TEACHER_MODEL_PATH = MODELS_DIR / GAME_VISION_TEACHER_MODEL_NAME
+TEXT_RECOGNITION_MODEL_PATH = MODELS_DIR / TEXT_RECOGNITION_MODEL_NAME
+SEMANTIC_ENCODER_MODEL_PATH = MODELS_DIR / SEMANTIC_ENCODER_MODEL_NAME
+RUNTIME_COMPONENT_MANIFEST: dict[str, dict[str, object]] = {
+    "models/perception_student.onnx": {
+        "sha256": "7262b79152c47102c078a0c27e7074961a820df87f4d0bdb53838bcdad9d5dbf",
+        "size": 22553,
+    },
+    "models/perception_teacher.onnx": {
+        "sha256": "fe36c3cbe98e473b7103a86b894fb035e77445580f9adec3568928d54a31cd7c",
+        "size": 85358,
+    },
+    "models/text_recognition.onnx": {
+        "sha256": "7262b79152c47102c078a0c27e7074961a820df87f4d0bdb53838bcdad9d5dbf",
+        "size": 22553,
+    },
+    "models/semantic_encoder.onnx": {
+        "sha256": "fe36c3cbe98e473b7103a86b894fb035e77445580f9adec3568928d54a31cd7c",
+        "size": 85358,
+    },
+    "runtime/__init__.py": {
+        "sha256": "aab5dae7eda6e637b19b74a12637151d89cf2aafef60e1f45fb35d53515bd2fb",
+        "size": 290,
+    },
+    "runtime/perception.py": {
+        "sha256": "a1105633570a28a1127c7c11cdccb09d4871b3fc8120d52a8a4d0e54ae26abb9",
+        "size": 30948,
+    },
+    "runtime/understanding.py": {
+        "sha256": "bcf6e8c3a4c8dd5f22c21ba4caeb9d06129013af353512817883cf79b647d451",
+        "size": 29392,
+    },
+    "runtime/goal_model.py": {
+        "sha256": "f84ec56beddd24522c18372dea5e0f9e06d37990fde97a2c2936868a9a064ab5",
+        "size": 9852,
+    },
+    "runtime/causal_model.py": {
+        "sha256": "c496da55c70f5b788827be2138a229410bf81ff7d4bee12d8c45c512dbe81277",
+        "size": 12204,
+    },
+    "runtime/memory.py": {
+        "sha256": "12b4beaf770a79873a12628bde3c7889dccb90f676285f715738041f97a17c7b",
+        "size": 11212,
+    },
+    "runtime/planner.py": {
+        "sha256": "01c21bfa22215e2252461b78df84a48ffdb09dd26b8c36202cc78300a996034c",
+        "size": 9850,
+    },
+    "runtime/policy.py": {
+        "sha256": "75d415d3ee1d0d6577e4d141a56f075e9e6786201ec6e53ed45cb49b2e4211e1",
+        "size": 3375,
+    },
+    "runtime/reward_model.py": {
+        "sha256": "6ba50ec5ce14e12770e907016a69903626de974a77b741c0e90823ad23c9a711",
+        "size": 14420,
+    },
+    "runtime/world_model.py": {
+        "sha256": "8ac312df1f7f828eac55fdbe59d4c6895cc4cb4454b6820a6b6e2127dab1c182",
+        "size": 12152,
+    },
+    "runtime/training.py": {
+        "sha256": "35b47193a030b3e31f251dac723d769970b503c5d1a375795d0495856ac2298d",
+        "size": 6701,
+    },
+}
+RUNTIME_COMPONENT_BASE_URL = os.environ.get(
+    "ANYGAMEAI_COMPONENT_BASE_URL",
+    "https://github.com/AnyGameAI/AnyGameAI/releases/download/v92.0",
+).rstrip("/")
 
 DEFAULT_CONFIG = {
     "schema": CONFIG_SCHEMA,
@@ -924,13 +1061,16 @@ DEFAULT_CONFIG = {
     "confirmation_delay_seconds": 0.035,
     "online_checkpoint_steps": 256,
     "sequence_prior_weight": 0.45,
-    "planning_horizon": 8,
-    "planning_discount": 0.85,
-    "planning_weight": 0.38,
+    "planning_horizon": 12,
+    "planning_discount": 0.90,
+    "planning_weight": 0.46,
     "planning_disagreement_penalty": 0.60,
     "planning_cvar_fraction": 0.35,
     "planning_cvar_weight": 0.70,
     "planning_refresh_steps": 48,
+    "low_level_control_hz": 45,
+    "high_level_planning_hz": 8,
+    "event_reward_min_confidence": 0.35,
     "cross_game_control_weight": 0.35,
     "cross_game_scene_weight": 0.38,
     "cross_game_action_weight": 0.32,
@@ -960,8 +1100,8 @@ DEFAULT_CONFIG = {
     "task_reward_weight": 1.0,
     "exploration_reward_weight": 0.18,
     "safety_penalty_weight": 0.70,
-    "minimum_human_transitions": 512,
-    "candidate_min_improvement": 0.02,
+    "minimum_human_transitions": 1024,
+    "candidate_min_improvement": 0.03,
     "minimum_validation_episodes": 20,
     "sequence_length": TRAIN_SEQUENCE_LENGTH,
     "burn_in_steps": TRAIN_BURN_IN_STEPS,
@@ -990,6 +1130,15 @@ DEFAULT_CONFIG = {
     "state_action_effective_limit": 12,
     "state_action_exploration_per_kind": 2,
     "state_action_forced_limit": 12,
+    "human_preference_reward_weight": 0.35,
+    "semantic_information_gain_weight": 0.20,
+    "semantic_loop_penalty_weight": 1.0,
+    "causal_intervention_weight": 0.25,
+    "causal_probe_max_risk": 0.35,
+    "semantic_skill_planning_weight": 0.55,
+    "human_surprise_training_weight": 0.65,
+    "discovered_event_min_confidence": 0.55,
+    "semantic_memory_limit_per_game": 50000,
 }
 
 DEFAULT_INDEX = {"schema": APP_SCHEMA, "profiles": {}}
@@ -1043,6 +1192,9 @@ CONFIG_RANGES = {
     "planning_cvar_fraction": (0.10, 0.50),
     "planning_cvar_weight": (0.0, 1.0),
     "planning_refresh_steps": (8, 512),
+    "low_level_control_hz": (30, 60),
+    "high_level_planning_hz": (5, 10),
+    "event_reward_min_confidence": (0.0, 1.0),
     "cross_game_control_weight": (0.0, 1.0),
     "cross_game_scene_weight": (0.0, 1.0),
     "cross_game_action_weight": (0.0, 1.0),
@@ -1102,6 +1254,15 @@ CONFIG_RANGES = {
     "state_action_effective_limit": (1, 48),
     "state_action_exploration_per_kind": (1, 6),
     "state_action_forced_limit": (1, 32),
+    "human_preference_reward_weight": (0.0, 1.0),
+    "semantic_information_gain_weight": (0.0, 1.0),
+    "semantic_loop_penalty_weight": (0.0, 2.0),
+    "causal_intervention_weight": (0.0, 1.0),
+    "causal_probe_max_risk": (0.0, 1.0),
+    "semantic_skill_planning_weight": (0.0, 1.0),
+    "human_surprise_training_weight": (0.0, 2.0),
+    "discovered_event_min_confidence": (0.0, 1.0),
+    "semantic_memory_limit_per_game": (1000, 500000),
 }
 
 
@@ -1864,6 +2025,17 @@ def load_config() -> dict:
                     merged["online_model_learning_rate"] = 0.00008
                 if source_schema < 39:
                     merged["candidate_min_improvement"] = 0.02
+                if source_schema < 41:
+                    if int(merged.get("planning_horizon", 0)) == 8:
+                        merged["planning_horizon"] = DEFAULT_CONFIG["planning_horizon"]
+                    if abs(float(merged.get("planning_discount", 0.0)) - 0.85) < 1e-12:
+                        merged["planning_discount"] = DEFAULT_CONFIG["planning_discount"]
+                    if abs(float(merged.get("planning_weight", 0.0)) - 0.38) < 1e-12:
+                        merged["planning_weight"] = DEFAULT_CONFIG["planning_weight"]
+                    if int(merged.get("minimum_human_transitions", 0)) == 512:
+                        merged["minimum_human_transitions"] = DEFAULT_CONFIG["minimum_human_transitions"]
+                    if abs(float(merged.get("candidate_min_improvement", 0.0)) - 0.02) < 1e-12:
+                        merged["candidate_min_improvement"] = DEFAULT_CONFIG["candidate_min_improvement"]
             merged["schema"] = CONFIG_SCHEMA
             if validate_config(merged):
                 if merged != raw:
@@ -1880,7 +2052,7 @@ def load_config() -> dict:
 def load_index() -> dict:
     try:
         raw = read_json_file(INDEX_PATH, MAX_INDEX_JSON_BYTES)
-        if isinstance(raw, dict) and raw.get("schema") in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, APP_SCHEMA) and isinstance(raw.get("profiles"), dict):
+        if isinstance(raw, dict) and raw.get("schema") in tuple(range(3, APP_SCHEMA + 1)) and isinstance(raw.get("profiles"), dict):
             profiles = {
                 profile_id: metadata
                 for profile_id, metadata in raw["profiles"].items()
@@ -2441,7 +2613,7 @@ def load_runtime_integrity_state() -> dict:
         data=read_json_file(RUNTIME_INTEGRITY_PATH,MAX_SMALL_JSON_BYTES)
         valid=(isinstance(data,dict) and data.get("schema")==RUNTIME_INTEGRITY_SCHEMA and data.get("distribution")=="numpy" and isinstance(data.get("version"),str) and supported_numpy_version(data["version"]) and isinstance(data.get("file_count"),int) and 8<=int(data["file_count"])<=MAX_DISTRIBUTION_RECORDS and isinstance(data.get("record_sha256"),str) and re.fullmatch(r"[0-9a-f]{64}",data["record_sha256"]) and isinstance(data.get("content_sha256"),str) and re.fullmatch(r"[0-9a-f]{64}",data["content_sha256"]) and isinstance(data.get("tree_file_count"),int) and int(data["file_count"])<=int(data["tree_file_count"])<=MAX_RUNTIME_TREE_FILES and isinstance(data.get("tree_size"),int) and 1<=int(data["tree_size"])<=MAX_RUNTIME_TREE_BYTES and isinstance(data.get("tree_sha256"),str) and re.fullmatch(r"[0-9a-f]{64}",data["tree_sha256"]))
         if valid:
-            accelerator=str(data.get("accelerator",""));model_hash=str(data.get("vision_model_sha256",""));semantic_hash=str(data.get("semantic_model_sha256",""))
+            accelerator=str(data.get("accelerator",""));model_hash=str(data.get("student_model_sha256",""));semantic_hash=str(data.get("teacher_model_sha256",""))
             if accelerator and accelerator not in ("onnxruntime","directml"): return {}
             if model_hash and re.fullmatch(r"[0-9a-f]{64}",model_hash) is None: return {}
             if semantic_hash and re.fullmatch(r"[0-9a-f]{64}",semantic_hash) is None: return {}
@@ -2452,7 +2624,7 @@ def load_runtime_integrity_state() -> dict:
 
 
 def save_runtime_integrity_state(snapshot: dict) -> None:
-    data={"schema":RUNTIME_INTEGRITY_SCHEMA,"distribution":str(snapshot["distribution"]),"version":str(snapshot["version"]),"file_count":int(snapshot["file_count"]),"record_sha256":str(snapshot["record_sha256"]),"content_sha256":str(snapshot["content_sha256"]),"tree_file_count":int(snapshot["tree_file_count"]),"tree_size":int(snapshot["tree_size"]),"tree_sha256":str(snapshot["tree_sha256"]),"accelerator":str(snapshot.get("accelerator","")),"vision_model_sha256":str(snapshot.get("vision_model_sha256","")),"semantic_model_sha256":str(snapshot.get("semantic_model_sha256","")),"updated_at":now_text()}
+    data={"schema":RUNTIME_INTEGRITY_SCHEMA,"distribution":str(snapshot["distribution"]),"version":str(snapshot["version"]),"file_count":int(snapshot["file_count"]),"record_sha256":str(snapshot["record_sha256"]),"content_sha256":str(snapshot["content_sha256"]),"tree_file_count":int(snapshot["tree_file_count"]),"tree_size":int(snapshot["tree_size"]),"tree_sha256":str(snapshot["tree_sha256"]),"accelerator":str(snapshot.get("accelerator","")),"student_model_sha256":str(snapshot.get("student_model_sha256","")),"teacher_model_sha256":str(snapshot.get("teacher_model_sha256","")),"updated_at":now_text()}
     atomic_write_json(RUNTIME_INTEGRITY_PATH,data)
 
 
@@ -3172,137 +3344,44 @@ def _onnx_node_with_attributes(
 
 
 
-def legacy_quantized_vision_model_bytes(conv_w=None, conv_scale: float = 0.045, conv_b=None) -> bytes:
-    if conv_w is None:
-        conv_values = bytes(
-            (((index * 7 + 3) % 15) - 7) & 0xFF
-            for index in range(CNN_CHANNELS * MODEL_PIXEL_CHANNELS * 3 * 3)
-        )
-    else:
-        raw = conv_w.astype("int8", copy=False).reshape(
-            CNN_CHANNELS,
-            MODEL_PIXEL_CHANNELS,
-            3,
-            3,
-        )
-        conv_values = raw.tobytes(order="C")
-    scale = max(1e-8, float(conv_scale))
-    if conv_b is None:
-        bias_values = (0,) * CNN_CHANNELS
-    else:
-        bias_values = tuple(
-            max(-(1 << 31), min((1 << 31) - 1, int(round(float(value) / (0.01 * scale)))))
-            for value in conv_b
-        )
-    initializers = (
-        _onnx_tensor("x_scale", 1, (), struct.pack("<f", 0.01)),
-        _onnx_tensor("x_zero", 2, (), bytes([128])),
-        _onnx_tensor("w", 3, (CNN_CHANNELS, MODEL_PIXEL_CHANNELS, 3, 3), conv_values),
-        _onnx_tensor("w_scale", 1, (), struct.pack("<f", scale)),
-        _onnx_tensor("w_zero", 3, (), bytes([0])),
-        _onnx_tensor("y_scale", 1, (), struct.pack("<f", 0.02)),
-        _onnx_tensor("y_zero", 2, (), bytes([0])),
-        _onnx_tensor("bias", 6, (CNN_CHANNELS,), struct.pack("<" + "i" * CNN_CHANNELS, *bias_values)),
-    )
-    qconv = _onnx_node(
-        "QLinearConv",
-        ("input", "x_scale", "x_zero", "w", "w_scale", "w_zero", "y_scale", "y_zero", "bias"),
-        ("conv_q",),
-        "quantized_conv",
-    )
-    dequant = _onnx_node("DequantizeLinear", ("conv_q", "y_scale", "y_zero"), ("output",), "dequantize")
-    graph = bytearray()
-    graph.extend(_protobuf_field_bytes(1, qconv))
-    graph.extend(_protobuf_field_bytes(1, dequant))
-    graph.extend(_protobuf_field_text(2, "AnyGameAIQuantizedVision"))
-    for tensor in initializers:
-        graph.extend(_protobuf_field_bytes(5, tensor))
-    graph.extend(
-        _protobuf_field_bytes(
-            11,
-            _onnx_value_info(
-                "input",
-                2,
-                (1, MODEL_PIXEL_CHANNELS, FEATURE_HEIGHT, FEATURE_WIDTH),
+def quantized_vision_model_bytes(model_parameters: dict | None = None) -> bytes:
+    """Export trained parameters; deterministic placeholder weights are forbidden."""
+    if model_parameters is None:
+        raise ValueError("必须提供经过训练并验证的视觉模型参数")
+    conv_values = model_parameters["conv_w"].astype("int8", copy=False).tobytes(order="C")
+    conv_scale = max(1e-8, float(model_parameters["conv_scale"][0]))
+    conv_bias_values = tuple(
+        max(
+            -(1 << 31),
+            min(
+                (1 << 31) - 1,
+                int(round(float(value) / (0.01 * conv_scale))),
             ),
         )
+        for value in model_parameters["conv_b"]
     )
-    graph.extend(_protobuf_field_bytes(12, _onnx_value_info("output", 1, (1, CNN_CHANNELS, FEATURE_HEIGHT - 2, FEATURE_WIDTH - 2))))
-    opset = _protobuf_field_varint(2, 13)
-    model = bytearray()
-    model.extend(_protobuf_field_varint(1, 8))
-    model.extend(_protobuf_field_text(2, APP_NAME))
-    model.extend(_protobuf_field_text(3, APP_VERSION))
-    model.extend(_protobuf_field_bytes(7, bytes(graph)))
-    model.extend(_protobuf_field_bytes(8, opset))
-    return bytes(model)
-
-
-def quantized_vision_model_bytes(model_parameters: dict | None = None) -> bytes:
-    """Export the complete trainable visual pyramid, not just its stem."""
-    if model_parameters is None:
-        conv_values = bytes(
-            (((index * 7 + 3) % 15) - 7) & 0xFF
-            for index in range(
-                CNN_CHANNELS * MODEL_PIXEL_CHANNELS * 3 * 3
-            )
-        )
-        conv_scale = 0.045
-        conv_bias_values = (0,) * CNN_CHANNELS
-
-        def default_depthwise(channels: int, center: float) -> bytes:
-            values = [0.0] * (channels * 9)
-            for channel in range(channels):
-                values[channel * 9 + 4] = center
-            return struct.pack("<" + "f" * len(values), *values)
-
-        def default_pointwise(outputs: int, inputs: int) -> bytes:
-            values = [0.0] * (outputs * inputs)
-            for output in range(outputs):
-                values[output * inputs + output % inputs] = 0.45
-            return struct.pack("<" + "f" * len(values), *values)
-
-        conv2_depthwise = default_depthwise(CNN_CHANNELS, 0.34)
-        conv2_pointwise = default_pointwise(CNN_MID_CHANNELS, CNN_CHANNELS)
-        conv2_bias = struct.pack("<" + "f" * CNN_MID_CHANNELS, *([0.0] * CNN_MID_CHANNELS))
-        conv3_depthwise = default_depthwise(CNN_MID_CHANNELS, 0.30)
-        conv3_pointwise = default_pointwise(CNN_OUTPUT_CHANNELS, CNN_MID_CHANNELS)
-        conv3_bias = struct.pack("<" + "f" * CNN_OUTPUT_CHANNELS, *([0.0] * CNN_OUTPUT_CHANNELS))
-    else:
-        conv_values = model_parameters["conv_w"].astype("int8", copy=False).tobytes(order="C")
-        conv_scale = max(1e-8, float(model_parameters["conv_scale"][0]))
-        conv_bias_values = tuple(
-            max(
-                -(1 << 31),
-                min(
-                    (1 << 31) - 1,
-                    int(round(float(value) / (0.01 * conv_scale))),
-                ),
-            )
-            for value in model_parameters["conv_b"]
-        )
-        conv2_depthwise = (
-            model_parameters["conv2_depthwise_w"]
-            .astype("float32", copy=False)[:, None, :, :]
-            .tobytes(order="C")
-        )
-        conv2_pointwise = (
-            model_parameters["conv2_pointwise_w"]
-            .astype("float32", copy=False)[:, :, None, None]
-            .tobytes(order="C")
-        )
-        conv2_bias = model_parameters["conv2_b"].astype("float32", copy=False).tobytes(order="C")
-        conv3_depthwise = (
-            model_parameters["conv3_depthwise_w"]
-            .astype("float32", copy=False)[:, None, :, :]
-            .tobytes(order="C")
-        )
-        conv3_pointwise = (
-            model_parameters["conv3_pointwise_w"]
-            .astype("float32", copy=False)[:, :, None, None]
-            .tobytes(order="C")
-        )
-        conv3_bias = model_parameters["conv3_b"].astype("float32", copy=False).tobytes(order="C")
+    conv2_depthwise = (
+        model_parameters["conv2_depthwise_w"]
+        .astype("float32", copy=False)[:, None, :, :]
+        .tobytes(order="C")
+    )
+    conv2_pointwise = (
+        model_parameters["conv2_pointwise_w"]
+        .astype("float32", copy=False)[:, :, None, None]
+        .tobytes(order="C")
+    )
+    conv2_bias = model_parameters["conv2_b"].astype("float32", copy=False).tobytes(order="C")
+    conv3_depthwise = (
+        model_parameters["conv3_depthwise_w"]
+        .astype("float32", copy=False)[:, None, :, :]
+        .tobytes(order="C")
+    )
+    conv3_pointwise = (
+        model_parameters["conv3_pointwise_w"]
+        .astype("float32", copy=False)[:, :, None, None]
+        .tobytes(order="C")
+    )
+    conv3_bias = model_parameters["conv3_b"].astype("float32", copy=False).tobytes(order="C")
 
     stem_height = (FEATURE_HEIGHT - 3) // 2 + 1
     stem_width = (FEATURE_WIDTH - 3) // 2 + 1
@@ -3416,117 +3495,311 @@ def quantized_vision_model_bytes(model_parameters: dict | None = None) -> bytes:
     return bytes(model)
 
 
-def ensure_quantized_vision_model() -> bool:
-    expected=quantized_vision_model_bytes();changed=True
-    if QUANTIZED_VISION_MODEL_PATH.is_file() and not QUANTIZED_VISION_MODEL_PATH.is_symlink():
-        try: changed=QUANTIZED_VISION_MODEL_PATH.read_bytes()!=expected
-        except OSError: changed=True
-    if changed:
-        QUANTIZED_VISION_MODEL_PATH.parent.mkdir(parents=True,exist_ok=True);temp=temporary_sibling_path(QUANTIZED_VISION_MODEL_PATH)
-        try:
-            with temp.open("xb") as file: file.write(expected);file.flush();os.fsync(file.fileno())
-            os.replace(temp,QUANTIZED_VISION_MODEL_PATH)
-        finally: temp.unlink(missing_ok=True)
-    return changed
+def teacher_vision_model_bytes() -> bytes:
+    """Export a larger all-float teacher pyramid with intermediate maps."""
+    stem_channels = 48
+    middle_channels = 96
+    final_channels = 128
 
+    def deterministic_values(count: int, scale: float, phase: float) -> bytes:
+        values = [
+            math.sin(index * 0.173 + phase) * scale
+            + math.cos(index * 0.071 + phase * 0.5) * scale * 0.35
+            for index in range(count)
+        ]
+        return struct.pack("<" + "f" * count, *values)
 
-def _semantic_download_host_allowed(hostname: str) -> bool:
-    host = str(hostname).strip().lower()
-    return (
-        host == "huggingface.co"
-        or host == "cdn-lfs.huggingface.co"
-        or host.endswith(".xethub.hf.co")
+    def depthwise_values(channels: int, center: float, phase: float) -> bytes:
+        values = [0.0] * (channels * 9)
+        for channel in range(channels):
+            offset = channel * 9
+            values[offset + 1] = 0.025 * math.sin(channel * 0.37 + phase)
+            values[offset + 3] = -0.035
+            values[offset + 4] = center
+            values[offset + 5] = 0.035
+            values[offset + 7] = -0.025 * math.cos(channel * 0.29 + phase)
+        return struct.pack("<" + "f" * len(values), *values)
+
+    stem_height = (FEATURE_HEIGHT - 3) // 2 + 1
+    stem_width = (FEATURE_WIDTH - 3) // 2 + 1
+    middle_height = (stem_height - 3) // 2 + 1
+    middle_width = (stem_width - 3) // 2 + 1
+    final_height = (middle_height - 3) // 2 + 1
+    final_width = (middle_width - 3) // 2 + 1
+
+    initializers = (
+        _onnx_tensor(
+            "teacher_stem_w", 1,
+            (stem_channels, MODEL_PIXEL_CHANNELS, 3, 3),
+            deterministic_values(
+                stem_channels * MODEL_PIXEL_CHANNELS * 9, 0.055, 0.4
+            ),
+        ),
+        _onnx_tensor(
+            "teacher_stem_b", 1, (stem_channels,),
+            struct.pack("<" + "f" * stem_channels, *([0.0] * stem_channels)),
+        ),
+        _onnx_tensor(
+            "teacher_mid_dw", 1, (stem_channels, 1, 3, 3),
+            depthwise_values(stem_channels, 0.42, 0.7),
+        ),
+        _onnx_tensor(
+            "teacher_mid_pw", 1,
+            (middle_channels, stem_channels, 1, 1),
+            deterministic_values(middle_channels * stem_channels, 0.040, 1.1),
+        ),
+        _onnx_tensor(
+            "teacher_mid_b", 1, (middle_channels,),
+            struct.pack("<" + "f" * middle_channels, *([0.0] * middle_channels)),
+        ),
+        _onnx_tensor(
+            "teacher_final_dw", 1, (middle_channels, 1, 3, 3),
+            depthwise_values(middle_channels, 0.38, 1.4),
+        ),
+        _onnx_tensor(
+            "teacher_final_pw", 1,
+            (final_channels, middle_channels, 1, 1),
+            deterministic_values(final_channels * middle_channels, 0.030, 1.9),
+        ),
+        _onnx_tensor(
+            "teacher_final_b", 1, (final_channels,),
+            struct.pack("<" + "f" * final_channels, *([0.0] * final_channels)),
+        ),
     )
+    nodes = (
+        _onnx_node_with_attributes(
+            "Conv", ("input", "teacher_stem_w", "teacher_stem_b"),
+            ("teacher_stem_pre",), "teacher_stem_conv",
+            (_onnx_attribute_ints("strides", (2, 2)),),
+        ),
+        _onnx_node(
+            "Relu", ("teacher_stem_pre",), ("stem",), "teacher_stem_relu"
+        ),
+        _onnx_node_with_attributes(
+            "Conv", ("stem", "teacher_mid_dw"), ("teacher_mid_depth",),
+            "teacher_middle_depthwise",
+            (
+                _onnx_attribute_int("group", stem_channels),
+                _onnx_attribute_ints("strides", (2, 2)),
+            ),
+        ),
+        _onnx_node(
+            "Conv", ("teacher_mid_depth", "teacher_mid_pw", "teacher_mid_b"),
+            ("teacher_middle_pre",), "teacher_middle_pointwise"
+        ),
+        _onnx_node(
+            "Relu", ("teacher_middle_pre",), ("middle",),
+            "teacher_middle_relu"
+        ),
+        _onnx_node_with_attributes(
+            "Conv", ("middle", "teacher_final_dw"), ("teacher_final_depth",),
+            "teacher_final_depthwise",
+            (
+                _onnx_attribute_int("group", middle_channels),
+                _onnx_attribute_ints("strides", (2, 2)),
+            ),
+        ),
+        _onnx_node(
+            "Conv",
+            ("teacher_final_depth", "teacher_final_pw", "teacher_final_b"),
+            ("teacher_final_pre",), "teacher_final_pointwise"
+        ),
+        _onnx_node(
+            "Relu", ("teacher_final_pre",), ("final",), "teacher_final_relu"
+        ),
+    )
+    graph = bytearray()
+    for node in nodes:
+        graph.extend(_protobuf_field_bytes(1, node))
+    graph.extend(_protobuf_field_text(2, "AnyGameAITeacherVisualPyramid"))
+    for tensor in initializers:
+        graph.extend(_protobuf_field_bytes(5, tensor))
+    graph.extend(
+        _protobuf_field_bytes(
+            11,
+            _onnx_value_info(
+                "input", 1,
+                (1, MODEL_PIXEL_CHANNELS, FEATURE_HEIGHT, FEATURE_WIDTH),
+            ),
+        )
+    )
+    for name, dims in (
+        ("stem", (1, stem_channels, stem_height, stem_width)),
+        ("middle", (1, middle_channels, middle_height, middle_width)),
+        ("final", (1, final_channels, final_height, final_width)),
+    ):
+        graph.extend(_protobuf_field_bytes(12, _onnx_value_info(name, 1, dims)))
+    model = bytearray()
+    model.extend(_protobuf_field_varint(1, 8))
+    model.extend(_protobuf_field_text(2, APP_NAME))
+    model.extend(_protobuf_field_text(3, APP_VERSION))
+    model.extend(_protobuf_field_bytes(7, bytes(graph)))
+    model.extend(_protobuf_field_bytes(8, _protobuf_field_varint(2, 13)))
+    return bytes(model)
 
 
-def _download_semantic_vision_model(
-    destination: Path,
+def _runtime_component_destination(relative_name: str) -> Path:
+    relative = PurePosixPath(str(relative_name))
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise ValueError("运行组件路径无效")
+    destination = APP_DIR.joinpath(*relative.parts)
+    resolved_parent = destination.parent.resolve()
+    app_root = APP_DIR.resolve()
+    if resolved_parent != app_root and app_root not in resolved_parent.parents:
+        raise ValueError("运行组件路径越界")
+    return destination
+
+
+def _download_runtime_component(
+    relative_name: str,
+    specification: dict[str, object],
     stop_event: threading.Event | None,
-) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp = temporary_sibling_path(destination, ".download")
-    temp.unlink(missing_ok=True)
+) -> bytes:
+    url = str(specification.get("url") or f"{RUNTIME_COMPONENT_BASE_URL}/{relative_name}")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() != "https" or parsed.username is not None or parsed.password is not None:
+        raise RuntimeError("运行组件下载地址无效")
+    allowed_hosts = {"github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+    if (parsed.hostname or "").lower() not in allowed_hosts:
+        raise RuntimeError("运行组件下载主机不受信任")
     request = urllib.request.Request(
-        SEMANTIC_VISION_MODEL_URL,
+        url,
         headers={"User-Agent": f"{APP_NAME}/{APP_VERSION} CPython/{platform.python_version()}"},
         method="GET",
     )
+    expected_size = int(specification["size"])
     digest = hashlib.sha256()
-    total = 0
+    payload = bytearray()
     try:
-        with urllib.request.urlopen(request, timeout=60) as response, temp.open("xb") as file:
-            if getattr(response, "status", 200) != 200:
-                raise RuntimeError("语义视觉模型服务器返回异常状态")
-            final = urllib.parse.urlparse(str(response.geturl() or ""))
+        with urllib.request.urlopen(request, timeout=60) as response:
+            final_url = urllib.parse.urlparse(str(response.geturl()))
             if (
-                final.scheme.lower() != "https"
-                or not _semantic_download_host_allowed(final.hostname or "")
-                or final.username is not None
-                or final.password is not None
+                final_url.scheme.lower() != "https"
+                or final_url.username is not None
+                or final_url.password is not None
+                or (final_url.hostname or "").lower() not in allowed_hosts
             ):
-                raise RuntimeError("语义视觉模型重定向到不受信任的地址")
-            encoding = str(response.headers.get("Content-Encoding", "")).strip().lower()
-            if encoding not in ("", "identity"):
-                raise RuntimeError("语义视觉模型使用了不支持的内容编码")
+                raise RuntimeError("运行组件下载重定向不受信任")
+            if getattr(response, "status", 200) != 200:
+                raise RuntimeError("运行组件服务器返回异常状态")
             while True:
                 raise_if_cancelled(stop_event)
                 block = response.read(DOWNLOAD_CHUNK_SIZE)
                 if not block:
                     break
-                total += len(block)
-                if total > SEMANTIC_VISION_MODEL_SIZE:
-                    raise RuntimeError("语义视觉模型大小异常")
+                payload.extend(block)
                 digest.update(block)
-                file.write(block)
-            file.flush()
-            os.fsync(file.fileno())
-        if total != SEMANTIC_VISION_MODEL_SIZE:
-            raise RuntimeError("语义视觉模型大小不完整")
-        if not hmac.compare_digest(digest.hexdigest(), SEMANTIC_VISION_MODEL_SHA256):
-            raise RuntimeError("语义视觉模型 SHA-256 校验失败")
-        os.replace(temp, destination)
+                if len(payload) > expected_size:
+                    raise RuntimeError("运行组件大小异常")
     except urllib.error.URLError as error:
-        raise RuntimeError("无法连接语义视觉模型下载服务器") from error
-    finally:
-        temp.unlink(missing_ok=True)
+        raise RuntimeError("无法连接运行组件下载服务器") from error
+    if len(payload) != expected_size or not hmac.compare_digest(
+        digest.hexdigest(), str(specification["sha256"])
+    ):
+        raise RuntimeError("运行组件完整性校验失败")
+    return bytes(payload)
 
 
-def ensure_semantic_vision_model(
+def ensure_runtime_components(
+    download: bool,
+    stop_event: threading.Event | None = None,
+) -> int:
+    """Verify, download, or restore every split runtime/model file."""
+    changed = 0
+    for relative_name, specification in sorted(RUNTIME_COMPONENT_MANIFEST.items()):
+        raise_if_cancelled(stop_event)
+        destination = _runtime_component_destination(relative_name)
+        expected_size = int(specification["size"])
+        expected_sha256 = str(specification["sha256"])
+        valid = False
+        if destination.is_file() and not destination.is_symlink():
+            try:
+                valid = (
+                    int(destination.stat().st_size) == expected_size
+                    and hmac.compare_digest(sha256_file(destination), expected_sha256)
+                )
+            except OSError:
+                valid = False
+        if valid:
+            continue
+        if destination.exists() or destination.is_symlink():
+            backup_corrupt(destination)
+        source_candidate = SOURCE_SCRIPT_PATH.parent.joinpath(*PurePosixPath(relative_name).parts)
+        payload = None
+        if source_candidate.is_file() and not source_candidate.is_symlink():
+            candidate = source_candidate.read_bytes()
+            if len(candidate) == expected_size and hmac.compare_digest(
+                hashlib.sha256(candidate).hexdigest(), expected_sha256
+            ):
+                payload = candidate
+        if payload is None and download:
+            payload = _download_runtime_component(
+                relative_name, specification, stop_event
+            )
+        if payload is None:
+            raise RuntimeError("运行组件缺失或损坏，请先点击“文件”。")
+        if len(payload) != expected_size or not hmac.compare_digest(
+            hashlib.sha256(payload).hexdigest(), expected_sha256
+        ):
+            raise RuntimeError("运行组件完整性校验失败")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temp = temporary_sibling_path(destination)
+        try:
+            with temp.open("xb") as file:
+                file.write(payload)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temp, destination)
+        finally:
+            temp.unlink(missing_ok=True)
+        changed += 1
+    return changed
+
+def ensure_game_vision_models(
     download: bool,
     stop_event: threading.Event | None = None,
 ) -> bool:
-    if requested_hardware_tier() == "low_numpy":
-        return False
-    valid = False
-    if (
-        SEMANTIC_VISION_MODEL_PATH.is_file()
-        and not SEMANTIC_VISION_MODEL_PATH.is_symlink()
+    changed = ensure_runtime_components(download, stop_event)
+    for path in (
+        GAME_VISION_MODEL_PATH,
+        GAME_VISION_TEACHER_MODEL_PATH,
+        TEXT_RECOGNITION_MODEL_PATH,
+        SEMANTIC_ENCODER_MODEL_PATH,
     ):
-        try:
-            valid = (
-                SEMANTIC_VISION_MODEL_PATH.stat().st_size == SEMANTIC_VISION_MODEL_SIZE
-                and hmac.compare_digest(
-                    sha256_file(SEMANTIC_VISION_MODEL_PATH),
-                    SEMANTIC_VISION_MODEL_SHA256,
-                )
-            )
-        except OSError:
-            valid = False
-    if valid:
-        return False
-    if not download:
-        raise RuntimeError("中高配设备缺少或损坏冻结语义视觉模型，请先点击“文件”。")
-    if SEMANTIC_VISION_MODEL_PATH.exists():
-        backup_corrupt(SEMANTIC_VISION_MODEL_PATH)
-    _download_semantic_vision_model(SEMANTIC_VISION_MODEL_PATH, stop_event)
-    return True
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError("感知、文本或语义 ONNX 模型缺失或损坏，请先点击“文件”。")
+    return bool(changed)
+
+
+
+def _game_model_download_host_allowed(hostname: str) -> bool:
+    return str(hostname).strip().lower() in {
+        "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"
+    }
+
+
+
+def _download_game_vision_model(
+    destination: Path,
+    stop_event: threading.Event | None,
+) -> None:
+    del destination
+    ensure_runtime_components(True, stop_event)
+
+
+
+def ensure_teacher_vision_model(
+    download: bool,
+    stop_event: threading.Event | None = None,
+) -> bool:
+    return ensure_game_vision_models(download, stop_event)
+
 
 
 def clear_onnxruntime_modules() -> None:
     with ONNX_SESSION_LOCK:
         ONNX_SESSION_CACHE.clear()
-        SEMANTIC_RUNTIME_CACHE.clear()
-        SEMANTIC_FRAME_FEATURE_CACHE.clear()
+        PERCEPTION_RUNTIME_CACHE.clear()
     for name in list(sys.modules):
         if name=="onnxruntime" or name.startswith("onnxruntime."): sys.modules.pop(name,None)
 
@@ -3544,61 +3817,44 @@ def import_onnxruntime(local_only: bool = True):
 
 
 def accelerated_vision_session(model: dict | None = None):
-    try:
-        if model is None:
-            payload = QUANTIZED_VISION_MODEL_PATH.read_bytes()
-        else:
-            revision = (
-                int(model.get("optimizer_step", 0)),
-                int(model.get("online_updates", 0)),
-                int(model.get("visual_pretraining_steps", 0)),
-            )
-            cached_export = model.get("_vision_onnx_export")
-            if (
-                isinstance(cached_export, tuple)
-                and len(cached_export) == 2
-                and cached_export[0] == revision
-            ):
-                payload = cached_export[1]
-            else:
-                payload = quantized_vision_model_bytes(model)
-                model["_vision_onnx_export"] = (revision, payload)
-        key = hashlib.sha256(payload).hexdigest()
-    except Exception:
+    tier = str((model or {}).get("runtime_tier", requested_hardware_tier()))
+    if tier == "low_numpy":
         return None
+    path = GAME_VISION_TEACHER_MODEL_PATH if tier == "high_directml" else GAME_VISION_MODEL_PATH
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        digest = sha256_file(path)
+    except OSError:
+        return None
+    key = f"game-perception:{tier}:{digest}"
     with ONNX_SESSION_LOCK:
         cached = ONNX_SESSION_CACHE.get(key)
         if cached is not None:
             return cached
         try:
             ort = import_onnxruntime(True)
-            providers = list(ort.get_available_providers())
-            preferred = []
-            if "DmlExecutionProvider" in providers:
-                preferred.append("DmlExecutionProvider")
-            if "CPUExecutionProvider" in providers:
-                preferred.append("CPUExecutionProvider")
-            session = ort.InferenceSession(payload, providers=preferred or providers)
-            probe = import_numpy().zeros(
-                (1, MODEL_PIXEL_CHANNELS, FEATURE_HEIGHT, FEATURE_WIDTH),
-                dtype=import_numpy().uint8,
+            available = tuple(ort.get_available_providers())
+            requested = (
+                ["DmlExecutionProvider", "CPUExecutionProvider"]
+                if tier == "high_directml"
+                else ["CPUExecutionProvider"]
             )
-            outputs = session.run(["stem", "middle", "final"], {"input": probe})
-            expected_shapes = (
-                (1, CNN_CHANNELS, (FEATURE_HEIGHT - 3) // 2 + 1, (FEATURE_WIDTH - 3) // 2 + 1),
-                (1, CNN_MID_CHANNELS, (((FEATURE_HEIGHT - 3) // 2 + 1) - 3) // 2 + 1, (((FEATURE_WIDTH - 3) // 2 + 1) - 3) // 2 + 1),
-                (1, CNN_OUTPUT_CHANNELS, (((((FEATURE_HEIGHT - 3) // 2 + 1) - 3) // 2 + 1) - 3) // 2 + 1, (((((FEATURE_WIDTH - 3) // 2 + 1) - 3) // 2 + 1) - 3) // 2 + 1),
+            providers = [provider for provider in requested if provider in available]
+            if not providers:
+                return None
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = runtime_numeric_thread_budget()
+            options.inter_op_num_threads = 1
+            options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            session = ort.InferenceSession(
+                str(path), sess_options=options, providers=providers
             )
-            if tuple(tuple(value.shape) for value in outputs) != expected_shapes:
-                raise RuntimeError("量化视觉模型输出尺寸无效")
             ONNX_SESSION_CACHE[key] = session
-            if len(ONNX_SESSION_CACHE) > 12:
-                oldest = next(iter(ONNX_SESSION_CACHE))
-                if oldest != key:
-                    ONNX_SESSION_CACHE.pop(oldest, None)
             return session
         except Exception:
             return None
+
 
 
 def temporal_policy_model_bytes(model: dict) -> bytes:
@@ -3854,53 +4110,9 @@ def accelerated_temporal_policy(
         return None
 
 
-def semantic_vision_session():
-    if not SEMANTIC_VISION_MODEL_PATH.is_file():
-        return None
-    key = "semantic:" + SEMANTIC_VISION_MODEL_SHA256
-    with ONNX_SESSION_LOCK:
-        cached = ONNX_SESSION_CACHE.get(key)
-        if cached is not None:
-            return cached
-        try:
-            ort = import_onnxruntime(True)
-            providers = list(ort.get_available_providers())
-            preferred = []
-            if "DmlExecutionProvider" in providers:
-                preferred.append("DmlExecutionProvider")
-            if "CPUExecutionProvider" in providers:
-                preferred.append("CPUExecutionProvider")
-            session = ort.InferenceSession(
-                str(SEMANTIC_VISION_MODEL_PATH),
-                providers=preferred or providers,
-            )
-            inputs = session.get_inputs()
-            outputs = session.get_outputs()
-            if len(inputs) != 1 or not outputs:
-                raise RuntimeError("语义视觉模型输入输出无效")
-            declared_shape = tuple(inputs[0].shape)
-            if (
-                len(declared_shape) != 4
-                or declared_shape[0] not in (1, None, "N", "batch", "batch_size")
-                or tuple(declared_shape[1:])
-                != (3, SEMANTIC_INPUT_SIZE, SEMANTIC_INPUT_SIZE)
-            ):
-                raise RuntimeError("语义视觉模型输入尺寸无效")
-            np = import_numpy(True)
-            probe = np.zeros(
-                (1, 3, SEMANTIC_INPUT_SIZE, SEMANTIC_INPUT_SIZE),
-                dtype=np.float32,
-            )
-            result = np.asarray(
-                session.run([outputs[0].name], {inputs[0].name: probe})[0],
-                dtype=np.float32,
-            ).reshape(-1)
-            if result.shape != (SEMANTIC_SOURCE_DIM,) or not np.isfinite(result).all():
-                raise RuntimeError("语义视觉模型输出尺寸无效")
-            ONNX_SESSION_CACHE[key] = session
-            return session
-        except Exception:
-            return None
+def teacher_vision_session():
+    return accelerated_vision_session({"runtime_tier": "high_directml"})
+
 
 
 def local_onnx_probe_command(site_packages: Path, require_dml: bool) -> list[str]:
@@ -3909,58 +4121,121 @@ def local_onnx_probe_command(site_packages: Path, require_dml: bool) -> list[str
     return [sys.executable,"-I","-c",code]
 
 
-def ensure_accelerated_runtime(download: bool, stop_event: threading.Event | None = None) -> bool:
-    tier=requested_hardware_tier()
-    if tier=="low_numpy": return False
-    semantic_changed=ensure_semantic_vision_model(download,stop_event)
-    require_dml=tier=="high_directml"
-    requirement=ONNXRUNTIME_DIRECTML_REQUIREMENT if require_dml else ONNXRUNTIME_REQUIREMENT
-    ensure_quantized_vision_model()
-    code,output=run_process_cancelable(local_onnx_probe_command(SITE_PACKAGES,require_dml),stop_event,isolated_python_environment())
-    state=load_runtime_integrity_state();expected_model_hash=sha256_file(QUANTIZED_VISION_MODEL_PATH)
-    if code==0 and state and hmac.compare_digest(str(state.get("vision_model_sha256","")),expected_model_hash) and hmac.compare_digest(str(state.get("semantic_model_sha256","")),SEMANTIC_VISION_MODEL_SHA256) and str(state.get("accelerator",""))==( "directml" if require_dml else "onnxruntime"):
-        session=accelerated_vision_session()
-        providers=tuple(session.get_providers()) if session is not None and hasattr(session,"get_providers") else ()
-        semantic_session=semantic_vision_session()
-        if session is not None and semantic_session is not None and (not require_dml or providers and providers[0]=="DmlExecutionProvider"):
-            return semantic_changed
+def ensure_accelerated_runtime(
+    download: bool,
+    stop_event: threading.Event | None = None,
+) -> bool:
+    tier = requested_hardware_tier()
+    component_changed = ensure_game_vision_models(download, stop_event)
+    if tier == "low_numpy":
+        return component_changed
+    require_dml = tier == "high_directml"
+    requirement = (
+        ONNXRUNTIME_DIRECTML_REQUIREMENT if require_dml else ONNXRUNTIME_REQUIREMENT
+    )
+    code, output = run_process_cancelable(
+        local_onnx_probe_command(SITE_PACKAGES, require_dml),
+        stop_event,
+        isolated_python_environment(),
+    )
+    state = load_runtime_integrity_state()
+    student_hash = sha256_file(GAME_VISION_MODEL_PATH)
+    teacher_hash = sha256_file(GAME_VISION_TEACHER_MODEL_PATH)
+    text_hash = sha256_file(TEXT_RECOGNITION_MODEL_PATH)
+    semantic_hash = sha256_file(SEMANTIC_ENCODER_MODEL_PATH)
+    expected_accelerator = "directml" if require_dml else "onnxruntime"
+    if (
+        code == 0
+        and state
+        and hmac.compare_digest(str(state.get("student_model_sha256", "")), student_hash)
+        and hmac.compare_digest(str(state.get("teacher_model_sha256", "")), teacher_hash)
+        and hmac.compare_digest(str(state.get("text_model_sha256", "")), text_hash)
+        and hmac.compare_digest(str(state.get("semantic_model_sha256", "")), semantic_hash)
+        and str(state.get("accelerator", "")) == expected_accelerator
+    ):
+        session = accelerated_vision_session({"runtime_tier": tier})
+        providers = tuple(session.get_providers()) if session is not None else ()
+        if session is not None and (
+            not require_dml or (providers and providers[0] == "DmlExecutionProvider")
+        ):
+            return component_changed
     if not download:
-        raise RuntimeError("中高配设备缺少或未校验量化 ONNX 运行组件，请先点击“文件”。")
-    transaction_root=RUNTIME_DIR/f".update-onnx-{os.getpid()}-{time.time_ns()}";staged=transaction_root/"site-packages";rollback=transaction_root/"rollback-site-packages"
-    transaction_root.mkdir(parents=True,exist_ok=True);shutil.copytree(SITE_PACKAGES,staged,dirs_exist_ok=True)
-    environment=isolated_python_environment();environment.update({"TEMP":str(TEMP_DIR),"TMP":str(TEMP_DIR),"PIP_CACHE_DIR":str(TEMP_DIR/"pip-cache")})
-    args=["--isolated","install","--upgrade","--disable-pip-version-check","--no-input","--no-cache-dir","--no-compile","--no-warn-script-location","--retries","3","--timeout","45","--only-binary=:all:","--target",str(staged),NUMPY_REQUIREMENT,requirement]
-    commands=pip_install_commands(args);committed=False
+        raise RuntimeError("中高配设备缺少或未校验 ONNX Runtime，请先点击“文件”。")
+    transaction_root = RUNTIME_DIR / f".update-onnx-{os.getpid()}-{time.time_ns()}"
+    staged = transaction_root / "site-packages"
+    rollback = transaction_root / "rollback-site-packages"
+    transaction_root.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(SITE_PACKAGES, staged, dirs_exist_ok=True)
+    environment = isolated_python_environment()
+    environment.update({
+        "TEMP": str(TEMP_DIR),
+        "TMP": str(TEMP_DIR),
+        "PIP_CACHE_DIR": str(TEMP_DIR / "pip-cache"),
+    })
+    args = [
+        "--isolated", "install", "--upgrade", "--disable-pip-version-check",
+        "--no-input", "--no-cache-dir", "--no-compile", "--no-warn-script-location",
+        "--retries", "3", "--timeout", "45", "--only-binary=:all:",
+        "--target", str(staged), NUMPY_REQUIREMENT, requirement,
+    ]
+    committed = False
     try:
-        install_output=[];install_code=1
-        for command in commands:
-            install_code,part=run_process_cancelable(command,stop_event,environment);install_output.append(part)
-            if install_code==0: break
-        if install_code!=0:
-            log_text("ONNX Runtime 安装失败:\n"+"\n".join(install_output)[-12000:]);raise RuntimeError("量化 ONNX 运行组件下载或安装失败。")
-        probe_code,probe_output=run_process_cancelable(local_onnx_probe_command(staged,require_dml),stop_event,environment)
-        if probe_code!=0: log_text("ONNX Runtime 自检失败:\n"+probe_output[-12000:]);raise RuntimeError("量化 ONNX 运行组件安装后自检失败。")
-        verify_installed_distribution("numpy",stop_event,staged)
-        clear_numpy_modules();clear_onnxruntime_modules();os.replace(SITE_PACKAGES,rollback);os.replace(staged,SITE_PACKAGES);committed=True
+        install_code = 1
+        install_output = []
+        for command in pip_install_commands(args):
+            install_code, part = run_process_cancelable(command, stop_event, environment)
+            install_output.append(part)
+            if install_code == 0:
+                break
+        if install_code != 0:
+            log_text("ONNX Runtime 安装失败:\n" + "\n".join(install_output)[-12000:])
+            raise RuntimeError("ONNX Runtime 下载或安装失败。")
+        probe_code, probe_output = run_process_cancelable(
+            local_onnx_probe_command(staged, require_dml), stop_event, environment
+        )
+        if probe_code != 0:
+            log_text("ONNX Runtime 自检失败:\n" + probe_output[-12000:])
+            raise RuntimeError("ONNX Runtime 安装后自检失败。")
+        verify_installed_distribution("numpy", stop_event, staged)
+        clear_numpy_modules()
+        clear_onnxruntime_modules()
+        os.replace(SITE_PACKAGES, rollback)
+        os.replace(staged, SITE_PACKAGES)
+        committed = True
         try:
-            importlib.invalidate_caches();import_numpy(True);ort=import_onnxruntime(True);providers=ort.get_available_providers()
-            if require_dml and "DmlExecutionProvider" not in providers: raise RuntimeError("DirectML 提供程序缺失")
-            snapshot=verify_installed_distribution("numpy",None,SITE_PACKAGES,collect_snapshot=True);snapshot["accelerator"]="directml" if require_dml else "onnxruntime";snapshot["vision_model_sha256"]=sha256_file(QUANTIZED_VISION_MODEL_PATH);snapshot["semantic_model_sha256"]=sha256_file(SEMANTIC_VISION_MODEL_PATH);save_runtime_integrity_state(snapshot)
-            session=accelerated_vision_session()
-            if session is None: raise RuntimeError("量化视觉模型无法加载")
-            if semantic_vision_session() is None: raise RuntimeError("冻结语义视觉模型无法加载")
-            if require_dml and (
-                not hasattr(session,"get_providers")
-                or not session.get_providers()
-                or session.get_providers()[0]!="DmlExecutionProvider"
-            ):
-                raise RuntimeError("量化视觉模型未实际使用 DirectML")
+            importlib.invalidate_caches()
+            import_numpy(True)
+            ort = import_onnxruntime(True)
+            providers = tuple(ort.get_available_providers())
+            if require_dml and "DmlExecutionProvider" not in providers:
+                raise RuntimeError("DirectML 提供程序缺失")
+            snapshot = verify_installed_distribution(
+                "numpy", None, SITE_PACKAGES, collect_snapshot=True
+            )
+            snapshot["accelerator"] = expected_accelerator
+            snapshot["student_model_sha256"] = student_hash
+            snapshot["teacher_model_sha256"] = teacher_hash
+            snapshot["text_model_sha256"] = text_hash
+            snapshot["semantic_model_sha256"] = semantic_hash
+            save_runtime_integrity_state(snapshot)
+            session = accelerated_vision_session({"runtime_tier": tier})
+            if session is None:
+                raise RuntimeError("游戏感知 ONNX 模型无法加载")
+            if require_dml and session.get_providers()[0] != "DmlExecutionProvider":
+                raise RuntimeError("高配感知模型未实际使用 DirectML")
         except Exception as error:
-            clear_numpy_modules();clear_onnxruntime_modules();shutil.rmtree(SITE_PACKAGES,ignore_errors=True);os.replace(rollback,SITE_PACKAGES);committed=False;raise RuntimeError("ONNX Runtime 替换后自检失败，已恢复原文件。") from error
+            clear_numpy_modules()
+            clear_onnxruntime_modules()
+            shutil.rmtree(SITE_PACKAGES, ignore_errors=True)
+            os.replace(rollback, SITE_PACKAGES)
+            committed = False
+            raise RuntimeError("ONNX Runtime 替换后自检失败，已恢复原文件。") from error
         return True
     finally:
-        if not committed and not SITE_PACKAGES.exists() and rollback.exists(): os.replace(rollback,SITE_PACKAGES)
-        shutil.rmtree(transaction_root,ignore_errors=True)
+        if not committed and not SITE_PACKAGES.exists() and rollback.exists():
+            os.replace(rollback, SITE_PACKAGES)
+        shutil.rmtree(transaction_root, ignore_errors=True)
+
 
 
 def ensure_runtime_ready(stop_event: threading.Event | None = None):
@@ -4201,6 +4476,7 @@ INSTANCE_MUTEX = None
 INJECTED_INPUT_LOCK = threading.RLock()
 INJECTED_KEYS: set[int] = set()
 INJECTED_BUTTONS: set[str] = set()
+LOW_LEVEL_HELD_ACTION_SIGNATURE = ""
 
 
 def begin_runtime_activity(display_required: bool = False) -> bool:
@@ -6386,6 +6662,113 @@ def execute_action(
                 INJECTED_BUTTONS.difference_update(held_buttons)
 
 
+def choose_control_decision(
+    np,
+    model: dict,
+    hidden,
+    action: dict,
+    previous_action_id: int,
+    static_streak: int,
+    safety_risk: float,
+) -> str:
+    """Choose start/continue/release at the low-level control frequency."""
+    del previous_action_id
+    global LOW_LEVEL_HELD_ACTION_SIGNATURE
+    signature = action_signature(normalized_action(action))
+    currently_held = bool(LOW_LEVEL_HELD_ACTION_SIGNATURE)
+    same_action = currently_held and signature == LOW_LEVEL_HELD_ACTION_SIGNATURE
+    decision, probabilities = _runtime_module("policy").choose_control_decision(
+        np, model, hidden, same_action, currently_held, deterministic=True
+    )
+    if float(safety_risk) >= 0.92:
+        return "release"
+    if static_streak >= 3 and same_action and decision == "continue":
+        release_probability = float(probabilities[CONTROL_DECISIONS.index("release")])
+        if release_probability >= 0.18:
+            return "release"
+    return str(decision)
+
+
+def _low_level_mouse_items(action: dict, mouse_step: int) -> list:
+    items: list = []
+    if action["mouse_dx"] or action["mouse_dy"]:
+        items.append(
+            mouse_input(
+                action["mouse_dx"] * mouse_step,
+                action["mouse_dy"] * mouse_step,
+                MOUSEEVENTF_MOVE,
+            )
+        )
+    if action["mouse_wheel"]:
+        items.append(
+            mouse_input(
+                flags=MOUSEEVENTF_WHEEL,
+                data=(action["mouse_wheel"] * 120) & 0xFFFFFFFF,
+            )
+        )
+    return items
+
+
+def execute_control_decision(
+    target: int,
+    action: dict,
+    decision: str,
+    control_period: float,
+    mouse_step: int,
+    stop_event: threading.Event | None = None,
+) -> bool:
+    """Persistent 30-60 Hz key/button controller used below the high-level planner."""
+    global LOW_LEVEL_HELD_ACTION_SIGNATURE
+    if os.name != "nt":
+        return sleep_cancelable(control_period, stop_event, target)
+    if not window_exists(target) or foreground_window() != target:
+        release_all_inputs()
+        LOW_LEVEL_HELD_ACTION_SIGNATURE = ""
+        return False
+    action = normalized_action(action)
+    signature = action_signature(action)
+    decision = str(decision)
+    if decision == "release":
+        release_all_inputs()
+        LOW_LEVEL_HELD_ACTION_SIGNATURE = ""
+        return sleep_cancelable(control_period, stop_event, target)
+    if decision == "start" or signature != LOW_LEVEL_HELD_ACTION_SIGNATURE:
+        release_all_inputs()
+        if action["mouse_x"] >= 0 and action["mouse_y"] >= 0:
+            left, top, width, height = window_capture_rect(target)
+            target_x = left + int((action["mouse_x"] + 0.5) * width / MOUSE_GRID_WIDTH)
+            target_y = top + int((action["mouse_y"] + 0.5) * height / MOUSE_GRID_HEIGHT)
+            if not user32.SetCursorPos(target_x, target_y):
+                return False
+        down = [keyboard_input(vk, False) for vk in action["keys"]]
+        for name in action["buttons"]:
+            if name == "left":
+                down.append(mouse_input(flags=MOUSEEVENTF_LEFTDOWN))
+            elif name == "right":
+                down.append(mouse_input(flags=MOUSEEVENTF_RIGHTDOWN))
+            elif name == "middle":
+                down.append(mouse_input(flags=MOUSEEVENTF_MIDDLEDOWN))
+            elif name == "x1":
+                down.append(mouse_input(flags=MOUSEEVENTF_XDOWN, data=XBUTTON1))
+            elif name == "x2":
+                down.append(mouse_input(flags=MOUSEEVENTF_XDOWN, data=XBUTTON2))
+        down.extend(_low_level_mouse_items(action, mouse_step))
+        with INJECTED_INPUT_LOCK:
+            INJECTED_KEYS.update(action["keys"])
+            INJECTED_BUTTONS.update(action["buttons"])
+            send_inputs(down)
+        LOW_LEVEL_HELD_ACTION_SIGNATURE = signature
+    else:
+        transient = _low_level_mouse_items(action, mouse_step)
+        if transient:
+            send_inputs(transient)
+    return sleep_cancelable(
+        max(1.0 / 120.0, min(1.0 / 20.0, float(control_period))),
+        stop_event,
+        target,
+    )
+
+
 def make_feature(
     current: bytes,
     previous: bytes | None,
@@ -6513,7 +6896,9 @@ def state_key(gray: bytes, feature: bytes) -> str:
     return f"{frame_hash(gray, chroma_blue, chroma_red)}:{motion_bucket:02x}:{brightness_bucket:x}"
 
 
-def memory_state_key(gray: bytes, feature: bytes) -> str:
+def memory_state_key(gray: bytes, feature: bytes, belief_state=None) -> str:
+    if belief_state is not None:
+        return canonical_belief_key(belief_state)
     chroma_blue, chroma_red = feature_chroma(feature)
     digest = int(frame_hash(gray, chroma_blue, chroma_red), 16)
     folded = 0
@@ -6928,12 +7313,28 @@ def ensure_live_model_evaluation(profile: dict) -> dict:
 
 
 def live_session_variant(profile: dict, runtime_tier: str, candidate_exists: bool) -> str:
-    ensure_live_model_evaluation(profile)
+    root = ensure_live_model_evaluation(profile)
     if not candidate_exists:
         return "champion"
-    # Independent AI sessions alternate deterministically; a single long run
-    # can therefore never supply both sides of the promotion test.
-    return "challenger" if int(profile.get("ai_sessions", 0)) % 2 else "champion"
+    # Evaluate in randomized two-session blocks. Each block contains exactly
+    # one champion and one challenger run, while the randomized order removes
+    # systematic first/second-session bias from menus, warm-up, and fatigue.
+    tier = runtime_student_tier(runtime_tier)
+    tier_stats = root["tiers"][tier]
+    completed = (
+        int(tier_stats["champion"].get("sessions", 0))
+        + int(tier_stats["challenger"].get("sessions", 0))
+    )
+    block = completed // 2
+    position = completed % 2
+    seed_material = (
+        f"{profile.get('id', '')}|{tier}|{tier_stats.get('generation', 0)}|{block}"
+    ).encode("utf-8", errors="strict")
+    challenger_first = bool(hashlib.sha256(seed_material).digest()[0] & 1)
+    first = "challenger" if challenger_first else "champion"
+    if position == 0:
+        return first
+    return "champion" if first == "challenger" else "challenger"
 
 
 def record_live_model_session(
@@ -6973,6 +7374,101 @@ def record_live_model_session(
     stats["history"] = history[-LIVE_HISTORY_LIMIT:]
 
 
+def load_human_benchmark_statistics(path: Path) -> dict:
+    """Build a recent, outcome-based human benchmark from recorded demonstrations."""
+    stats = _empty_live_model_statistics()
+    if not path.is_file() or path.is_symlink():
+        return stats
+    expression = "COALESCE(NULLIF(run_id, ''), episode_id)"
+    connection = sqlite3.connect(path, timeout=30)
+    try:
+        session_rows = connection.execute(
+            f"SELECT {expression}, MAX(rowid) FROM transitions "
+            "WHERE source='human' AND capture_failed=0 "
+            f"GROUP BY {expression} ORDER BY MAX(rowid) DESC LIMIT ?",
+            (LIVE_HISTORY_LIMIT,),
+        ).fetchall()
+        session_ids = [str(row[0]) for row in reversed(session_rows) if str(row[0])]
+        if not session_ids:
+            return stats
+        placeholders = ",".join("?" for _ in session_ids)
+        rows = connection.execute(
+            f"SELECT {expression},episode_id,task_reward,safety_penalty,"
+            "outcome_type,outcome_confidence,score_delta "
+            "FROM transitions WHERE source='human' AND capture_failed=0 "
+            f"AND {expression} IN ({placeholders}) ORDER BY rowid",
+            session_ids,
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return stats
+    finally:
+        connection.close()
+
+    sessions: dict[str, dict] = {}
+    for session_id, episode_id, task, safety, outcome_type, confidence, score_delta in rows:
+        session = sessions.setdefault(
+            str(session_id),
+            {
+                "steps": 0,
+                "task": 0.0,
+                "safety": 0.0,
+                "score": 0.0,
+                "levels": 0,
+                "episodes": {},
+            },
+        )
+        session["steps"] += 1
+        session["task"] += float(task)
+        session["safety"] += max(0.0, float(safety))
+        confidence = max(0.0, min(1.0, float(confidence)))
+        outcome_type = int(outcome_type)
+        if outcome_type == OUTCOME_SCORE:
+            session["score"] += float(score_delta) * confidence
+        elif outcome_type == OUTCOME_LEVEL and confidence >= 0.50:
+            session["levels"] += 1
+        episode = session["episodes"].setdefault(
+            str(episode_id), {"victory": False, "death": False}
+        )
+        if outcome_type == OUTCOME_VICTORY and confidence >= 0.50:
+            episode["victory"] = True
+        elif outcome_type == OUTCOME_DEATH and confidence >= 0.50:
+            episode["death"] = True
+
+    history = []
+    for session_id in session_ids:
+        session = sessions.get(session_id)
+        if not session or int(session["steps"]) <= 0:
+            continue
+        episodes = list(session["episodes"].values())
+        victories = sum(int(item["victory"] and not item["death"]) for item in episodes)
+        deaths = sum(int(item["death"]) for item in episodes)
+        completed = sum(int(item["victory"] or item["death"]) for item in episodes)
+        item = {
+            "episodes": completed,
+            "victories": victories,
+            "deaths": deaths,
+            "levels": int(session["levels"]),
+            "steps": int(session["steps"]),
+            "score": float(session["score"]),
+            "task": float(session["task"]),
+            "safety": float(session["safety"]),
+            "updated_at": "",
+        }
+        history.append(item)
+        stats["sessions"] += 1
+        stats["episodes"] += completed
+        stats["victories"] += victories
+        stats["deaths"] += deaths
+        stats["levels"] += int(session["levels"])
+        stats["steps"] += int(session["steps"])
+        stats["score_total"] += float(session["score"])
+        stats["task_total"] += float(session["task"])
+        stats["safety_total"] += float(session["safety"])
+    stats["history"] = history[-LIVE_HISTORY_LIMIT:]
+    stats["updated_at"] = now_text() if history else ""
+    return stats
+
+
 def _live_model_rates(stats: dict) -> dict[str, float]:
     raw_episodes = max(0, int(stats.get("episodes", 0)))
     steps = max(1, int(stats.get("steps", 0)))
@@ -7003,6 +7499,8 @@ def _bootstrap_live_challenger_confidence(
     level_margin: float,
     use_outcomes: bool,
     samples: int = 512,
+    minimum_history: int = LIVE_MIN_SESSIONS,
+    allow_task_improvement: bool = True,
 ) -> float:
     left_history = [
         item for item in _clean_live_history(champion.get("history", []))
@@ -7012,13 +7510,14 @@ def _bootstrap_live_challenger_confidence(
         item for item in _clean_live_history(challenger.get("history", []))
         if int(item["steps"]) > 0
     ]
-    if len(left_history) < LIVE_MIN_SESSIONS or len(right_history) < LIVE_MIN_SESSIONS:
-        return 1.0
+    required_history = max(2, int(minimum_history))
+    if len(left_history) < required_history or len(right_history) < required_history:
+        return 0.0
     seed_material = json.dumps(
         [
             left_history, right_history, round(float(score_margin), 8),
             round(float(task_margin), 8), round(float(level_margin), 8),
-            bool(use_outcomes),
+            bool(use_outcomes), bool(allow_task_improvement),
         ],
         ensure_ascii=False,
         sort_keys=True,
@@ -7058,7 +7557,10 @@ def _bootstrap_live_challenger_confidence(
             outcome_improves
             or right["score"] >= left["score"] + score_margin
             or right["level_rate"] >= left["level_rate"] + level_margin
-            or right["task_rate"] >= left["task_rate"] + task_margin
+            or (
+                allow_task_improvement
+                and right["task_rate"] >= left["task_rate"] + task_margin
+            )
         )
         outcome_guards = (
             not use_outcomes
@@ -7078,7 +7580,150 @@ def _bootstrap_live_challenger_confidence(
     return passes / max(128, int(samples))
 
 
-def live_challenger_passes(profile: dict, runtime_tier: str, minimum_improvement: float) -> bool:
+
+def _aggregate_live_history(history: list[dict]) -> dict:
+    stats = _empty_live_model_statistics()
+    cleaned = _clean_live_history(history)
+    for item in cleaned:
+        stats["sessions"] += 1
+        for key in ("episodes", "victories", "deaths", "levels", "steps"):
+            stats[key] += max(0, int(item.get(key, 0)))
+        stats["score_total"] += float(item.get("score", 0.0))
+        stats["task_total"] += float(item.get("task", 0.0))
+        stats["safety_total"] += max(0.0, float(item.get("safety", 0.0)))
+    stats["history"] = cleaned[-LIVE_HISTORY_LIMIT:]
+    stats["updated_at"] = now_text() if cleaned else ""
+    return stats
+
+
+def _elite_human_benchmark(human: dict) -> dict:
+    """Compare against the user's stronger recent sessions, not their average."""
+    history = _clean_live_history(human.get("history", []))
+    if len(history) <= HUMAN_BENCHMARK_MIN_SESSIONS:
+        return _aggregate_live_history(history)
+    total_episodes = sum(max(0, int(item.get("episodes", 0))) for item in history)
+    total_outcomes = sum(
+        max(0, int(item.get("victories", 0))) + max(0, int(item.get("deaths", 0)))
+        for item in history
+    )
+    total_levels = sum(max(0, int(item.get("levels", 0))) for item in history)
+    total_score = sum(abs(float(item.get("score", 0.0))) for item in history)
+
+    def session_strength(item: dict) -> tuple[float, float, float]:
+        steps = max(1, int(item.get("steps", 0)))
+        episodes = max(1, int(item.get("episodes", 0)))
+        win_rate = float(item.get("victories", 0)) / episodes
+        death_rate = float(item.get("deaths", 0)) / episodes
+        score_rate = 1000.0 * float(item.get("score", 0.0)) / steps
+        level_rate = 1000.0 * float(item.get("levels", 0)) / steps
+        safety_rate = float(item.get("safety", 0.0)) / steps
+        if total_episodes >= HUMAN_BENCHMARK_MIN_EPISODES and total_outcomes > 0:
+            primary = win_rate - death_rate
+            secondary = max(score_rate, level_rate)
+        elif total_levels > 0:
+            primary = level_rate
+            secondary = score_rate
+        elif total_score > 1e-9:
+            primary = score_rate
+            secondary = level_rate
+        else:
+            primary = float(item.get("task", 0.0)) / steps
+            secondary = -safety_rate
+        return primary, secondary, -safety_rate
+
+    elite_count = max(
+        HUMAN_BENCHMARK_MIN_SESSIONS,
+        min(len(history), math.ceil(len(history) * 0.25)),
+    )
+    elite = sorted(history, key=session_strength, reverse=True)[:elite_count]
+    return _aggregate_live_history(elite)
+
+def live_candidate_beats_human(
+    human: dict,
+    challenger: dict,
+    minimum_improvement: float,
+) -> bool:
+    human = _elite_human_benchmark(human)
+    if min(int(human.get("sessions", 0)), int(challenger.get("sessions", 0))) < HUMAN_BENCHMARK_MIN_SESSIONS:
+        return False
+    enough_outcomes = (
+        min(int(human.get("episodes", 0)), int(challenger.get("episodes", 0)))
+        >= HUMAN_BENCHMARK_MIN_EPISODES
+    )
+    enough_steps = (
+        min(int(human.get("steps", 0)), int(challenger.get("steps", 0)))
+        >= HUMAN_BENCHMARK_MIN_STEPS
+    )
+    if not (enough_outcomes or enough_steps):
+        return False
+    left = _live_model_rates(human)
+    right = _live_model_rates(challenger)
+    objective_progress_available = bool(
+        enough_outcomes
+        or int(human.get("levels", 0)) > 0
+        or int(challenger.get("levels", 0)) > 0
+        or abs(left["score"]) > 1e-9
+        or abs(right["score"]) > 1e-9
+    )
+    # A shaped task reward is useful for learning, but it is not objective
+    # evidence that the AI has exceeded the user.  Superhuman certification
+    # therefore requires recognized wins, score changes, or level progress.
+    if not objective_progress_available:
+        return False
+    score_margin = max(
+        0.02,
+        abs(left["score"]) * SUPERHUMAN_SCORE_RELATIVE_MARGIN,
+        float(minimum_improvement),
+    )
+    level_margin = max(0.01, abs(left["level_rate"]) * 0.05)
+    task_margin = max(0.005, abs(left["task_rate"]) * 0.10)
+    safe = right["safety"] <= left["safety"] + 0.02
+    preserves_score = right["score"] >= left["score"] - max(0.02, abs(left["score"]) * 0.03)
+    preserves_levels = right["level_rate"] >= left["level_rate"] - max(0.01, abs(left["level_rate"]) * 0.03)
+    if enough_outcomes:
+        outcome_guard = (
+            right["death_rate"] <= left["death_rate"]
+            and right["win_rate"] >= left["win_rate"] - 0.01
+        )
+        improves = (
+            right["win_rate"] >= left["win_rate"] + SUPERHUMAN_WIN_MARGIN
+            or right["score"] >= left["score"] + score_margin
+            or right["level_rate"] >= left["level_rate"] + level_margin
+        )
+    else:
+        # Without recognized terminal outcomes, only objective score or level
+        # progress may establish that the AI exceeded the user.
+        outcome_guard = True
+        improves = (
+            right["score"] >= left["score"] + score_margin
+            or right["level_rate"] >= left["level_rate"] + level_margin
+        )
+    confidence = _bootstrap_live_challenger_confidence(
+        human,
+        challenger,
+        score_margin,
+        task_margin,
+        level_margin,
+        enough_outcomes,
+        minimum_history=HUMAN_BENCHMARK_MIN_SESSIONS,
+        allow_task_improvement=False,
+    )
+    return bool(
+        safe
+        and preserves_score
+        and preserves_levels
+        and outcome_guard
+        and improves
+        and confidence >= 0.95
+    )
+
+
+def live_challenger_passes(
+    profile: dict,
+    runtime_tier: str,
+    minimum_improvement: float,
+    human_statistics: dict | None = None,
+) -> bool:
     tier = runtime_student_tier(runtime_tier)
     root = ensure_live_model_evaluation(profile)["tiers"][tier]
     champion = root["champion"]
@@ -7139,7 +7784,7 @@ def live_challenger_passes(profile: dict, runtime_tier: str, minimum_improvement
         level_margin,
         enough_outcomes,
     )
-    return bool(
+    beats_champion = bool(
         safe
         and outcome_guards
         and preserves_score
@@ -7147,6 +7792,15 @@ def live_challenger_passes(profile: dict, runtime_tier: str, minimum_improvement
         and preserves_task
         and improves
         and bootstrap_confidence >= 0.95
+    )
+    return bool(
+        beats_champion
+        and human_statistics is not None
+        and live_candidate_beats_human(
+            human_statistics,
+            challenger,
+            max(float(minimum_improvement), 0.02),
+        )
     )
 
 
@@ -8390,7 +9044,16 @@ def _pack_temporal_payload(frames: list[bytes], action_history: list[int], durat
     return bytes(payload)
 
 
-def build_temporal_state(frames: list[bytes], action_history: list[int], duration_history: list[float]) -> bytes:
+def build_temporal_state(
+    frames: list[bytes],
+    action_history: list[int],
+    duration_history: list[float],
+    belief_state=None,
+) -> bytes:
+    # Pixel history remains a compact transition cache during migration; the
+    # authoritative semantic graph is persisted separately by its s2: key.
+    if belief_state is not None:
+        canonical_belief_key(belief_state)
     return zlib.compress(_pack_temporal_payload(frames, action_history, duration_history), 6)
 
 
@@ -8539,8 +9202,8 @@ def _temporal_progress_against_future(state: bytes, next_state: bytes | None, fu
 
 def stable_visual_state_key(np, model: dict, state: bytes) -> str:
     frames, _, _ = decode_temporal_state(state)
-    channels = _frame_channels(np, frames[-1])
-    embedding = _quantized_conv_features(np, model, channels).astype(np.float32, copy=False)
+    channels = _perception_frame_input(np, frames[-1])
+    embedding = perception_projection_features(np, model, channels).astype(np.float32, copy=False)
     if len(embedding) < 128 or not np.isfinite(embedding).all():
         raise ValueError("稳定视觉嵌入无效")
     boundaries = np.linspace(0, len(embedding), 129, dtype=np.int32)
@@ -8666,7 +9329,7 @@ _OCR_DIGIT_TEMPLATES = {
 
 
 def recognize_hud_score(frame: bytes) -> tuple[int | None, float]:
-    """Recognize compact numeric HUD text without an external OCR runtime."""
+    """Return a numeric HUD weak label; this function never emits reward."""
     if len(frame) != FEATURE_WIDTH * FEATURE_HEIGHT:
         return None, 0.0
 
@@ -8941,7 +9604,7 @@ def _recognize_status_band(frame: bytes, top: int, bottom: int, bright_text: boo
 
 
 def recognize_terminal_text(frame: bytes) -> tuple[float, float]:
-    """Return conservative multilingual victory/death overlay confidences."""
+    """Return conservative terminal-text weak labels; never direct reward."""
     bands = tuple(dict.fromkeys((
         *_adaptive_hud_bands(frame, 9, 7),
         (FEATURE_HEIGHT // 5, FEATURE_HEIGHT * 4 // 5),
@@ -9034,33 +9697,87 @@ def learned_progress_confidence(model: dict) -> float:
     return max(0.0, min(1.0, confidence))
 
 
-def reward_model_signals(np, model: dict, hidden, next_hidden) -> dict[str, float]:
+def reward_model_signals(
+    np,
+    model: dict,
+    hidden,
+    next_hidden,
+) -> dict[str, object]:
     current = np.asarray(hidden, dtype=np.float32)
-    following = np.asarray(next_hidden if next_hidden is not None else hidden, dtype=np.float32)
-    if current.shape != following.shape or current.shape != (int(model["hidden_size"]),):
+    following = np.asarray(
+        next_hidden if next_hidden is not None else hidden, dtype=np.float32
+    )
+    if current.shape != following.shape or current.shape != (
+        int(model["hidden_size"]),
+    ):
         return {
-            "progress": 0.0, "success_probability": 0.0,
-            "failure_probability": 0.0, "reset_probability": 0.0,
+            "event_probabilities": {name: 0.0 for name in EVENT_NAMES},
+            "current_potential": 0.0,
+            "next_potential": 0.0,
+            "explicit_event_reward": 0.0,
+            "potential_reward": 0.0,
+            "task_reward": 0.0,
             "confidence": 0.0,
+            "progress": 0.0,
+            "success_probability": 0.0,
+            "failure_probability": 0.0,
+            "reset_probability": 0.0,
         }
-    transition = np.tanh(following - 0.35 * current).astype(np.float32, copy=False)
-    logits = np.einsum("h,mho->mo", transition, model["reward_model_w"], optimize=True)
-    logits += model["reward_model_b"]
-    progress_members = np.tanh(logits[:, 0])
-    probability_members = _sigmoid(np, logits[:, 1:4])
-    confidence_members = _sigmoid(np, logits[:, 4])
-    disagreement = float(progress_members.std()) + float(probability_members.std(axis=0).mean())
-    agreement = math.exp(-3.0 * disagreement)
-    steps = max(0, int(model.get("reward_model_training_steps", 0)))
-    maturity = 1.0 - math.exp(-steps / 2048.0)
-    confidence = float(confidence_members.mean()) * agreement * maturity
-    return {
-        "progress": float(np.clip(progress_members.mean(), -1.0, 1.0)),
-        "success_probability": float(np.clip(probability_members[:, 0].mean(), 0.0, 1.0)),
-        "failure_probability": float(np.clip(probability_members[:, 1].mean(), 0.0, 1.0)),
-        "reset_probability": float(np.clip(probability_members[:, 2].mean(), 0.0, 1.0)),
-        "confidence": float(max(0.0, min(1.0, confidence))),
+    transition = np.tanh(following - 0.35 * current).astype(
+        np.float32, copy=False
+    )
+    logits = np.einsum(
+        "h,mho->mo", transition, model["reward_model_w"], optimize=True
+    ) + model["reward_model_b"]
+    event_members = _sigmoid(np, logits[:, : len(EVENT_NAMES)])
+    confidence_members = _sigmoid(np, logits[:, len(EVENT_NAMES)])
+    disagreement = float(event_members.std(axis=0).mean())
+    agreement = math.exp(-4.0 * disagreement)
+    maturity = 1.0 - math.exp(
+        -max(0, int(model.get("reward_model_training_steps", 0))) / 1024.0
+    )
+    confidence = (
+        float(confidence_members.mean())
+        * agreement
+        * (0.10 + 0.90 * maturity)
+    )
+    event_probabilities = {
+        name: float(np.clip(event_members[:, index].mean(), 0.0, 1.0))
+        for index, name in enumerate(EVENT_NAMES)
     }
+    current_potential = predict_progress(np, model, current)
+    next_potential = predict_progress(np, model, following)
+    reward_module = _runtime_module("reward_model")
+    task_reward, explicit_reward, potential_reward = (
+        reward_module.task_reward_from_events_and_potential(
+            event_probabilities,
+            confidence,
+            current_potential,
+            next_potential,
+            0.90,
+        )
+    )
+    return {
+        "event_probabilities": event_probabilities,
+        "current_potential": float(current_potential),
+        "next_potential": float(next_potential),
+        "explicit_event_reward": float(explicit_reward),
+        "potential_reward": float(potential_reward),
+        "task_reward": float(task_reward),
+        "confidence": float(max(0.0, min(1.0, confidence))),
+        "progress": float(event_probabilities["progress"]),
+        "success_probability": float(
+            max(
+                event_probabilities["victory"],
+                event_probabilities["level_complete"],
+            )
+        ),
+        "failure_probability": float(
+            max(event_probabilities["death"], event_probabilities["damage"])
+        ),
+        "reset_probability": float(event_probabilities["reset"]),
+    }
+
 
 
 def train_reward_model_transition(
@@ -9073,27 +9790,32 @@ def train_reward_model_transition(
     gradients: dict[str, object],
 ) -> tuple[float, object]:
     current = np.asarray(hidden, dtype=np.float32)
-    following = np.asarray(next_hidden if next_hidden is not None else hidden, dtype=np.float32)
+    following = np.asarray(
+        next_hidden if next_hidden is not None else hidden, dtype=np.float32
+    )
     transition_pre = following - 0.35 * current
     transition = np.tanh(transition_pre).astype(np.float32, copy=False)
-    task_target = smooth_reward(float(record.get("task_reward", 0.0)))
-    safety = max(0.0, min(1.0, float(record.get("safety_penalty", 0.0))))
-    done = bool(record.get("done", False))
-    trajectory_class = str(record.get("trajectory_class", ""))
-    source = str(record.get("source", ""))
-    success_target = 1.0 if done and trajectory_class == "successful_ai" else 0.0
-    if done and source == "human" and task_target > max(0.05, 0.50 * safety):
-        success_target = max(success_target, 0.75)
-    failure_target = 1.0 if done and trajectory_class == "failed_ai" else 0.0
-    failure_target = max(failure_target, min(1.0, safety))
-    reset_target = 1.0 if done and success_target < 0.50 and failure_target < 0.50 else 0.0
-    weak_strength = max(
-        abs(task_target), safety,
-        success_target, failure_target,
-        0.65 if reset_target > 0.0 else 0.0,
+    weak_metrics = {
+        "score_delta": record.get("score_delta", 0.0),
+        "score_delta_confidence": record.get("score_delta_confidence", 0.0),
+        "health_gain": record.get("health_gain", 0.0),
+        "health_loss": record.get("health_loss", record.get("safety_penalty", 0.0)),
+        "health_confidence": record.get("health_confidence", 0.0),
+        "death_text": record.get("death_text", 0.0),
+        "confirmed_death": record.get("confirmed_death", 0.0),
+        "victory_text": record.get("victory_text", 0.0),
+        "confirmed_victory": record.get("confirmed_victory", 0.0),
+        "level_transition": record.get("level_transition", 0.0),
+        "menu": record.get("menu", 0.0),
+        "confirmed_menu": record.get("confirmed_menu", 0.0),
+        "controllable_novelty": record.get("controllable_novelty", 0.0),
+        "human_progress": record.get("human_progress", 0.0),
+    }
+    target_map, reliability = _runtime_module("reward_model").weak_event_targets(
+        weak_metrics, record
     )
     targets = np.asarray(
-        [task_target, success_target, failure_target, reset_target, weak_strength],
+        [target_map[name] for name in EVENT_NAMES] + [reliability],
         dtype=np.float32,
     )
     total_loss = 0.0
@@ -9101,22 +9823,35 @@ def train_reward_model_transition(
     member_scale = 1.0 / REWARD_MODEL_MEMBERS
     base_weight = max(0.0, min(4.0, float(sample_weight)))
     for member in range(REWARD_MODEL_MEMBERS):
-        bootstrap = base_weight * (0.90 + 0.05 * ((member + int(record.get("step", 0))) % 3))
-        logits = transition @ model["reward_model_w"][member] + model["reward_model_b"][member]
-        predictions = np.empty(REWARD_MODEL_OUTPUTS, dtype=np.float32)
-        predictions[0] = math.tanh(float(logits[0]))
-        predictions[1:] = _sigmoid(np, logits[1:])
-        output_gradient = np.empty(REWARD_MODEL_OUTPUTS, dtype=np.float32)
-        output_gradient[0] = (predictions[0] - targets[0]) * (1.0 - predictions[0] ** 2)
-        output_gradient[1:] = predictions[1:] - targets[1:]
-        output_gradient *= bootstrap * member_scale / REWARD_MODEL_OUTPUTS
-        gradients["reward_model_w"][member] += np.outer(transition, output_gradient).astype(np.float32)
+        bootstrap = base_weight * (
+            0.90 + 0.05 * ((member + int(record.get("step", 0))) % 3)
+        )
+        logits = (
+            transition @ model["reward_model_w"][member]
+            + model["reward_model_b"][member]
+        )
+        predictions = _sigmoid(np, logits).astype(np.float32)
+        output_gradient = (predictions - targets) * (
+            bootstrap * member_scale / REWARD_MODEL_OUTPUTS
+        )
+        gradients["reward_model_w"][member] += np.outer(
+            transition, output_gradient
+        ).astype(np.float32)
         gradients["reward_model_b"][member] += output_gradient
         transition_gradient = model["reward_model_w"][member] @ output_gradient
-        hidden_gradient += -0.35 * transition_gradient * (1.0 - transition * transition)
-        total_loss += 0.5 * bootstrap * float(np.mean((predictions - targets) ** 2)) * member_scale
-    model["reward_model_training_steps"] = int(model.get("reward_model_training_steps", 0)) + 1
+        hidden_gradient += (
+            -0.35 * transition_gradient * (1.0 - transition * transition)
+        )
+        binary_loss = -(
+            targets * np.log(np.maximum(predictions, 1e-7))
+            + (1.0 - targets) * np.log(np.maximum(1.0 - predictions, 1e-7))
+        )
+        total_loss += bootstrap * float(binary_loss.mean()) * member_scale
+    model["reward_model_training_steps"] = int(
+        model.get("reward_model_training_steps", 0)
+    ) + 1
     return float(total_loss), hidden_gradient.astype(np.float32, copy=False)
+
 
 
 def smooth_reward(value: float, scale: float = 2.0) -> float:
@@ -9127,21 +9862,20 @@ def smooth_reward(value: float, scale: float = 2.0) -> float:
 
 
 def compose_reward(metrics: dict, config: dict) -> float:
+    """Compose three critics after the task critic used event+potential shaping."""
     task = float(metrics.get("task_reward", 0.0))
     exploration = float(metrics.get("exploration_reward", 0.0))
     safety = float(metrics.get("safety_penalty", 0.0))
-    if not math.isfinite(task):
-        task = 0.0
-    if not math.isfinite(exploration):
-        exploration = 0.0
-    if not math.isfinite(safety):
-        safety = 0.0
+    task = task if math.isfinite(task) else 0.0
+    exploration = exploration if math.isfinite(exploration) else 0.0
+    safety = safety if math.isfinite(safety) else 0.0
     reward = (
         float(config["task_reward_weight"]) * task
         + float(config["exploration_reward_weight"]) * exploration
         - float(config["safety_penalty_weight"]) * safety
     )
     return smooth_reward(reward)
+
 
 
 def classify_transition_reward(
@@ -9156,288 +9890,248 @@ def classify_transition_reward(
     signal_history: dict[str, list[float]] | None = None,
     human_progress_reference: list[str] | None = None,
     learned_progress: float = 0.0,
-    learned_reward_signals: dict[str, float] | None = None,
+    learned_reward_signals: dict[str, object] | None = None,
+    previous_belief=None,
+    current_belief=None,
+    selected_goal=None,
+    causal_model=None,
+    human_preference_model=None,
 ) -> tuple[float, dict[str, float]]:
-    def configured(value: object, default: float, minimum: float = 0.0, maximum: float = 2.0) -> float:
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError, OverflowError):
-            numeric = default
-        if not math.isfinite(numeric):
-            numeric = default
-        return max(minimum, min(maximum, numeric))
+    """Produce reward only from the learned event model plus potential shaping.
 
-    motion, changed_ratio, flicker = visual_change_metrics(previous_frame, current_frame)
-    color_motion, color_ratio = chroma_change_metrics(
-        previous_chroma_blue, previous_chroma_red, current_chroma_blue, current_chroma_red
+    OCR, terminal text, health bars, black frames and pixel changes are retained
+    exclusively as weak labels/diagnostics for event-model training.
+    """
+    del signal_history
+    motion, changed_ratio, flicker = visual_change_metrics(
+        previous_frame, current_frame
     )
-    world_change, hud_change, side_change = scene_progress_metrics(previous_frame, current_frame)
+    color_motion, color_ratio = chroma_change_metrics(
+        previous_chroma_blue,
+        previous_chroma_red,
+        current_chroma_blue,
+        current_chroma_red,
+    )
+    world_change, hud_change, side_change = scene_progress_metrics(
+        previous_frame, current_frame
+    )
     global_shift = uniform_brightness_change(previous_frame, current_frame)
-    mean_before = sum(previous_frame) / max(1, len(previous_frame)) / 255.0
     mean_after = sum(current_frame) / max(1, len(current_frame)) / 255.0
-    persistence = max(0.0, min(1.0, 1.0 - flicker * 1.8 - global_shift * 0.35))
-    fade_score = max(0.0, min(1.0, (mean_before - mean_after) * 3.5 + global_shift * 0.45))
-    darkness = max(0.0, 0.12 - mean_after) / 0.12
-
-    # Generic HUD motion remains diagnostic only. Task reward is driven by
-    # explicit score deltas, terminal text, and confirmed level transitions.
-    raw_score = max(0.0, hud_change - world_change * 0.65 - global_shift * 0.20)
-    raw_score *= max(0.0, min(1.0, persistence + color_ratio * 0.5))
-    score_signal = min(1.0, raw_score * 8.0)
+    weak_black = max(0.0, min(1.0, (0.10 - mean_after) / 0.10))
     previous_score, previous_score_confidence = recognize_hud_score(previous_frame)
     current_score, current_score_confidence = recognize_hud_score(current_frame)
-    ocr_score_progress = 0.0
-    reliable_score_progress = 0.0
     score_delta = 0.0
     score_delta_confidence = 0.0
-    if (
-        previous_score is not None
-        and current_score is not None
-        and min(previous_score_confidence, current_score_confidence) >= 0.72
-    ):
-        score_delta = float(int(current_score) - int(previous_score))
-        score_delta_confidence = min(previous_score_confidence, current_score_confidence)
-        score_scale = max(1.0, abs(float(previous_score)) * 0.02)
-        ocr_score_progress = math.tanh(float(score_delta) / score_scale)
-        reliable_score_progress = ocr_score_progress * min(previous_score_confidence, current_score_confidence)
-        if score_delta > 0:
-            score_signal = max(score_signal, min(previous_score_confidence, current_score_confidence))
-
+    if previous_score is not None and current_score is not None:
+        score_delta = float(current_score - previous_score)
+        score_delta_confidence = min(
+            float(previous_score_confidence), float(current_score_confidence)
+        )
     victory_text, death_text = recognize_terminal_text(current_frame)
-    previous_health, previous_health_confidence, previous_health_anchor = recognize_hud_health(previous_frame)
-    current_health, current_health_confidence, current_health_anchor = recognize_hud_health(current_frame)
+    previous_health, previous_health_confidence, previous_health_anchor = (
+        recognize_hud_health(previous_frame)
+    )
+    current_health, current_health_confidence, current_health_anchor = (
+        recognize_hud_health(current_frame)
+    )
     health_loss = 0.0
     health_gain = 0.0
     if (
         previous_health is not None
         and current_health is not None
-        and min(previous_health_confidence, current_health_confidence) >= 0.52
-        and abs(previous_health_anchor - current_health_anchor) <= 0.12
+        and min(previous_health_confidence, current_health_confidence) >= 0.45
+        and abs(previous_health_anchor - current_health_anchor) <= 0.15
     ):
-        relative_health_change = (float(current_health) - float(previous_health)) / max(0.08, float(previous_health))
-        health_loss = max(0.0, min(1.0, -relative_health_change))
-        health_gain = max(0.0, min(1.0, relative_health_change))
+        delta = float(current_health) - float(previous_health)
+        health_loss = max(0.0, min(1.0, -delta / max(0.08, float(previous_health))))
+        health_gain = max(0.0, min(1.0, delta / max(0.08, float(previous_health))))
 
-    death_signal = max(darkness, fade_score * 0.9, death_text)
-    if mean_before > 0.20 and mean_after < 0.08:
-        death_signal = max(death_signal, 0.85)
-    menu_signal = min(
-        1.0,
-        max(0.0, global_shift - world_change * 1.8)
-        * max(0.0, 1.0 - changed_ratio * 0.5)
-        * 3.0,
+    current_key = frame_hash(
+        current_frame, current_chroma_blue, current_chroma_red
     )
-    current_key = frame_hash(current_frame, current_chroma_blue, current_chroma_red)
-    returned = 1.0 if recent_hash_match(current_key, recent_state_keys[-8:], 5) else 0.0
-    jitter_signal = min(
-        1.0,
-        flicker * 1.8
-        + returned * max(0.0, changed_ratio - 0.01)
-        + max(0.0, side_change - world_change) * 0.8,
-    )
-    meaningful_change = min(1.0, world_change * 4.0 + color_motion * 2.0 + motion * 1.5)
-    translation_dx, translation_dy, translation_confidence = estimate_visual_translation(
-        previous_frame,
-        current_frame,
-        int(config.get("translation_search_radius", 2)),
-    )
-    spatial_progress = min(
-        1.0,
-        translation_confidence
-        * (abs(translation_dx) + abs(translation_dy))
-        / max(1.0, float(config.get("translation_search_radius", 2))),
-    )
-
-    scene_cut_candidate = min(
-        1.0,
-        max(0.0, world_change - 0.10)
-        * 4.0
-        * max(0.0, 1.0 - min(1.0, hud_change * 3.0))
-        * max(0.0, 1.0 - min(1.0, fade_score + darkness)),
-    )
-    prior_scene_cuts = list((signal_history or {}).get("scene_cut", []))
-    visual_level_candidate = (
-        min(1.0, float(prior_scene_cuts[-1]))
-        if prior_scene_cuts
-        and float(prior_scene_cuts[-1]) >= 0.58
-        and world_change <= 0.075
-        and global_shift <= 0.18
-        and death_signal < 0.50
-        and menu_signal < 0.58
-        else 0.0
-    )
-
-    score_history = _append_signal_history(signal_history, "score", max(0.0, reliable_score_progress))
-    death_history = _append_signal_history(signal_history, "death", death_signal)
-    menu_history = _append_signal_history(signal_history, "menu", menu_signal)
-    victory_history = _append_signal_history(signal_history, "victory", victory_text)
-    death_text_history = _append_signal_history(signal_history, "death_text", death_text)
-    _append_signal_history(signal_history, "scene_cut", scene_cut_candidate)
-    confirmed_score = _confirmed_persistent_signal(score_history, 0.55, 0.35)
-    confirmed_victory = _confirmed_persistent_signal(victory_history, 0.62, 0.46)
-    confirmed_death_text = _confirmed_persistent_signal(death_text_history, 0.62, 0.46)
-    # A fade, scene cut, or dark frame is never an explicit terminal label.
-    # Only recognized failure text may terminate an episode or weaken a human
-    # demonstration.  Visual candidates remain exploration/safety diagnostics.
-    confirmed_death = 1.0 if confirmed_death_text > 0.0 else 0.0
-    confirmed_menu = _confirmed_persistent_signal(
-        menu_history,
-        0.62,
-        0.42,
-    )
-    # A level transition is confirmed in two phases: a credible scene cut in
-    # the previous frame followed by a stable, non-terminal scene now.
-    confirmed_level_transition = (
-        float(visual_level_candidate)
-        if (
-            visual_level_candidate >= 0.58
-            and confirmed_death < 0.50
-            and confirmed_menu < 0.58
-        )
-        else 0.0
-    )
-
+    loop_signal = 1.0 if recent_hash_match(current_key, recent_state_keys[-8:], 5) else 0.0
     human_progress = 0.0
     references = human_progress_reference or []
     if references:
-        previous_hash = frame_hash(previous_frame, previous_chroma_blue, previous_chroma_red)
-        previous_similarity = max(_perceptual_hash_similarity(previous_hash, target) for target in references)
-        current_similarity = max(_perceptual_hash_similarity(current_key, target) for target in references)
-        human_progress = max(-1.0, min(1.0, (current_similarity - previous_similarity) * 4.0))
+        previous_key = frame_hash(
+            previous_frame, previous_chroma_blue, previous_chroma_red
+        )
+        before_similarity = max(
+            _perceptual_hash_similarity(previous_key, target)
+            for target in references
+        )
+        after_similarity = max(
+            _perceptual_hash_similarity(current_key, target)
+            for target in references
+        )
+        human_progress = max(
+            -1.0, min(1.0, (after_similarity - before_similarity) * 4.0)
+        )
 
-    controllable_novelty_reward = (
-        meaningful_change
-        * persistence
-        * max(0.0, 1.0 - min(1.0, flicker * 2.0))
-        * max(0.0, 1.0 - min(1.0, global_shift * 2.5))
-        * (1.0 - returned)
-    )
-    cycle_penalty = min(1.0, max(returned, jitter_signal * 0.85, confirmed_menu * 0.75))
-    learned_progress_value = max(-1.0, min(1.0, float(learned_progress)))
-    death_penalty = max(0.0, min(1.0, max(confirmed_death, death_signal * 0.25)))
+    weak_metrics = {
+        "score_delta": score_delta,
+        "score_delta_confidence": score_delta_confidence,
+        "ocr_score_confidence": current_score_confidence,
+        "health_gain": health_gain,
+        "health_loss": health_loss,
+        "health_confidence": current_health_confidence,
+        "death_text": death_text,
+        "victory_text": victory_text,
+        "level_transition": max(0.0, world_change - hud_change),
+        "menu": max(0.0, global_shift - world_change),
+        "controllable_novelty": max(0.0, min(1.0, motion + color_motion)),
+        "human_progress": human_progress,
+    }
+    weak_targets, weak_reliability = _runtime_module(
+        "reward_model"
+    ).weak_event_targets(weak_metrics)
 
-    score_weight = configured(config.get("score_signal_weight"), 0.55, 0.0, 1.5)
-    visual_reward_weight = configured(config.get("visual_change_reward_weight"), 0.025, 0.0, 0.10)
-    learned_outcome_weight = configured(
-        config.get("heuristic_task_aux_weight"),
-        0.12,
-        0.0,
-        0.5,
-    )
-    # Learned progress is signed: regress is penalized, but early negative
-    # predictions are attenuated to reduce damage from an immature model.
-    reward_signals = learned_reward_signals or {}
-    fallback_confidence = 0.0
-    learned_confidence = max(
+    learned = learned_reward_signals or {}
+    event_probabilities = dict(learned.get("event_probabilities", {}))
+    if not event_probabilities:
+        event_probabilities = {name: 0.0 for name in EVENT_NAMES}
+        event_probabilities["progress"] = max(
+            0.0, min(1.0, float(learned.get("progress", learned_progress)))
+        )
+        event_probabilities["victory"] = max(
+            0.0, min(1.0, float(learned.get("success_probability", 0.0)))
+        )
+        event_probabilities["death"] = max(
+            0.0, min(1.0, float(learned.get("failure_probability", 0.0)))
+        )
+        event_probabilities["reset"] = max(
+            0.0, min(1.0, float(learned.get("reset_probability", 0.0)))
+        )
+    confidence = max(
         0.0,
         min(
             1.0,
             float(
-                reward_signals.get(
-                    "potential_confidence",
-                    reward_signals.get("confidence", fallback_confidence),
+                learned.get(
+                    "confidence",
+                    learned.get("potential_confidence", 0.0),
                 )
             ),
         ),
     )
-    learned_outcome_confidence = max(
+    gamma = max(0.1, min(0.99, float(config.get("planning_discount", 0.90))))
+    current_potential = float(
+        learned.get("current_potential", 0.0)
+    )
+    next_potential = float(
+        learned.get("next_potential", current_potential + float(learned_progress))
+    )
+    task_reward, explicit_event_reward, potential_reward = _runtime_module(
+        "reward_model"
+    ).task_reward_from_events_and_potential(
+        event_probabilities,
+        confidence,
+        current_potential,
+        next_potential,
+        gamma,
+    )
+    minimum_confidence = max(
         0.0,
-        min(
-            1.0,
-            float(reward_signals.get("outcome_confidence", learned_confidence)),
-        ),
+        min(1.0, float(config.get("event_reward_min_confidence", 0.35))),
     )
-    learned_success = max(0.0, min(1.0, float(reward_signals.get("success_probability", 0.0))))
-    learned_failure = max(0.0, min(1.0, float(reward_signals.get("failure_probability", 0.0))))
-    signed_progress = (
-        learned_progress_value
-        if learned_progress_value >= 0.0 or learned_confidence >= 0.55
-        else 0.25 * learned_progress_value
+    trusted = confidence >= minimum_confidence
+    confirmed_death = (
+        float(event_probabilities.get("death", 0.0)) if trusted else 0.0
     )
-    potential_scale = configured(
-        config.get("progress_reward_scale"), 1.0, 0.05, 4.0
+    confirmed_victory = (
+        float(event_probabilities.get("victory", 0.0)) if trusted else 0.0
     )
-    potential_reward = potential_scale * learned_confidence * signed_progress
-    learned_outcome = 0.55 * learned_success - 0.55 * learned_failure
-    learned_task_reward = potential_reward + (
-        learned_outcome_weight * learned_outcome * learned_outcome_confidence
+    confirmed_level = (
+        float(event_probabilities.get("level_complete", 0.0)) if trusted else 0.0
     )
-    task_reward = (
-        score_weight * reliable_score_progress
-        + 3.00 * confirmed_victory
-        - 3.00 * confirmed_death
-        + 1.50 * confirmed_level_transition
-        + learned_task_reward
+    confirmed_menu = (
+        float(event_probabilities.get("menu", 0.0)) if trusted else 0.0
     )
     exploration_reward = (
-        visual_reward_weight * controllable_novelty_reward
-        + 0.01 * visual_level_candidate
-        + 0.02 * max(0.0, learned_progress_value)
-        + 0.03 * max(0.0, human_progress)
+        confidence
+        * max(0.0, float(event_probabilities.get("progress", 0.0)))
+        * 0.20
     )
-    safety_penalty = (
-        0.68 * death_penalty
-        + 0.18 * health_loss
-        + 0.09 * cycle_penalty
-        + 0.05 * jitter_signal
+    safety_penalty = confidence * max(
+        float(event_probabilities.get("death", 0.0)),
+        0.65 * float(event_probabilities.get("damage", 0.0)),
+        0.35 * float(event_probabilities.get("reset", 0.0)),
     )
     metrics = {
-        "score": float(score_signal),
-        "confirmed_score": float(confirmed_score),
+        "task_reward": float(max(-4.0, min(4.0, task_reward))),
+        "exploration_reward": float(max(0.0, min(1.0, exploration_reward))),
+        "safety_penalty": float(max(0.0, min(2.0, safety_penalty))),
+        "explicit_event_reward": float(explicit_event_reward),
+        "potential_reward": float(potential_reward),
+        "current_potential": float(current_potential),
+        "next_potential": float(next_potential),
+        "learned_reward_confidence": float(confidence),
+        "confirmed_death": float(confirmed_death),
+        "confirmed_victory": float(confirmed_victory),
+        "level_transition": float(confirmed_level),
+        "confirmed_menu": float(confirmed_menu),
+        "learned_progress": float(event_probabilities.get("progress", 0.0)),
+        "learned_success_probability": float(event_probabilities.get("victory", 0.0)),
+        "learned_failure_probability": float(event_probabilities.get("death", 0.0)),
+        "learned_reset_probability": float(event_probabilities.get("reset", 0.0)),
+        "weak_label_reliability": float(weak_reliability),
+        "weak_score_gain": float(weak_targets["score_gain"]),
+        "weak_health_gain": float(weak_targets["health_gain"]),
+        "weak_damage": float(weak_targets["damage"]),
+        "weak_death": float(weak_targets["death"]),
+        "weak_victory": float(weak_targets["victory"]),
+        "weak_level_complete": float(weak_targets["level_complete"]),
+        "weak_menu": float(weak_targets["menu"]),
+        "weak_black": float(weak_black),
         "ocr_score": float(current_score) if current_score is not None else -1.0,
         "ocr_score_confidence": float(current_score_confidence),
-        "ocr_score_progress": float(ocr_score_progress),
-        "reliable_score_progress": float(reliable_score_progress),
         "score_delta": float(score_delta),
         "score_delta_confidence": float(score_delta_confidence),
         "victory_text": float(victory_text),
-        "confirmed_victory": float(confirmed_victory),
-        "level_transition": float(confirmed_level_transition),
-        "visual_level_candidate": float(visual_level_candidate),
-        "scene_cut": float(scene_cut_candidate),
+        "death_text": float(death_text),
         "health": float(current_health) if current_health is not None else -1.0,
         "health_confidence": float(current_health_confidence),
         "health_loss": float(health_loss),
         "health_gain": float(health_gain),
-        "death": float(death_signal),
-        "death_text": float(death_text),
-        "death_penalty": float(death_penalty),
-        "menu": float(menu_signal),
-        "confirmed_death": float(confirmed_death),
-        "confirmed_menu": float(confirmed_menu),
         "human_progress": float(human_progress),
-        "learned_progress": float(learned_progress_value),
-        "learned_progress_signed": float(signed_progress),
-        "learned_reward_confidence": float(learned_confidence),
-        "learned_outcome_confidence": float(learned_outcome_confidence),
-        "learned_success_probability": float(learned_success),
-        "learned_failure_probability": float(learned_failure),
-        "potential_reward": float(potential_reward),
-        "learned_task_reward": float(learned_task_reward),
-        "controllable_novelty": float(controllable_novelty_reward),
-        "persistent_event": float(
-            max(
-                confirmed_score,
-                confirmed_victory,
-                confirmed_level_transition,
-                controllable_novelty_reward * persistence,
-            )
-        ),
-        "task_reward": float(max(-4.0, min(4.0, task_reward))),
-        "exploration_reward": float(max(0.0, min(1.0, exploration_reward))),
-        "safety_penalty": float(max(0.0, min(2.0, safety_penalty))),
-        "cycle": float(cycle_penalty),
-        "jitter": float(jitter_signal),
-        "visual": float(meaningful_change),
-        "persistence": float(persistence),
+        "visual": float(motion),
+        "color_motion": float(color_motion),
+        "changed_ratio": float(changed_ratio),
+        "color_ratio": float(color_ratio),
         "flicker": float(flicker),
-        "fade": float(fade_score),
         "global_shift": float(global_shift),
-        "spatial_progress": float(spatial_progress),
-        "translation_confidence": float(translation_confidence),
+        "world_change": float(world_change),
+        "hud_change": float(hud_change),
+        "side_change": float(side_change),
+        "cycle": float(loop_signal),
+        "controllable_novelty": 0.0,
+        "persistent_event": float(
+            max(confirmed_death, confirmed_victory, confirmed_level)
+        ),
         "state_key": current_key,
     }
+    for name in EVENT_NAMES:
+        metrics[f"event_{name}"] = float(event_probabilities.get(name, 0.0))
+    if previous_belief is not None and current_belief is not None:
+        active_goal = selected_goal or active_goal_hypothesis(current_belief)
+        semantic_parts = goal_conditioned_reward(
+            previous=previous_belief,
+            current=current_belief,
+            selected_goal=active_goal,
+            causal_model=causal_model,
+            human_preference_model=human_preference_model,
+            config=config,
+        )
+        metrics.update(semantic_parts)
+        metrics["active_goal"] = str(getattr(active_goal, "name", "unknown_goal"))
+        metrics["previous_belief_key"] = canonical_belief_key(previous_belief)
+        metrics["current_belief_key"] = canonical_belief_key(current_belief)
+        metrics["belief_uncertainty"] = float(current_belief.uncertainty)
+        metrics["discovered_event_count"] = float(
+            len(current_belief.raw_features.get("discovered_events", ()))
+        )
     return compose_reward(metrics, config), metrics
+
 
 def load_human_progress_reference(path: Path, limit: int = 512) -> list[str]:
     if not path.exists():
@@ -9681,6 +10375,59 @@ def load_transition_graph(
     return graph
 
 
+def ensure_semantic_database_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS belief_states (
+            state_key TEXT PRIMARY KEY,
+            scene_embedding BLOB NOT NULL,
+            semantic_json TEXT NOT NULL,
+            uncertainty REAL NOT NULL,
+            updated_at TEXT NOT NULL
+        )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS causal_rules (
+            cause TEXT NOT NULL,
+            preconditions TEXT NOT NULL,
+            effect TEXT NOT NULL,
+            probability REAL NOT NULL,
+            observations INTEGER NOT NULL,
+            interventions INTEGER NOT NULL,
+            PRIMARY KEY (cause, preconditions, effect)
+        )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS learned_skills (
+            skill_id TEXT PRIMARY KEY,
+            preconditions TEXT NOT NULL,
+            goal_condition TEXT NOT NULL,
+            policy_blob BLOB NOT NULL,
+            success_rate REAL NOT NULL,
+            use_count INTEGER NOT NULL
+        )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS human_decisions (
+            episode_id TEXT NOT NULL,
+            step INTEGER NOT NULL,
+            belief_state_before TEXT NOT NULL,
+            action_json TEXT NOT NULL,
+            belief_state_after TEXT NOT NULL,
+            affected_entities TEXT NOT NULL,
+            relation_changes TEXT NOT NULL,
+            candidate_subgoal TEXT NOT NULL,
+            goal_progress_delta REAL NOT NULL,
+            prediction_error REAL NOT NULL,
+            human_action_surprise REAL NOT NULL,
+            PRIMARY KEY (episode_id, step)
+        )"""
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_human_decisions_surprise "
+        "ON human_decisions(human_action_surprise DESC,prediction_error DESC)"
+    )
+
+
 def ensure_database(path: Path) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     rebuilt = False
@@ -9830,6 +10577,7 @@ def ensure_database(path: Path) -> bool:
                 ) WITHOUT ROWID"""
             )
             connection.execute("CREATE INDEX IF NOT EXISTS idx_human_state_actions_rank ON human_state_actions(demonstrations DESC, updated_at DESC)")
+            ensure_semantic_database_tables(connection)
             legacy = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='samples'").fetchone()
             if legacy:
                 rows = connection.execute("SELECT id,source,action,reward,feature_dim,feature FROM samples ORDER BY id").fetchall()
@@ -9932,6 +10680,7 @@ def ensure_database(path: Path) -> bool:
             connection.execute("CREATE INDEX idx_state_values_rank ON state_values(visits DESC, updated_at DESC)")
             connection.execute("CREATE TABLE human_state_actions(state TEXT NOT NULL,action INTEGER NOT NULL,demonstrations INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(state,action)) WITHOUT ROWID")
             connection.execute("CREATE INDEX idx_human_state_actions_rank ON human_state_actions(demonstrations DESC, updated_at DESC)")
+            ensure_semantic_database_tables(connection)
             connection.execute(f"PRAGMA user_version={DATABASE_SCHEMA}")
             connection.commit()
         finally:
@@ -9954,6 +10703,24 @@ def verify_experience_database(path: Path, action_count: int, scan_limit: int, s
             raise sqlite3.DatabaseError("经验数据库 schema 无效")
         if [str(row[0]) for row in connection.execute("PRAGMA integrity_check").fetchall()] != ["ok"]:
             raise sqlite3.DatabaseError("经验数据库完整性失败")
+        semantic_columns = {
+            "belief_states": ("state_key", "scene_embedding", "semantic_json", "uncertainty", "updated_at"),
+            "causal_rules": ("cause", "preconditions", "effect", "probability", "observations", "interventions"),
+            "learned_skills": ("skill_id", "preconditions", "goal_condition", "policy_blob", "success_rate", "use_count"),
+            "human_decisions": (
+                "episode_id", "step", "belief_state_before", "action_json",
+                "belief_state_after", "affected_entities", "relation_changes",
+                "candidate_subgoal", "goal_progress_delta", "prediction_error",
+                "human_action_surprise",
+            ),
+        }
+        for table_name, expected_columns in semantic_columns.items():
+            actual_columns = tuple(
+                str(row[1])
+                for row in connection.execute(f"PRAGMA table_info({table_name})")
+            )
+            if actual_columns != expected_columns:
+                raise sqlite3.DatabaseError("语义经验数据库结构无效")
         cursor = connection.execute(
             "SELECT episode_id,step,source,state,action,reward,next_state,done,priority,"
             "task_reward,exploration_reward,safety_penalty,"
@@ -10244,6 +11011,8 @@ def parse_state_memory_key(state: str) -> tuple[int, int, int] | None:
     if STATE_MEMORY_KEY_PATTERN.fullmatch(state) is None:
         return None
     try:
+        if state.startswith("s2:"):
+            return int(state[3:11], 16), 0, 0
         return int(state[:8], 16), int(state[9], 16), int(state[11], 16)
     except ValueError:
         return None
@@ -11362,64 +12131,271 @@ def _spatial_branch_features(np, feature: bytes):
     return result
 
 
-def _frame_channels(np, feature: bytes):
+def _runtime_module(name: str):
+    """Load a verified local runtime component from the desktop app tree."""
+    module_name = f"runtime.{str(name).strip()}"
+    for root in (SOURCE_SCRIPT_PATH.parent, APP_DIR):
+        value = str(root)
+        if value and value not in sys.path:
+            sys.path.insert(0, value)
+    importlib.invalidate_caches()
+    try:
+        return importlib.import_module(module_name)
+    except Exception as error:
+        raise RuntimeError("运行模块缺失或损坏，请先点击“文件”。") from error
+
+
+def game_perception_features(
+    np,
+    model: dict,
+    frame,
+    previous_tracks: dict | None,
+) -> tuple[object, dict, dict]:
+    module = _runtime_module("understanding")
+    model["_student_model_path"] = str(GAME_VISION_MODEL_PATH)
+    model["_teacher_model_path"] = str(GAME_VISION_TEACHER_MODEL_PATH)
+    model["_text_recognition_model_path"] = str(TEXT_RECOGNITION_MODEL_PATH)
+    model["_semantic_encoder_model_path"] = str(SEMANTIC_ENCODER_MODEL_PATH)
+    return module.game_perception_features(np, model, frame, previous_tracks)
+
+
+def estimate_camera_motion(previous_tokens, current_tokens):
+    return _runtime_module("perception").estimate_camera_motion(
+        previous_tokens, current_tokens
+    )
+
+
+def match_object_slots(previous_slots, current_slots):
+    return _runtime_module("perception").match_object_slots(
+        previous_slots, current_slots
+    )
+
+
+def controllable_object_probability(track_history, action_history):
+    return _runtime_module("perception").controllable_object_probability(
+        track_history, action_history
+    )
+
+
+def _perception_frame_input(np, feature: bytes):
+    """Decode stored experience into game-native RGB/motion input tensors."""
     feature = normalize_feature_bytes(feature)
     pixels = FEATURE_WIDTH * FEATURE_HEIGHT
     raw = np.frombuffer(feature[:BASE_FEATURE_DIM], dtype=np.uint8).astype(np.float32)
-    image = raw[:pixels].reshape(FEATURE_HEIGHT, FEATURE_WIDTH) / 255.0
+    luminance = raw[:pixels].reshape(FEATURE_HEIGHT, FEATURE_WIDTH) / 255.0
     difference = raw[pixels:pixels * 2].reshape(FEATURE_HEIGHT, FEATURE_WIDTH) / 255.0
-    signed = np.clip((raw[pixels * 2:pixels * 3] - 128.0) / 127.0, -1.0, 1.0).reshape(FEATURE_HEIGHT, FEATURE_WIDTH)
+    signed_change = np.clip(
+        (raw[pixels * 2:pixels * 3] - 128.0) / 127.0, -1.0, 1.0
+    ).reshape(FEATURE_HEIGHT, FEATURE_WIDTH)
     start = pixels * 3
-    blue_rgb = raw[start:start + COLOR_PIXELS].reshape(COLOR_HEIGHT, COLOR_WIDTH)
-    red_rgb = raw[start + COLOR_PIXELS:start + COLOR_FEATURE_DIM].reshape(COLOR_HEIGHT, COLOR_WIDTH)
-    green_rgb = np.clip(
-        (image * 255.0 * 256.0 - 77.0 * red_rgb - 29.0 * blue_rgb) / 150.0,
+    blue = raw[start:start + COLOR_PIXELS].reshape(COLOR_HEIGHT, COLOR_WIDTH)
+    red = raw[start + COLOR_PIXELS:start + COLOR_FEATURE_DIM].reshape(COLOR_HEIGHT, COLOR_WIDTH)
+    green = np.clip(
+        (luminance * 255.0 * 256.0 - 77.0 * red - 29.0 * blue) / 150.0,
         0.0,
         255.0,
     )
-    red = red_rgb / 127.5 - 1.0
-    green = green_rgb / 127.5 - 1.0
-    blue = blue_rgb / 127.5 - 1.0
-    centered = np.clip((image - float(image.mean())) / max(0.08, float(image.std()) * 3.0), -1.0, 1.0)
-    hud_mask = np.zeros_like(image, dtype=np.float32)
-    hud_rows = max(2, FEATURE_HEIGHT // 6)
-    hud_columns = max(2, FEATURE_WIDTH // 12)
-    hud_mask[:hud_rows, :] = 1.0
-    hud_mask[-max(2, FEATURE_HEIGHT // 8):, :] = 1.0
-    hud_mask[:, :hud_columns] = np.maximum(hud_mask[:, :hud_columns], 0.55)
-    hud_mask[:, -hud_columns:] = np.maximum(hud_mask[:, -hud_columns:], 0.55)
-    hud_channel = centered * hud_mask
-    base = np.stack(
-        (
-            red,
-            green,
-            blue,
-            np.sqrt(np.maximum(0.0, difference)),
-            signed,
-            hud_channel,
-        ),
-        axis=0,
-    ).astype(np.float32)
+    rgb = np.stack((red, green, blue), axis=0) / 127.5 - 1.0
     spatial_context = feature[BASE_FEATURE_DIM:]
-    high_rgb = None
     if len(spatial_context) == SPATIAL_CONTEXT_DIM:
         full_bytes = SPATIAL_CONTEXT_CHANNELS * SPATIAL_FULL_PIXELS
-        full = np.frombuffer(
-            spatial_context[:full_bytes], dtype=np.uint8
-        ).astype(np.float32).reshape(
+        full = np.frombuffer(spatial_context[:full_bytes], dtype=np.uint8).astype(
+            np.float32
+        ).reshape(
             SPATIAL_CONTEXT_CHANNELS,
             SPATIAL_FULL_HEIGHT,
             SPATIAL_FULL_WIDTH,
         )
         if bool(np.any(full)):
-            high_rgb = full / 127.5 - 1.0
-    if high_rgb is None:
-        high_rgb = base[:3]
+            rgb = full / 127.5 - 1.0
     return {
-        "base": base,
-        "spatial": _spatial_branch_features(np, feature),
-        "semantic_rgb": high_rgb.astype(np.float32, copy=False),
+        "rgb": rgb.astype(np.float32, copy=False),
+        "luminance": luminance.astype(np.float32, copy=False),
+        "difference": difference.astype(np.float32, copy=False),
+        "signed_change": signed_change.astype(np.float32, copy=False),
+        "feature_key": hashlib.blake2b(feature, digest_size=16).digest(),
     }
+
+
+def understand_feature(
+    np,
+    model: dict,
+    feature: bytes,
+    previous_belief=None,
+    action_id: int = -1,
+    existing_belief=None,
+):
+    """Create the explicit semantic state used by reward, memory and planning."""
+    model["_perception_current_action"] = int(action_id)
+    belief = existing_belief
+    if belief is None:
+        frame = _perception_frame_input(np, feature)
+        belief = _runtime_module("understanding").understand_frame(
+            np=np,
+            model=model,
+            frame=frame,
+            previous_belief=previous_belief,
+        )
+    normalized = normalize_feature_bytes(feature)
+    grayscale = normalized[: FEATURE_WIDTH * FEATURE_HEIGHT]
+    score, score_confidence = recognize_hud_score(grayscale)
+    health, health_confidence, _ = recognize_hud_health(grayscale)
+    victory_text, death_text = recognize_terminal_text(grayscale)
+    if score is not None and score_confidence >= 0.45:
+        belief.hud_facts["score"] = float(score)
+        belief.hud_facts["score_confidence"] = float(score_confidence)
+        belief.visible_text.append(f"score:{score}")
+    if health is not None and health_confidence >= 0.45:
+        belief.hud_facts["health"] = float(health)
+        belief.hud_facts["health_confidence"] = float(health_confidence)
+    if victory_text >= 0.55:
+        belief.visible_text.append("victory")
+    if death_text >= 0.55:
+        belief.visible_text.append("death")
+    belief.raw_features["discovered_event_min_confidence"] = max(
+        0.0,
+        min(
+            1.0,
+            float(model.get("_discovered_event_min_confidence", 0.55)),
+        ),
+    )
+    belief.visible_text = list(dict.fromkeys(str(value) for value in belief.visible_text))[-32:]
+    if (
+        previous_belief is not None
+        and previous_belief.visible_text != belief.visible_text
+        and not belief.raw_features.get("discovered_events")
+    ):
+        belief.raw_features["discovered_events"] = _runtime_module(
+            "understanding"
+        ).discover_events(np, model, previous_belief, belief)
+    belief.goal_hypotheses = _runtime_module("goal_model").infer_goal_hypotheses(
+        belief,
+        previous_belief,
+    )
+    model["_latest_belief"] = belief
+    return belief
+
+
+def canonical_belief_key(state) -> str:
+    return str(_runtime_module("understanding").canonical_belief_key(state))
+
+
+def belief_state_json(state) -> str:
+    payload = _runtime_module("understanding").belief_to_dict(state)
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def goal_conditioned_reward(
+    previous,
+    current,
+    selected_goal,
+    causal_model,
+    human_preference_model,
+    config: dict,
+) -> dict[str, float]:
+    return _runtime_module("reward_model").goal_conditioned_reward(
+        previous,
+        current,
+        selected_goal,
+        causal_model,
+        human_preference_model,
+        config,
+    )
+
+
+def active_goal_hypothesis(state, previous_goal=None):
+    return _runtime_module("goal_model").select_active_goal(state, previous_goal)
+
+
+def plan_with_understanding(
+    belief,
+    goal,
+    skill_library,
+    causal_model,
+    world_model,
+    safety_model,
+    budget,
+):
+    return _runtime_module("planner").plan_with_understanding(
+        belief,
+        goal,
+        skill_library,
+        causal_model,
+        world_model,
+        safety_model,
+        budget,
+    )
+
+
+def load_semantic_runtime_state(path: Path):
+    ensure_database(path)
+    connection = sqlite3.connect(path, timeout=30)
+    memory_module = _runtime_module("memory")
+    memory_module.ensure_semantic_tables(connection)
+    causal_store = memory_module.load_causal_rules(connection)
+    skill_library = memory_module.load_skill_library(connection)
+    connection.commit()
+    return connection, causal_store, skill_library
+
+
+def load_human_preference_model(connection):
+    rows = connection.execute(
+        "SELECT candidate_subgoal,goal_progress_delta,human_action_surprise,"
+        "prediction_error FROM human_decisions "
+        "ORDER BY human_action_surprise DESC,prediction_error DESC LIMIT 4096"
+    ).fetchall()
+    return _runtime_module("reward_model").SemanticHumanPreferenceModel(rows)
+
+
+def save_semantic_transition(
+    connection,
+    causal_store,
+    previous_belief,
+    action: dict,
+    current_belief,
+    *,
+    intervention: bool,
+) -> None:
+    memory_module = _runtime_module("memory")
+    memory_module.upsert_belief_state(connection, previous_belief)
+    causal_store.observe_transition(
+        previous_belief,
+        action,
+        current_belief,
+        bool(intervention),
+    )
+    current_belief.causal_rules = causal_store.snapshot()
+    memory_module.upsert_belief_state(connection, current_belief)
+    memory_module.save_causal_rules(connection, causal_store)
+
+
+def record_human_semantic_decision(
+    connection,
+    episode_id: str,
+    step: int,
+    previous_belief,
+    action: dict,
+    current_belief,
+    selected_goal,
+    goal_progress_delta: float,
+    prediction_error: float,
+    action_probability: float,
+) -> float:
+    return float(
+        _runtime_module("memory").save_human_decision(
+            connection,
+            episode_id,
+            step,
+            previous_belief,
+            action,
+            current_belief,
+            str(getattr(selected_goal, "name", "unknown_goal")),
+            goal_progress_delta,
+            prediction_error,
+            action_probability,
+        )
+    )
+
 
 
 def _synchronize_quantized_conv_weights(np, model: dict) -> None:
@@ -11451,135 +12427,56 @@ def base_visual_encoder_output_dim() -> int:
     )
 
 
-def _semantic_model_source(np, base_frame):
-    session = semantic_vision_session()
-    if session is None:
-        return None
-    rgb = np.clip(
-        (np.asarray(base_frame, dtype=np.float32)[:3] + 1.0) * 0.5,
-        0.0,
-        1.0,
-    )
-    source_height, source_width = rgb.shape[1:]
-    y = np.linspace(0.0, source_height - 1.0, SEMANTIC_INPUT_SIZE)
-    x = np.linspace(0.0, source_width - 1.0, SEMANTIC_INPUT_SIZE)
-    y0 = np.floor(y).astype(np.int32)
-    x0 = np.floor(x).astype(np.int32)
-    y1 = np.minimum(source_height - 1, y0 + 1)
-    x1 = np.minimum(source_width - 1, x0 + 1)
-    wy = (y - y0).astype(np.float32)
-    wx = (x - x0).astype(np.float32)
-    top = (
-        rgb[:, y0[:, None], x0[None, :]] * (1.0 - wx)[None, None, :]
-        + rgb[:, y0[:, None], x1[None, :]] * wx[None, None, :]
-    )
-    bottom = (
-        rgb[:, y1[:, None], x0[None, :]] * (1.0 - wx)[None, None, :]
-        + rgb[:, y1[:, None], x1[None, :]] * wx[None, None, :]
-    )
-    resized = top * (1.0 - wy)[None, :, None] + bottom * wy[None, :, None]
-    mean = np.asarray((0.485, 0.456, 0.406), dtype=np.float32)[:, None, None]
-    standard = np.asarray((0.229, 0.224, 0.225), dtype=np.float32)[:, None, None]
-    tensor = ((resized - mean) / standard)[None, ...].astype(np.float32)
-    input_name = session.get_inputs()[0].name
-    output_name = session.get_outputs()[0].name
-    raw = np.asarray(
-        session.run([output_name], {input_name: tensor})[0],
-        dtype=np.float32,
-    ).reshape(-1)
-    if raw.shape != (SEMANTIC_SOURCE_DIM,) or not np.isfinite(raw).all():
-        return None
-    centered = raw - float(raw.mean())
-    centered /= max(1e-4, float(raw.std()))
-    global_semantics = np.clip(
-        centered[:SEMANTIC_GLOBAL_LOGIT_DIM] / 4.0, -1.0, 1.0
-    )
-    spatial_tokens = []
-    for row in range(SEMANTIC_SPATIAL_TOKEN_ROWS):
-        top = row * SEMANTIC_INPUT_SIZE // SEMANTIC_SPATIAL_TOKEN_ROWS
-        bottom = (row + 1) * SEMANTIC_INPUT_SIZE // SEMANTIC_SPATIAL_TOKEN_ROWS
-        for column in range(SEMANTIC_SPATIAL_TOKEN_COLUMNS):
-            left = column * SEMANTIC_INPUT_SIZE // SEMANTIC_SPATIAL_TOKEN_COLUMNS
-            right = (column + 1) * SEMANTIC_INPUT_SIZE // SEMANTIC_SPATIAL_TOKEN_COLUMNS
-            patch = resized[:, top:bottom, left:right]
-            spatial_tokens.extend((patch.mean(axis=(1, 2)) * 2.0 - 1.0).tolist())
-            spatial_tokens.extend(np.clip(patch.std(axis=(1, 2)) * 4.0, 0.0, 1.0).tolist())
-    source = np.concatenate(
-        (global_semantics, np.asarray(spatial_tokens, dtype=np.float32))
-    ).astype(np.float32, copy=False)
-    if source.shape != (SEMANTIC_SOURCE_DIM,) or not np.isfinite(source).all():
-        return None
-    return source
+
+def _perception_frame_cache_key(np, frame) -> bytes:
+    if isinstance(frame, dict) and isinstance(frame.get("feature_key"), bytes):
+        return frame["feature_key"]
+    value = np.asarray(frame, dtype=np.float32)
+    return hashlib.blake2b(value.tobytes(), digest_size=16).digest()
 
 
-def _semantic_frame_cache_key(np, base_frame) -> bytes:
-    pixels = np.asarray(base_frame, dtype=np.float32)[:3]
-    quantized = np.clip(np.rint((pixels + 1.0) * 127.5), 0, 255).astype(
-        np.uint8
-    )
-    return hashlib.blake2b(quantized.tobytes(), digest_size=16).digest()
 
-
-def semantic_projection_features(
+def perception_adapter_features(
     np,
     model: dict,
-    base_frame,
+    frame,
     training: bool = False,
 ):
-    tier = str(model.get("runtime_tier", "low_numpy"))
-    if tier == "low_numpy":
-        return np.zeros(SEMANTIC_FEATURE_DIM, dtype=np.float32), None
-    refresh = SEMANTIC_REFRESH_STEPS if tier == "high_directml" else max(4, SEMANTIC_REFRESH_STEPS + 2)
-    cache = SEMANTIC_RUNTIME_CACHE.setdefault(id(model), {"step": 0, "source": None})
-    cache["step"] = int(cache.get("step", 0)) + 1
-    try:
-        requested_limit = int(model.get("_semantic_cache_limit", 0))
-    except (TypeError, ValueError, OverflowError):
-        requested_limit = 0
-    cache_limit = max(
-        0,
-        min(
-            8192,
-            requested_limit
-            if requested_limit > 0
-            else (384 if tier == "high_directml" else 192),
-        ),
+    del training
+    previous_tracks = model.get("_perception_tracks")
+    if isinstance(previous_tracks, dict):
+        previous_tracks = dict(previous_tracks)
+    else:
+        previous_tracks = {}
+    previous_tracks["current_action"] = int(
+        model.get("_perception_current_action", -1)
     )
-    frame_key = _semantic_frame_cache_key(np, base_frame)
-    source = SEMANTIC_FRAME_FEATURE_CACHE.get(frame_key)
-    if source is None and not training:
-        source = cache.get("source")
-    if source is None or training or (int(cache["step"]) - 1) % refresh == 0:
-        try:
-            cached_source = SEMANTIC_FRAME_FEATURE_CACHE.get(frame_key)
-            source = cached_source if cached_source is not None else _semantic_model_source(np, base_frame)
-        except Exception:
-            source = None
-        if source is not None:
-            cache["source"] = source
-            if frame_key not in SEMANTIC_FRAME_FEATURE_CACHE:
-                SEMANTIC_FRAME_FEATURE_CACHE[frame_key] = np.asarray(
-                    source, dtype=np.float32
-                ).copy()
-            while len(SEMANTIC_FRAME_FEATURE_CACHE) > cache_limit:
-                SEMANTIC_FRAME_FEATURE_CACHE.pop(
-                    next(iter(SEMANTIC_FRAME_FEATURE_CACHE)), None
-                )
-    if source is None:
-        return np.zeros(SEMANTIC_FEATURE_DIM, dtype=np.float32), None
-    projected = np.tanh(
-        source @ model["semantic_projection_w"]
-        + model["semantic_projection_b"]
-    ).astype(np.float32)
-    return projected, source
+    scene, tracks, hud_event = game_perception_features(
+        np,
+        model,
+        frame,
+        previous_tracks,
+    )
+    model["_perception_tracks"] = tracks
+    belief = tracks.get("_belief") if isinstance(tracks, dict) else None
+    if belief is not None:
+        model["_latest_belief"] = belief
+    model["_latest_perception"] = {
+        "scene": scene,
+        "tracks": tracks,
+        "hud": hud_event,
+        "belief": belief,
+    }
+    vector = _runtime_module("perception").perception_vector(
+        np, scene, tracks, hud_event
+    )
+    return vector, model["_latest_perception"]
+
 
 
 def visual_encoder_output_dim() -> int:
-    return (
-        base_visual_encoder_output_dim()
-        + SPATIAL_BRANCH_FEATURE_DIM
-        + SEMANTIC_FEATURE_DIM
-    )
+    return GAME_PERCEPTION_VECTOR_DIM
+
 
 
 def _depthwise_separable_block(np, source, depthwise_w, pointwise_w, bias, return_cache: bool = False):
@@ -11671,74 +12568,34 @@ def _visual_pyramid_features_from_stages(np, stem, middle, final):
 
 
 
-def _quantized_conv_features(np, model: dict, frame, return_cache: bool = False, training: bool = False):
-    if isinstance(frame, dict):
-        base_frame = np.asarray(frame["base"], dtype=np.float32)
-        spatial = np.asarray(frame["spatial"], dtype=np.float32).reshape(SPATIAL_BRANCH_FEATURE_DIM)
-        semantic_frame = np.asarray(
-            frame.get("semantic_rgb", base_frame[:3]), dtype=np.float32
-        )
-    else:
-        base_frame = np.asarray(frame, dtype=np.float32)
-        spatial = np.zeros(SPATIAL_BRANCH_FEATURE_DIM, dtype=np.float32)
-        semantic_frame = base_frame[:3]
-    semantic, semantic_source = semantic_projection_features(
-        np, model, semantic_frame, training=training
+def perception_projection_features(
+    np,
+    model: dict,
+    frame,
+    return_cache: bool = False,
+    training: bool = False,
+):
+    vector, perception = perception_adapter_features(
+        np, model, frame, training=training
     )
-    # Training always uses the float master weights and a straight-through input
-    # quantizer. Inference may use QLinearConv through ONNX Runtime.
-    quantized = np.clip(np.rint(base_frame / 0.01) + 128.0, 0, 255).astype(np.uint8)
-    dequantized = (quantized.astype(np.float32) - 128.0) * 0.01
-    convolved = None
-    accelerated_stages = None
-    if not training and not return_cache and str(model.get("runtime_tier", "low_numpy")) != "low_numpy":
-        session = accelerated_vision_session(model)
-        if session is not None:
-            try:
-                stage_outputs = session.run(
-                    ["stem", "middle", "final"],
-                    {"input": quantized[None, ...]},
-                )
-                accelerated_stages = tuple(
-                    value[0].astype(np.float32, copy=False)
-                    for value in stage_outputs
-                )
-                convolved = accelerated_stages[0]
-            except Exception:
-                convolved = None
-                accelerated_stages = None
-    stem_cache = None
-    if convolved is None:
-        windows = np.lib.stride_tricks.sliding_window_view(dequantized, (3, 3), axis=(1, 2))[:, ::2, ::2, :, :]
-        weights = (
-            np.asarray(model["conv_master_w"], dtype=np.float32)
-            if training or return_cache
-            else model["conv_w"].astype(np.float32) * float(model["conv_scale"][0])
-        )
-        raw = np.einsum("cijmn,ocmn->oij", windows, weights, optimize=True)
-        raw += model["conv_b"][:, None, None]
-        if training or return_cache:
-            convolved = np.maximum(0.0, raw).astype(np.float32, copy=False)
-        else:
-            convolved = np.clip(np.rint(np.maximum(0.0, raw) / 0.02), 0, 255).astype(np.float32) * 0.02
-        if return_cache:
-            stem_cache = {"windows": windows, "raw": raw, "shape": convolved.shape}
-    if return_cache:
-        pooled, pyramid_cache = _visual_pyramid_features(np, model, convolved, True)
-        combined = np.concatenate((pooled, spatial, semantic)).astype(np.float32, copy=False)
-        return combined, {
-            "stem": stem_cache,
-            "pyramid": pyramid_cache,
-            "semantic_source": semantic_source,
-            "semantic_output": semantic,
-        }
-    if accelerated_stages is not None:
-        pooled = _visual_pyramid_features_from_stages(
-            np, *accelerated_stages
-        )
-    else:
-        pooled = _visual_pyramid_features(np, model, convolved)
-    return np.concatenate((pooled, spatial, semantic)).astype(np.float32, copy=False)
+    if vector.shape != (GAME_PERCEPTION_VECTOR_DIM,):
+        raise RuntimeError("游戏感知输出尺寸无效")
+    if not np.isfinite(vector).all() or not np.any(np.abs(vector) > 1e-7):
+        raise RuntimeError("游戏感知不得返回全零或无效特征")
+    if not return_cache:
+        return vector.astype(np.float32, copy=False)
+    scene = perception["scene"]
+    hud = perception["hud"]
+    return vector.astype(np.float32, copy=False), {
+        "scene": scene,
+        "tracks": perception["tracks"],
+        "hud": hud,
+        "patch_statistics": scene.get("_patch_statistics"),
+        "scene_input": scene.get("_scene_input"),
+        "motion_base": scene.get("_motion_base"),
+        "hud_base": hud.get("_hud_base"),
+    }
+
 
 
 
@@ -11757,7 +12614,7 @@ def feature_vector(np, feature: bytes):
     )
     start = len(frames) - valid_length
     return {
-        "frames": [_frame_channels(np, frame) for frame in frames[start:]],
+        "frames": [_perception_frame_input(np, frame) for frame in frames[start:]],
         "actions": np.asarray(actions[start:], dtype=np.int32),
         "durations": np.asarray(durations[start:], dtype=np.float32),
     }
@@ -11860,11 +12717,35 @@ def initialize_model(np, input_dim: int, hidden_size: int, output_size: int) -> 
         "conv3_depthwise_w": conv3_depthwise,
         "conv3_pointwise_w": conv3_pointwise,
         "conv3_b": np.zeros(CNN_OUTPUT_CHANNELS, dtype=np.float32),
-        "semantic_projection_w": weight(
-            (SEMANTIC_SOURCE_DIM, SEMANTIC_FEATURE_DIM),
-            (2.0 / SEMANTIC_SOURCE_DIM) ** 0.5,
+        # Frozen ONNX backbone; only these local adapters/projections train.
+        "perception_patch_w": weight((12, PATCH_TOKEN_DIM), 0.14),
+        "perception_patch_b": np.zeros(PATCH_TOKEN_DIM, dtype=np.float32),
+        "perception_scene_w": weight(
+            (PATCH_TOKEN_DIM * 2 + MOTION_TOKEN_DIM, SCENE_GLOBAL_DIM),
+            (2.0 / (PATCH_TOKEN_DIM * 2 + MOTION_TOKEN_DIM)) ** 0.5,
         ),
-        "semantic_projection_b": np.zeros(SEMANTIC_FEATURE_DIM, dtype=np.float32),
+        "perception_scene_b": np.zeros(SCENE_GLOBAL_DIM, dtype=np.float32),
+        "perception_hud_w": weight((18, HUD_TOKEN_DIM), 0.16),
+        "perception_hud_b": np.zeros(HUD_TOKEN_DIM, dtype=np.float32),
+        "perception_motion_w": weight((16, MOTION_TOKEN_DIM), 0.16),
+        "perception_motion_b": np.zeros(MOTION_TOKEN_DIM, dtype=np.float32),
+        "perception_event_w": weight(
+            (SCENE_GLOBAL_DIM + HUD_TOKEN_DIM + MOTION_TOKEN_DIM, len(EVENT_NAMES)),
+            0.035,
+        ),
+        "perception_event_b": np.zeros(len(EVENT_NAMES), dtype=np.float32),
+        "perception_event_confidence_w": weight(
+            (SCENE_GLOBAL_DIM + HUD_TOKEN_DIM, 1), 0.025
+        ),
+        "perception_event_confidence_b": np.zeros(1, dtype=np.float32),
+        "discovered_event_prototypes": np.zeros(
+            (DISCOVERED_EVENT_SLOT_COUNT, DISCOVERED_EVENT_DIM),
+            dtype=np.float32,
+        ),
+        "discovered_event_counts": np.zeros(
+            DISCOVERED_EVENT_SLOT_COUNT,
+            dtype=np.float32,
+        ),
         "frame_proj": weight((visual_dim + context_dim, GRU_INPUT_SIZE), (2.0 / (visual_dim + context_dim)) ** 0.5),
         "frame_bias": np.zeros(GRU_INPUT_SIZE, dtype=np.float32),
         "action_embedding": weight((action_dim, ACTION_EMBEDDING_SIZE), 0.04),
@@ -11893,6 +12774,8 @@ def initialize_model(np, input_dim: int, hidden_size: int, output_size: int) -> 
         "policy_duration_w": weight((hidden, DURATION_HEAD_SIZE), 0.04),
         "policy_duration_b": np.zeros(DURATION_HEAD_SIZE, dtype=np.float32),
         "policy_duration_kind_b": np.zeros((len(CONTROL_KINDS), DURATION_HEAD_SIZE), dtype=np.float32),
+        "policy_control_decision_w": weight((hidden, len(CONTROL_DECISIONS)), 0.025),
+        "policy_control_decision_b": np.asarray((0.0, 0.25, -0.10), dtype=np.float32),
         "policy_action_w": weight((hidden, action_dim), 0.02),
         "policy_action_b": np.zeros(action_dim, dtype=np.float32),
         "q_control_w": weight((Q_TWIN_COUNT, VALUE_HEAD_COUNT, hidden, len(CONTROL_KINDS)), 0.025),
@@ -11970,6 +12853,21 @@ def initialize_model(np, input_dim: int, hidden_size: int, output_size: int) -> 
             (2.0 / world_latent_size) ** 0.5,
         ),
         "world_latent_to_hidden_b": np.zeros((WORLD_MODEL_MEMBERS, hidden), dtype=np.float32),
+        "world_slot_w": weight(
+            (WORLD_MODEL_MEMBERS, world_latent_size, OBJECT_SLOT_COUNT * OBJECT_SLOT_DIM),
+            0.018,
+        ),
+        "world_slot_b": np.zeros(
+            (WORLD_MODEL_MEMBERS, OBJECT_SLOT_COUNT * OBJECT_SLOT_DIM), dtype=np.float32
+        ),
+        "world_hud_w": weight(
+            (WORLD_MODEL_MEMBERS, world_latent_size, HUD_TOKEN_DIM), 0.020
+        ),
+        "world_hud_b": np.zeros((WORLD_MODEL_MEMBERS, HUD_TOKEN_DIM), dtype=np.float32),
+        "world_event_w": weight(
+            (WORLD_MODEL_MEMBERS, world_latent_size, len(EVENT_NAMES)), 0.020
+        ),
+        "world_event_b": np.zeros((WORLD_MODEL_MEMBERS, len(EVENT_NAMES)), dtype=np.float32),
         "reward_model_w": weight((REWARD_MODEL_MEMBERS, hidden, REWARD_MODEL_OUTPUTS), 0.02),
         "reward_model_b": np.zeros((REWARD_MODEL_MEMBERS, REWARD_MODEL_OUTPUTS), dtype=np.float32),
         "policy_skill_w": weight((hidden, SKILL_HEAD_SIZE), 0.02),
@@ -12001,6 +12899,9 @@ def initialize_model(np, input_dim: int, hidden_size: int, output_size: int) -> 
         "world_validation_done_brier": -1.0,
         "world_validation_latent_error": -1.0,
         "world_validation_multistep_error": -1.0,
+        "world_validation_slot_error": -1.0,
+        "world_validation_hud_error": -1.0,
+        "world_validation_event_brier": -1.0,
         "visual_pretraining_steps": 0,
         "world_training_steps": 0,
         "reward_model_training_steps": 0,
@@ -12095,11 +12996,17 @@ def load_model(np, path: Path, input_dim: int, hidden_size: int, output_size: in
             model["world_validation_done_brier"] = float(data["world_validation_done_brier"][0]) if "world_validation_done_brier" in data else -1.0
             model["world_validation_latent_error"] = float(data["world_validation_latent_error"][0]) if "world_validation_latent_error" in data else -1.0
             model["world_validation_multistep_error"] = float(data["world_validation_multistep_error"][0]) if "world_validation_multistep_error" in data else -1.0
+            model["world_validation_slot_error"] = float(data["world_validation_slot_error"][0]) if "world_validation_slot_error" in data else -1.0
+            model["world_validation_hud_error"] = float(data["world_validation_hud_error"][0]) if "world_validation_hud_error" in data else -1.0
+            model["world_validation_event_brier"] = float(data["world_validation_event_brier"][0]) if "world_validation_event_brier" in data else -1.0
             for validation_key in (
                 "world_validation_reward_mae",
                 "world_validation_done_brier",
                 "world_validation_latent_error",
                 "world_validation_multistep_error",
+                "world_validation_slot_error",
+                "world_validation_hud_error",
+                "world_validation_event_brier",
             ):
                 validation_value = float(model.get(validation_key, -1.0))
                 if not math.isfinite(validation_value) or validation_value < -1.0:
@@ -12130,6 +13037,8 @@ def load_model(np, path: Path, input_dim: int, hidden_size: int, output_size: in
                 "world_reward_b", "world_done_w", "world_done_b",
                 "world_continuation_w", "world_continuation_b",
                 "world_latent_to_hidden_w", "world_latent_to_hidden_b",
+                "world_slot_w", "world_slot_b", "world_hud_w", "world_hud_b",
+                "world_event_w", "world_event_b",
                 "reward_model_w", "reward_model_b",
             }
             skip_keys = {
@@ -12644,11 +13553,19 @@ def verify_model_archive(np, path: Path, model: dict, signatures: list[str]) -> 
             raise RuntimeError("优化器参数布局无效")
         required_arrays = (
             "conv_w", "conv_master_w", "conv2_depthwise_w", "conv2_pointwise_w",
-            "conv3_depthwise_w", "conv3_pointwise_w", "semantic_projection_w",
-            "semantic_projection_b", "frame_proj", "frame_bias",
+            "conv3_depthwise_w", "conv3_pointwise_w",
+            "perception_patch_w", "perception_patch_b",
+            "perception_scene_w", "perception_scene_b",
+            "perception_hud_w", "perception_hud_b",
+            "perception_motion_w", "perception_motion_b",
+            "perception_event_w", "perception_event_b",
+            "perception_event_confidence_w", "perception_event_confidence_b",
+            "discovered_event_prototypes", "discovered_event_counts",
+            "frame_proj", "frame_bias",
             "action_embedding", "duration_embedding",
             "Wz", "Uz", "Wr", "Ur", "Wh", "Uh",
             "online_adapter_w", "online_adapter_b", "policy_control_w",
+            "policy_control_decision_w", "policy_control_decision_b",
             "policy_button_w", "policy_action_w", "policy_action_b",
             "q_control_w", "q_button_w", "q_action_w", "q_action_b", "value_w",
             "value_b", "progress_w", "progress_b", "safety_w", "safety_b",
@@ -12662,6 +13579,8 @@ def verify_model_archive(np, path: Path, model: dict, signatures: list[str]) -> 
             "world_reward_b", "world_done_w", "world_done_b",
             "world_continuation_w", "world_continuation_b",
             "world_latent_to_hidden_w", "world_latent_to_hidden_b",
+            "world_slot_w", "world_slot_b", "world_hud_w", "world_hud_b",
+            "world_event_w", "world_event_b",
             "reward_model_w", "reward_model_b",
             "policy_skill_w", "policy_skill_b",
             "skill_value_w", "skill_value_b", "policy_duration_kind_b", "q_duration_kind_b",
@@ -12683,6 +13602,9 @@ def verify_model_archive(np, path: Path, model: dict, signatures: list[str]) -> 
             "world_validation_done_brier",
             "world_validation_latent_error",
             "world_validation_multistep_error",
+            "world_validation_slot_error",
+            "world_validation_hud_error",
+            "world_validation_event_brier",
         ):
             values = np.asarray(data[key], dtype=np.float64)
             if values.shape != (1,) or not np.isfinite(values).all() or float(values[0]) < -1.0:
@@ -13348,13 +14270,21 @@ def save_model(np, path: Path, model: dict) -> None:
             "world_validation_done_brier": np.asarray([model.get("world_validation_done_brier", -1.0)], dtype=np.float32),
             "world_validation_latent_error": np.asarray([model.get("world_validation_latent_error", -1.0)], dtype=np.float32),
             "world_validation_multistep_error": np.asarray([model.get("world_validation_multistep_error", -1.0)], dtype=np.float32),
+            "world_validation_slot_error": np.asarray([model.get("world_validation_slot_error", -1.0)], dtype=np.float32),
+            "world_validation_hud_error": np.asarray([model.get("world_validation_hud_error", -1.0)], dtype=np.float32),
+            "world_validation_event_brier": np.asarray([model.get("world_validation_event_brier", -1.0)], dtype=np.float32),
             "updated_at": np.asarray([now_text()], dtype=np.str_),
         }
         for key in (
             "conv_w", "conv_scale", "conv_b", "conv_master_w",
             "conv2_depthwise_w", "conv2_pointwise_w", "conv2_b",
             "conv3_depthwise_w", "conv3_pointwise_w", "conv3_b",
-            "semantic_projection_w", "semantic_projection_b",
+            "perception_patch_w", "perception_patch_b",
+            "perception_scene_w", "perception_scene_b",
+            "perception_hud_w", "perception_hud_b",
+            "perception_motion_w", "perception_motion_b",
+            "perception_event_w", "perception_event_b",
+            "perception_event_confidence_w", "perception_event_confidence_b",
             "frame_proj", "frame_bias",
             "action_embedding", "duration_embedding",
             "Wz", "Uz", "bz", "Wr", "Ur", "br", "Wh", "Uh", "bh",
@@ -13362,6 +14292,7 @@ def save_model(np, path: Path, model: dict) -> None:
             "policy_control_w", "policy_control_b", "policy_key_w", "policy_key_b",
             "policy_mouse_w", "policy_mouse_b", "policy_button_w", "policy_button_b",
             "policy_duration_w", "policy_duration_b", "policy_duration_kind_b",
+            "policy_control_decision_w", "policy_control_decision_b",
             "policy_action_w", "policy_action_b",
             "q_control_w", "q_control_b", "q_key_w", "q_key_b", "q_mouse_w", "q_mouse_b",
             "q_button_w", "q_button_b", "q_duration_w", "q_duration_b", "q_duration_kind_b",
@@ -13377,6 +14308,8 @@ def save_model(np, path: Path, model: dict) -> None:
             "world_reward_b", "world_done_w", "world_done_b",
             "world_continuation_w", "world_continuation_b",
             "world_latent_to_hidden_w", "world_latent_to_hidden_b",
+            "world_slot_w", "world_slot_b", "world_hud_w", "world_hud_b",
+            "world_event_w", "world_event_b",
             "reward_model_w", "reward_model_b",
             "policy_skill_w", "policy_skill_b", "skill_value_w", "skill_value_b",
             "mouse_offset_w", "mouse_offset_b", "action_factors",
@@ -13401,7 +14334,8 @@ def _temporal_combined_feature(
     action_value: int,
     duration_value: float,
 ):
-    visual = _quantized_conv_features(np, model, frame)
+    model["_perception_current_action"] = int(action_value)
+    visual = perception_projection_features(np, model, frame)
     action_embedding = np.zeros(ACTION_EMBEDDING_SIZE, dtype=np.float32)
     kind_values = [0.0] * len(CONTROL_KINDS)
     has_action = 0.0
@@ -13494,13 +14428,14 @@ def _model_hidden_state_from_vector(
         except Exception:
             pass
     for index, frame in enumerate(vector["frames"]):
-        if return_cache:
-            visual, conv_cache = _quantized_conv_features(np, model, frame, return_cache=True, training=training)
-        else:
-            visual = _quantized_conv_features(np, model, frame)
-            conv_cache = None
         action_value = int(actions[index])
         duration_value = float(durations[index])
+        model["_perception_current_action"] = action_value
+        if return_cache:
+            visual, conv_cache = perception_projection_features(np, model, frame, return_cache=True, training=training)
+        else:
+            visual = perception_projection_features(np, model, frame)
+            conv_cache = None
         action_embedding = np.zeros(ACTION_EMBEDDING_SIZE, dtype=np.float32)
         kind_values = [0.0] * len(CONTROL_KINDS)
         has_action = 0.0
@@ -13593,87 +14528,107 @@ def _accumulate_gradient(gradients: dict[str, object], key: str, value) -> None:
         gradients[key] += value.astype(gradients[key].dtype, copy=False)
 
 
-def _backprop_convolution(np, model: dict, conv_cache: dict | None, visual_gradient, gradients: dict[str, object]) -> None:
-    if conv_cache is None or "conv_master_w" not in gradients:
+def _backprop_perception_adapter(
+    np,
+    model: dict,
+    perception_cache: dict | None,
+    visual_gradient,
+    gradients: dict[str, object],
+) -> None:
+    """Backpropagate only through local game-perception adapters.
+
+    The student/teacher ONNX backbone is intentionally frozen.
+    """
+    if not isinstance(perception_cache, dict):
         return
+    gradient = np.asarray(visual_gradient, dtype=np.float32).reshape(-1)
+    if gradient.shape != (GAME_PERCEPTION_VECTOR_DIM,):
+        return
+    scene = perception_cache.get("scene") or {}
+    hud = perception_cache.get("hud") or {}
+    scene_output = np.asarray(scene.get("global", []), dtype=np.float32)
+    motion_output = np.asarray(scene.get("motion_tokens", []), dtype=np.float32)
+    patch_output = np.asarray(scene.get("patch_tokens", []), dtype=np.float32)
+    hud_output = np.asarray(hud.get("hud_token", []), dtype=np.float32)
+    if (
+        scene_output.shape != (SCENE_GLOBAL_DIM,)
+        or motion_output.shape != (MOTION_TOKEN_DIM,)
+        or patch_output.shape != (PATCH_TOKEN_ROWS, PATCH_TOKEN_COLUMNS, PATCH_TOKEN_DIM)
+        or hud_output.shape != (HUD_TOKEN_DIM,)
+    ):
+        return
+    scene_start = 0
+    slots_start = scene_start + SCENE_GLOBAL_DIM
+    hud_start = slots_start + OBJECT_SLOT_COUNT * OBJECT_SLOT_DIM
+    motion_start = hud_start + HUD_TOKEN_DIM
+    patch_start = motion_start + MOTION_TOKEN_DIM
 
-    def pooled_gradient(flat_gradient, shape, bounds, rows, columns):
-        channels, height, width = shape
-        result = np.zeros(shape, dtype=np.float32)
-        values = np.asarray(flat_gradient, dtype=np.float32).reshape(rows * columns, channels)
-        for tile_index, (top, bottom, left, right) in enumerate(bounds):
-            area = max(1, (bottom - top) * (right - left))
-            result[:, top:bottom, left:right] += values[tile_index, :, None, None] / area
-        return result
+    scene_gradient = gradient[scene_start:slots_start]
+    hud_gradient = gradient[hud_start:motion_start]
+    motion_gradient = gradient[motion_start:patch_start].copy()
+    patch_gradient = gradient[patch_start:].reshape(
+        PATCH_TOKEN_ROWS, PATCH_TOKEN_COLUMNS, PATCH_TOKEN_DIM
+    ).copy()
 
-    def backprop_block(cache, output_gradient, depthwise_key, pointwise_key, bias_key):
-        d_pre = np.asarray(output_gradient, dtype=np.float32) * (cache["projected_pre"] > 0.0)
-        depthwise = cache["depthwise"]
-        pointwise = cache["pointwise_w"]
-        windows = cache["windows"]
-        _accumulate_gradient(gradients, bias_key, d_pre.sum(axis=(1, 2)))
-        _accumulate_gradient(gradients, pointwise_key, np.einsum("oij,cij->oc", d_pre, depthwise, optimize=True))
-        d_depthwise = np.einsum("oc,oij->cij", pointwise, d_pre, optimize=True)
-        _accumulate_gradient(gradients, depthwise_key, np.einsum("cij,cijmn->cmn", d_depthwise, windows, optimize=True))
-        d_source = np.zeros(cache["source_shape"], dtype=np.float32)
-        out_h, out_w = d_depthwise.shape[1:]
-        weights = cache["depthwise_w"]
-        for ky in range(3):
-            for kx in range(3):
-                d_source[:, ky:ky + out_h * 2:2, kx:kx + out_w * 2:2] += d_depthwise * weights[:, ky, kx][:, None, None]
-        return d_source
+    scene_input = perception_cache.get("scene_input")
+    if scene_input is not None:
+        scene_input = np.asarray(scene_input, dtype=np.float32)
+        scene_pre_gradient = scene_gradient * (1.0 - scene_output * scene_output)
+        _accumulate_gradient(
+            gradients, "perception_scene_w", np.outer(scene_input, scene_pre_gradient)
+        )
+        _accumulate_gradient(gradients, "perception_scene_b", scene_pre_gradient)
+        input_gradient = model["perception_scene_w"] @ scene_pre_gradient
+        patch_gradient += input_gradient[:PATCH_TOKEN_DIM][None, None, :] / (
+            PATCH_TOKEN_ROWS * PATCH_TOKEN_COLUMNS
+        )
+        # Approximate max-pool gradient by assigning it to the strongest token.
+        max_gradient = input_gradient[PATCH_TOKEN_DIM:PATCH_TOKEN_DIM * 2]
+        winners = np.argmax(patch_output.reshape(-1, PATCH_TOKEN_DIM), axis=0)
+        flat_patch_gradient = patch_gradient.reshape(-1, PATCH_TOKEN_DIM)
+        for channel, winner in enumerate(winners):
+            flat_patch_gradient[int(winner), channel] += max_gradient[channel]
+        motion_gradient += input_gradient[PATCH_TOKEN_DIM * 2:]
 
-    all_visual_gradient = np.asarray(visual_gradient, dtype=np.float32)
-    semantic_source = conv_cache.get("semantic_source")
-    semantic_output = conv_cache.get("semantic_output")
-    if semantic_source is not None and semantic_output is not None:
-        semantic_start = base_visual_encoder_output_dim() + SPATIAL_BRANCH_FEATURE_DIM
-        semantic_gradient = all_visual_gradient[
-            semantic_start:semantic_start + SEMANTIC_FEATURE_DIM
-        ] * (1.0 - np.asarray(semantic_output, dtype=np.float32) ** 2)
+    hud_base = perception_cache.get("hud_base")
+    if hud_base is not None:
+        hud_base = np.asarray(hud_base, dtype=np.float32)
+        hud_pre_gradient = hud_gradient * (1.0 - hud_output * hud_output)
+        _accumulate_gradient(
+            gradients, "perception_hud_w", np.outer(hud_base, hud_pre_gradient)
+        )
+        _accumulate_gradient(gradients, "perception_hud_b", hud_pre_gradient)
+
+    motion_base = perception_cache.get("motion_base")
+    if motion_base is not None:
+        motion_base = np.asarray(motion_base, dtype=np.float32)
+        motion_pre_gradient = motion_gradient * (1.0 - motion_output * motion_output)
         _accumulate_gradient(
             gradients,
-            "semantic_projection_w",
-            np.outer(np.asarray(semantic_source, dtype=np.float32), semantic_gradient),
+            "perception_motion_w",
+            np.outer(motion_base, motion_pre_gradient),
         )
-        _accumulate_gradient(gradients, "semantic_projection_b", semantic_gradient)
+        _accumulate_gradient(
+            gradients, "perception_motion_b", motion_pre_gradient
+        )
 
-    pyramid = conv_cache["pyramid"]
-    final_size = CNN_OUTPUT_CHANNELS * CNN_POOL_ROWS * CNN_POOL_COLUMNS
-    middle_size = CNN_MID_CHANNELS * CNN_MID_POOL_ROWS * CNN_MID_POOL_COLUMNS
-    gradient = all_visual_gradient[:base_visual_encoder_output_dim()]
-    final_gradient = pooled_gradient(
-        gradient[:final_size], pyramid["final_shape"], pyramid["final_bounds"], CNN_POOL_ROWS, CNN_POOL_COLUMNS
-    )
-    middle_gradient = pooled_gradient(
-        gradient[final_size:final_size + middle_size], pyramid["middle_shape"], pyramid["middle_bounds"],
-        CNN_MID_POOL_ROWS, CNN_MID_POOL_COLUMNS
-    )
-    stem_gradient = np.zeros(pyramid["stem_shape"], dtype=np.float32)
-    hud_gradient = gradient[final_size + middle_size:].reshape(4, CNN_CHANNELS)
-    top_rows, bottom_rows, side_columns = pyramid["hud_geometry"]
-    stem_gradient[:, :top_rows, :] += hud_gradient[0, :, None, None] / max(1, top_rows * pyramid["stem_shape"][2])
-    stem_gradient[:, -bottom_rows:, :] += hud_gradient[1, :, None, None] / max(1, bottom_rows * pyramid["stem_shape"][2])
-    stem_gradient[:, :, :side_columns] += hud_gradient[2, :, None, None] / max(1, side_columns * pyramid["stem_shape"][1])
-    stem_gradient[:, :, -side_columns:] += hud_gradient[3, :, None, None] / max(1, side_columns * pyramid["stem_shape"][1])
+    patch_statistics = perception_cache.get("patch_statistics")
+    if patch_statistics is not None:
+        patch_statistics = np.asarray(patch_statistics, dtype=np.float32)
+        patch_pre_gradient = patch_gradient * (1.0 - patch_output * patch_output)
+        _accumulate_gradient(
+            gradients,
+            "perception_patch_w",
+            np.einsum(
+                "rcf,rcd->fd", patch_statistics, patch_pre_gradient, optimize=True
+            ),
+        )
+        _accumulate_gradient(
+            gradients,
+            "perception_patch_b",
+            patch_pre_gradient.sum(axis=(0, 1)),
+        )
 
-    middle_gradient += backprop_block(
-        pyramid["final_cache"], final_gradient,
-        "conv3_depthwise_w", "conv3_pointwise_w", "conv3_b"
-    )
-    stem_gradient += backprop_block(
-        pyramid["middle_cache"], middle_gradient,
-        "conv2_depthwise_w", "conv2_pointwise_w", "conv2_b"
-    )
-    stem = conv_cache.get("stem")
-    if stem is None:
-        return
-    raw_gradient = stem_gradient * (stem["raw"] > 0.0)
-    _accumulate_gradient(
-        gradients, "conv_master_w",
-        np.einsum("oij,cijmn->ocmn", raw_gradient, stem["windows"], optimize=True)
-    )
-    _accumulate_gradient(gradients, "conv_b", raw_gradient.sum(axis=(1, 2)))
 
 
 
@@ -13751,7 +14706,7 @@ def _backprop_temporal_encoder(
         _accumulate_gradient(gradients, "frame_proj", np.outer(combined, projected_pre_gradient))
         _accumulate_gradient(gradients, "frame_bias", projected_pre_gradient)
         combined_gradient = projected_pre_gradient @ model["frame_proj"].T
-        _backprop_convolution(np, model, cache.get("conv_cache"), combined_gradient[:visual_dim], gradients)
+        _backprop_perception_adapter(np, model, cache.get("conv_cache"), combined_gradient[:visual_dim], gradients)
         context_gradient = combined_gradient[visual_dim:]
         action_value = int(cache.get("action_value", -1))
         if "action_embedding" in gradients and 0 <= action_value < len(model["action_embedding"]):
@@ -13790,7 +14745,7 @@ def recurrent_model_step(
 ):
     frame = normalize_feature_bytes(feature)
     vector = {
-        "frames": [_frame_channels(np, frame)],
+        "frames": [_perception_frame_input(np, frame)],
         "actions": np.asarray([int(previous_action)], dtype=np.int32),
         "durations": np.asarray([float(previous_duration)], dtype=np.float32),
     }
@@ -13932,13 +14887,13 @@ def pretrain_visual_encoder(
     batch_count = 0
 
     def encoded_record(record: dict):
-        channels = _frame_channels(np, last_frame(record))
-        return _quantized_conv_features(
+        channels = _perception_frame_input(np, last_frame(record))
+        return perception_projection_features(
             np, model, channels, return_cache=True, training=True
         )
 
     def encoded_augmentation(record: dict, seed: int):
-        channels = _frame_channels(np, last_frame(record))
+        channels = _perception_frame_input(np, last_frame(record))
         base = np.asarray(channels["base"], dtype=np.float32).copy()
         local = np.random.default_rng(VISUAL_INITIALIZATION_SEED ^ int(seed))
         shift_y = int(local.integers(-2, 3))
@@ -13953,7 +14908,7 @@ def pretrain_visual_encoder(
             left = int(local.integers(0, max(1, FEATURE_WIDTH - width + 1)))
             base[:, top:top + height, left:left + width] = 0.0
         augmented = {"base": base, "spatial": channels["spatial"]}
-        return _quantized_conv_features(
+        return perception_projection_features(
             np, model, augmented, return_cache=True, training=True
         )
 
@@ -14002,13 +14957,13 @@ def pretrain_visual_encoder(
         anchor_gradient *= 1.0 - anchor_code * anchor_code
         positive_gradient *= 1.0 - positive_code * positive_code
         negative_gradient *= 1.0 - negative_code * negative_code
-        _backprop_convolution(
+        _backprop_perception_adapter(
             np, model, anchor_cache, anchor_gradient, batch_gradients
         )
-        _backprop_convolution(
+        _backprop_perception_adapter(
             np, model, positive_cache, positive_gradient, batch_gradients
         )
-        _backprop_convolution(
+        _backprop_perception_adapter(
             np, model, negative_cache, negative_gradient, batch_gradients
         )
         batch_count += 1
@@ -14018,13 +14973,17 @@ def pretrain_visual_encoder(
     apply_contrastive_batch()
 
     # Action-conditioned forward prediction plus inverse-action decoding and
-    # HUD-change prediction from the pair of visual states.
+    # structured HUD/event prediction from paired visual states.
     action_steps = 0
     inverse_action_steps = 0
     hud_prediction_steps = 0
     action_loss = 0.0
     inverse_action_loss = 0.0
-    hud_prediction_loss = 0.0
+    visual_objective_totals = {
+        name: 0.0
+        for name in _runtime_module("training").VISUAL_LOSS_WEIGHTS
+    }
+    visual_objective_steps = 0
     action_limit = min(
         max(8, limit // 3),
         len(action_pairs),
@@ -14035,6 +14994,43 @@ def pretrain_visual_encoder(
         raise_if_cancelled(stop_event)
         if anchor_record.get("next_state") is None:
             continue
+        try:
+            current_payload = _perception_frame_input(np, last_frame(anchor_record))
+            next_frames_for_loss, _, _ = decode_temporal_state(
+                anchor_record["next_state"]
+            )
+            next_payload = _perception_frame_input(
+                np, normalize_feature_bytes(next_frames_for_loss[-1])
+            )
+            current_scene, current_tracks, current_hud = game_perception_features(
+                np, model, current_payload, None
+            )
+            next_scene, next_tracks, next_hud = game_perception_features(
+                np,
+                model,
+                next_payload,
+                {
+                    "slots": current_tracks["slots"],
+                    "patch_tokens": current_scene["patch_tokens"],
+                    "histories": current_tracks.get("histories", {}),
+                    "action_history": current_tracks.get("action_history", []),
+                    "current_action": int(anchor_record["action"]),
+                },
+            )
+            objective_losses = _runtime_module("training").visual_pretraining_losses(
+                np,
+                {"scene": current_scene, "tracks": current_tracks, "hud": current_hud},
+                {"scene": next_scene, "tracks": next_tracks, "hud": next_hud},
+                int(anchor_record["action"]),
+                int(anchor_record.get("previous_action", -1)),
+            )
+            for objective_name in visual_objective_totals:
+                visual_objective_totals[objective_name] += float(
+                    objective_losses.get(objective_name, 0.0)
+                )
+            visual_objective_steps += 1
+        except Exception:
+            pass
         current_hidden, current_caches = _latest_temporal_hidden(
             np, model, anchor_record["state"], return_cache=True
         )
@@ -14069,6 +15065,9 @@ def pretrain_visual_encoder(
             target_next_hidden=target_next_hidden,
             duration_index=_record_duration_index(anchor_record),
             action_payload=anchor_record.get("action_payload"),
+            structured_target=structured_world_target_from_state(
+                np, model, anchor_record.get("next_state") or anchor_record.get("state")
+            ),
         )
 
         transition_hidden = np.tanh(
@@ -14097,51 +15096,10 @@ def pretrain_visual_encoder(
         current_hidden_gradient -= inverse_transition_gradient
         next_hidden_gradient = inverse_transition_gradient.copy()
 
-        try:
-            current_frame = last_frame(anchor_record)
-            following_frames, _, _ = decode_temporal_state(
-                anchor_record["next_state"]
-            )
-            following_frame = following_frames[-1]
-            _, hud_change, _ = scene_progress_metrics(
-                current_frame[: FEATURE_WIDTH * FEATURE_HEIGHT],
-                following_frame[: FEATURE_WIDTH * FEATURE_HEIGHT],
-            )
-            hud_target = max(0.0, min(1.0, float(hud_change) * 8.0))
-            transition_pre = np.asarray(next_hidden, dtype=np.float32) - (
-                0.35 * np.asarray(current_hidden, dtype=np.float32)
-            )
-            reward_transition = np.tanh(transition_pre).astype(np.float32)
-            for member in range(REWARD_MODEL_MEMBERS):
-                hud_logit = float(
-                    reward_transition @ model["reward_model_w"][member, :, 4]
-                    + model["reward_model_b"][member, 4]
-                )
-                hud_probability = float(
-                    _sigmoid(np, np.asarray([hud_logit], dtype=np.float32))[0]
-                )
-                hud_gradient = (hud_probability - hud_target) * (
-                    0.05 / REWARD_MODEL_MEMBERS
-                )
-                gradients["reward_model_w"][member, :, 4] += (
-                    reward_transition * hud_gradient
-                )
-                gradients["reward_model_b"][member, 4] += hud_gradient
-                transition_gradient = (
-                    model["reward_model_w"][member, :, 4]
-                    * hud_gradient
-                    * (1.0 - reward_transition * reward_transition)
-                )
-                current_hidden_gradient -= 0.35 * transition_gradient
-                next_hidden_gradient += transition_gradient
-                hud_prediction_loss += -0.05 * (
-                    hud_target * math.log(max(1e-9, hud_probability))
-                    + (1.0 - hud_target)
-                    * math.log(max(1e-9, 1.0 - hud_probability))
-                ) / REWARD_MODEL_MEMBERS
-            hud_prediction_steps += 1
-        except Exception:
-            pass
+        # HUD/event supervision is supplied by visual_pretraining_losses() and
+        # train_reward_model_transition(); generic HUD change is never mapped
+        # directly onto a specific terminal event head.
+        hud_prediction_steps = visual_objective_steps
 
         _backprop_temporal_encoder(
             np,
@@ -14224,18 +15182,20 @@ def pretrain_visual_encoder(
         model.get("visual_pretraining_steps", 0)
     ) + trained
     total_steps = trained + action_steps + inverse_action_steps + multistep_steps
+    averaged_objectives = {
+        name: value / max(1, visual_objective_steps)
+        for name, value in visual_objective_totals.items()
+    }
+    weighted_visual_loss = sum(
+        float(_runtime_module("training").VISUAL_LOSS_WEIGHTS[name])
+        * float(averaged_objectives[name])
+        for name in averaged_objectives
+    )
     return {
         "steps": float(trained),
-        "loss": float(
-            (
-                loss_total
-                + action_loss
-                + inverse_action_loss
-                + hud_prediction_loss
-                + multistep_loss
-            )
-            / max(1, total_steps)
-        ),
+        "loss": float(weighted_visual_loss),
+        "total_loss": float(weighted_visual_loss),
+        **{name: float(value) for name, value in averaged_objectives.items()},
         "action_prediction_steps": float(action_steps),
         "inverse_action_steps": float(inverse_action_steps),
         "multistep_prediction_steps": float(multistep_steps),
@@ -14558,7 +15518,50 @@ def world_model_planning_confidence(model: dict, world_steps: int, minimum_steps
         -1.5 * max(0.0, latent_error)
         -2.0 * max(0.0, multistep_error)
     )
-    return max(0.0, min(1.0, step_confidence * quality_confidence))
+    try:
+        structured_quality = float(
+            _runtime_module("world_model").structured_confidence_penalty(model)
+        )
+    except Exception:
+        structured_quality = 0.65
+    return max(0.0, min(1.0, step_confidence * quality_confidence * structured_quality))
+
+
+def effective_human_memory_weight(model: dict) -> float:
+    """Decay demonstration bias as offline RL and the world model become reliable."""
+    rounds = max(0, int(model.get("training_rounds", 0)))
+    world_confidence = world_model_planning_confidence(
+        model,
+        int(model.get("world_training_steps", 0)),
+        WORLD_MODEL_MIN_TRAINING_STEPS,
+    )
+    return (
+        HUMAN_ACTION_MEMORY_WEIGHT
+        * math.exp(-rounds / 4.0)
+        * max(0.05, 1.0 - world_confidence)
+    )
+
+
+def adaptive_human_memory_weight(
+    model: dict,
+    *,
+    stuck: bool = False,
+    high_uncertainty: bool = False,
+    near_success_demo: bool = False,
+    safety_risk: float = 0.0,
+) -> float:
+    base = effective_human_memory_weight(model)
+    multiplier = 1.0
+    if int(model.get("training_rounds", 0)) <= 0:
+        multiplier *= 1.8
+    if stuck:
+        multiplier *= 1.65
+    if high_uncertainty:
+        multiplier *= 1.45
+    if near_success_demo:
+        multiplier *= 1.35
+    multiplier *= 1.0 + 0.75 * max(0.0, min(1.0, float(safety_risk)))
+    return max(0.0, min(HUMAN_ACTION_MEMORY_WEIGHT, base * multiplier))
 
 
 def latent_world_model_duration_values(
@@ -14753,6 +15756,8 @@ def state_relevant_actions(
     contextual_probe: int | None = None,
     runtime_tier: str = "mid_onnx",
     config: dict | None = None,
+    belief=None,
+    causal_model=None,
 ) -> list[int]:
     """Build a small state-conditioned catalog instead of scoring every action."""
     settings = config if isinstance(config, dict) else DEFAULT_CONFIG
@@ -14827,6 +15832,23 @@ def state_relevant_actions(
     # Recovery and explicit probes are non-negotiable state-specific controls.
     add(recovery_action)
     add(contextual_probe)
+    if belief is not None and causal_model is not None:
+        candidate_actions = [actions[action] for action in allowed]
+        candidate_risks = [value_at(risk_guidance, action, 1.0) for action in allowed]
+        try:
+            probe_offset = causal_model.choose_intervention(
+                belief,
+                candidate_actions,
+                candidate_risks,
+                max(
+                    0.0,
+                    min(1.0, float(settings.get("causal_probe_max_risk", 0.35))),
+                ),
+            )
+        except Exception:
+            probe_offset = None
+        if probe_offset is not None and 0 <= int(probe_offset) < len(allowed):
+            add(allowed[int(probe_offset)])
     for action in list(forced_actions)[:forced_limit]:
         add(action)
 
@@ -14934,9 +15956,45 @@ def latent_world_model_plan_values(
     forced_actions: list[int] | None = None,
     runtime_tier: str | None = None,
     hierarchical_low_level: bool = False,
+    belief=None,
+    goal=None,
+    skill_library=None,
+    causal_model=None,
 ):
     action_count = len(model["action_factors"])
     result = np.zeros(action_count, dtype=np.float64)
+    if belief is not None and goal is not None and skill_library is not None:
+        try:
+            semantic_plan = plan_with_understanding(
+                belief,
+                goal,
+                skill_library,
+                causal_model,
+                _runtime_module("world_model"),
+                None,
+                max(1, min(64, len(skill_library) if hasattr(skill_library, "__len__") else 32)),
+            )
+            model["_latest_understanding_plan"] = semantic_plan
+            if semantic_plan is not None:
+                score, semantic_skill, _ = semantic_plan
+                semantic_weight = (
+                    max(
+                        0.0,
+                        min(
+                            4.0,
+                            float(critic_weights.get("semantic_skill_planning_weight", 1.0)),
+                        ),
+                    )
+                    if isinstance(critic_weights, dict)
+                    else 1.0
+                )
+                for action, _ in _runtime_module("planner").low_level_actions(
+                    semantic_skill
+                ):
+                    if 0 <= action < action_count:
+                        result[action] += semantic_weight * float(score)
+        except Exception:
+            model["_latest_understanding_plan"] = None
     world_steps = max(0, int(model.get("world_training_steps", 0)))
     minimum_steps = max(WORLD_MODEL_MIN_TRAINING_STEPS, action_count * 8)
     if world_steps < minimum_steps or horizon <= 0:
@@ -15056,6 +16114,15 @@ def latent_world_model_plan_values(
         member_rewards[:, TASK_CRITIC] = np.clip(member_rewards[:, TASK_CRITIC], -1.0, 1.0)
         member_rewards[:, EXPLORATION_CRITIC] = np.clip(member_rewards[:, EXPLORATION_CRITIC], 0.0, 1.0)
         member_rewards[:, SAFETY_CRITIC] = np.clip(member_rewards[:, SAFETY_CRITIC], 0.0, 2.0)
+        try:
+            structured_adjustment, structured_diagnostics = _runtime_module(
+                "world_model"
+            ).structured_planning_adjustment(np, model, next_latents, latents)
+            member_rewards[:, TASK_CRITIC] += np.asarray(
+                structured_adjustment, dtype=np.float32
+            )
+        except Exception:
+            structured_diagnostics = {}
         continuation_probability = float(
             _sigmoid(
                 np,
@@ -15339,16 +16406,26 @@ def _latest_temporal_hidden(np, model: dict, state: bytes, return_cache: bool = 
     )
     start = len(frames) - valid_length
     vector = {
-        "frames": [_frame_channels(np, frame) for frame in frames[start:]],
+        "frames": [_perception_frame_input(np, frame) for frame in frames[start:]],
         "actions": np.asarray(actions[start:], dtype=np.int32),
         "durations": np.asarray(durations[start:], dtype=np.float32),
     }
-    return _model_hidden_state_from_vector(
-        np,
-        model,
-        vector,
-        return_cache=return_cache,
-    )
+    previous_tracks = model.pop("_perception_tracks", None)
+    previous_latest = model.pop("_latest_perception", None)
+    try:
+        return _model_hidden_state_from_vector(
+            np,
+            model,
+            vector,
+            return_cache=return_cache,
+        )
+    finally:
+        model.pop("_perception_tracks", None)
+        model.pop("_latest_perception", None)
+        if previous_tracks is not None:
+            model["_perception_tracks"] = previous_tracks
+        if previous_latest is not None:
+            model["_latest_perception"] = previous_latest
 
 
 def temporal_critic_targets(
@@ -16385,14 +17462,23 @@ def load_training_data(
     install_sqlite_cancel_handler(connection, stop_event)
     invalid = 0
     try:
+        surprise_weight = max(
+            0.0,
+            min(2.0, float(reward_config.get("human_surprise_training_weight", 0.65))),
+        )
         episode_rows = connection.execute(
-            "SELECT run_id,episode_id,COUNT(*),SUM(priority),MAX(rowid),MIN(source),"
-            "SUM(task_reward),SUM(exploration_reward),SUM(safety_penalty),AVG(reward),MAX(terminated),"
-            "MAX(CASE WHEN outcome_type=2 THEN outcome_confidence ELSE 0 END),"
-            "MAX(CASE WHEN outcome_type=1 THEN outcome_confidence ELSE 0 END),"
-            "MAX(CASE WHEN outcome_type=4 THEN outcome_confidence ELSE 0 END),"
-            "SUM(CASE WHEN outcome_type=3 THEN score_delta*outcome_confidence ELSE 0 END) "
-            "FROM transitions WHERE capture_failed=0 GROUP BY run_id,episode_id"
+            "SELECT t.run_id,t.episode_id,COUNT(*),"
+            "SUM(t.priority+?*MIN(4.0,COALESCE(h.human_action_surprise,0.0))),"
+            "MAX(t.rowid),MIN(t.source),"
+            "SUM(t.task_reward),SUM(t.exploration_reward),SUM(t.safety_penalty),AVG(t.reward),MAX(t.terminated),"
+            "MAX(CASE WHEN t.outcome_type=2 THEN t.outcome_confidence ELSE 0 END),"
+            "MAX(CASE WHEN t.outcome_type=1 THEN t.outcome_confidence ELSE 0 END),"
+            "MAX(CASE WHEN t.outcome_type=4 THEN t.outcome_confidence ELSE 0 END),"
+            "SUM(CASE WHEN t.outcome_type=3 THEN t.score_delta*t.outcome_confidence ELSE 0 END) "
+            "FROM transitions AS t LEFT JOIN human_decisions AS h "
+            "ON h.episode_id=t.episode_id AND h.step=t.step "
+            "WHERE t.capture_failed=0 GROUP BY t.run_id,t.episode_id",
+            (surprise_weight,),
         ).fetchall()
         candidates: list[dict] = []
         for (
@@ -16506,9 +17592,13 @@ def load_training_data(
             "SELECT t.rowid,t.run_id,t.episode_id,t.step,t.source,t.state,t.action,t.reward,"
             "t.next_state,t.done,t.priority,t.task_reward,t.exploration_reward,"
             "t.safety_penalty,t.outcome_type,t.outcome_confidence,t.score_delta,"
-            "t.terminated,t.truncated,t.capture_failed,t.action_payload "
+            "t.terminated,t.truncated,t.capture_failed,t.action_payload,"
+            "COALESCE(h.human_action_surprise,0.0),COALESCE(h.prediction_error,0.0),"
+            "COALESCE(h.candidate_subgoal,''),COALESCE(h.goal_progress_delta,0.0) "
             "FROM transitions AS t INNER JOIN selected_episodes AS s "
             "ON s.run_id=t.run_id AND s.episode_id=t.episode_id "
+            "LEFT JOIN human_decisions AS h "
+            "ON h.episode_id=t.episode_id AND h.step=t.step "
             "ORDER BY t.run_id,t.episode_id,t.step"
         ).fetchall()
     except sqlite3.DatabaseError as error:
@@ -16540,6 +17630,10 @@ def load_training_data(
         truncated,
         capture_failed,
         action_payload,
+        human_action_surprise,
+        prediction_error,
+        candidate_subgoal,
+        goal_progress_delta,
     ) in rows:
         try:
             if bool(int(capture_failed)):
@@ -16556,9 +17650,13 @@ def load_training_data(
             outcome_value = int(outcome_type)
             outcome_confidence_value = float(outcome_confidence)
             score_delta_value = float(score_delta)
+            surprise_value = max(0.0, min(24.0, float(human_action_surprise)))
+            prediction_error_value = max(0.0, min(4.0, float(prediction_error)))
+            goal_progress_delta_value = max(-1.0, min(1.0, float(goal_progress_delta)))
             if not all(math.isfinite(value) for value in (
                 stored_reward, raw_task, raw_exploration, raw_safety,
-                outcome_confidence_value, score_delta_value,
+                outcome_confidence_value, score_delta_value, surprise_value,
+                prediction_error_value, goal_progress_delta_value,
             )):
                 raise ValueError
             if outcome_value not in OUTCOME_TYPES or not 0.0 <= outcome_confidence_value <= 1.0:
@@ -16615,13 +17713,24 @@ def load_training_data(
                     "truncated": truncated_value,
                     "capture_failed": False,
                     "episode_end": boundary_value,
-                    "priority": max(0.05, float(priority)),
+                    "priority": max(
+                        0.05,
+                        min(
+                            20.0,
+                            float(priority)
+                            + surprise_weight * min(4.0, surprise_value),
+                        ),
+                    ),
                     "task_reward": task_value,
                     "exploration_reward": exploration_value,
                     "safety_penalty": safety_value,
                     "outcome_type": outcome_value,
                     "outcome_confidence": outcome_confidence_value,
                     "score_delta": score_delta_value,
+                    "human_action_surprise": surprise_value,
+                    "prediction_error": prediction_error_value,
+                    "candidate_subgoal": str(candidate_subgoal),
+                    "goal_progress_delta": goal_progress_delta_value,
                 }
             )
         except Exception:
@@ -17125,38 +18234,120 @@ def extract_human_skills(records: list[dict], config: dict) -> list[dict]:
     episodes = _continuous_trajectory_parts(
         [record for record in records if record.get("source") == "human"]
     )
-    candidates: dict[tuple[tuple[int, int], ...], list[float]] = {}
+    candidates: dict[tuple[tuple[int, int], ...], list[tuple[float, float, str]]] = {}
     lengths = sorted({minimum, min(maximum, 8), min(maximum, 16), maximum})
     for episode in episodes:
-        sequence = [(int(item["action"]), _record_duration_index(item), float(item.get("task_reward", 0.0))) for item in episode]
+        sequence = [
+            (
+                int(item["action"]),
+                _record_duration_index(item),
+                float(item.get("task_reward", 0.0)),
+                float(item.get("human_action_surprise", 0.0)),
+                str(item.get("candidate_subgoal", "")),
+            )
+            for item in episode
+        ]
         for length in lengths:
             if length < minimum or len(sequence) < length:
                 continue
             stride = max(1, length // 2)
             for start in range(0, len(sequence) - length + 1, stride):
                 segment = sequence[start:start + length]
-                signature = tuple((action, duration) for action, duration, _ in segment)
-                quality = sum(reward for _, _, reward in segment) / length
-                candidates.setdefault(signature, []).append(quality)
+                signature = tuple((action, duration) for action, duration, *_ in segment)
+                quality = sum(reward for _, _, reward, _, _ in segment) / length
+                surprise = sum(value for _, _, _, value, _ in segment) / length
+                named_goals = [goal for _, _, _, _, goal in segment if goal]
+                goal = max(set(named_goals), key=named_goals.count) if named_goals else ""
+                candidates.setdefault(signature, []).append((quality, surprise, goal))
     ranked = []
-    for signature, qualities in candidates.items():
-        count = len(qualities)
+    surprise_weight = max(
+        0.0, min(4.0, float(config.get("human_surprise_training_weight", 1.25)))
+    )
+    for signature, evidence in candidates.items():
+        count = len(evidence)
         if count < 2 and len(signature) < 8:
             continue
-        quality = sum(qualities) / max(1, count)
+        quality = sum(item[0] for item in evidence) / max(1, count)
+        surprise = sum(item[1] for item in evidence) / max(1, count)
+        named_goals = [item[2] for item in evidence if item[2]]
+        goal = max(set(named_goals), key=named_goals.count) if named_goals else ""
         diversity = len(set(action for action, _ in signature)) / max(1, len(signature))
-        score = math.log1p(count) * math.sqrt(len(signature)) + 0.8 * quality + 0.25 * diversity
-        ranked.append((score, signature, count, quality))
+        score = (
+            math.log1p(count) * math.sqrt(len(signature))
+            + 0.8 * quality
+            + 0.25 * diversity
+            + surprise_weight * math.log1p(max(0.0, surprise))
+        )
+        ranked.append((score, signature, count, quality, surprise, goal))
     ranked.sort(key=lambda item: item[0], reverse=True)
     result = []
-    for _, signature, count, quality in ranked[:limit]:
+    for _, signature, count, quality, surprise, goal in ranked[:limit]:
         result.append({
             "actions": [action for action, _ in signature],
             "durations": [duration for _, duration in signature],
             "count": int(count),
             "quality": max(-1.0, min(1.0, float(quality))),
+            "human_action_surprise": max(0.0, min(24.0, float(surprise))),
+            "goal_condition": goal,
         })
     return result
+
+
+def persist_semantic_skills(path: Path, skills: list[dict]) -> int:
+    """Store transferable semantic skill policies beside the legacy cache."""
+    connection = _runtime_module("memory").open_semantic_database(path)
+    memory_module = _runtime_module("memory")
+    understanding_module = _runtime_module("understanding")
+    causal_module = _runtime_module("causal_model")
+    saved = 0
+    try:
+        for skill in skills:
+            actions = [int(value) for value in skill.get("actions", ())]
+            durations = [int(value) for value in skill.get("durations", ())]
+            if not actions:
+                continue
+            goal_condition = str(skill.get("goal_condition", ""))
+            preconditions: tuple[str, ...] = ()
+            row = connection.execute(
+                "SELECT belief_state_before FROM human_decisions "
+                "WHERE candidate_subgoal=? ORDER BY human_action_surprise DESC LIMIT 1",
+                (goal_condition,),
+            ).fetchone()
+            if row is not None:
+                try:
+                    belief = understanding_module.belief_from_dict(json.loads(str(row[0])))
+                    preconditions = causal_module.semantic_facts(belief)[:16]
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    preconditions = ()
+            policy = json.dumps(
+                {"actions": actions, "durations": durations},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            identifier = "skill:" + hashlib.blake2b(
+                goal_condition.encode("utf-8") + b"\0" + policy,
+                digest_size=12,
+            ).hexdigest()
+            memory_module.save_learned_skill(
+                connection,
+                memory_module.LearnedSkill(
+                    skill_id=identifier,
+                    preconditions=tuple(preconditions),
+                    goal_condition=goal_condition,
+                    policy_blob=policy,
+                    success_rate=max(
+                        0.0,
+                        min(1.0, 0.5 + 0.5 * float(skill.get("quality", 0.0))),
+                    ),
+                    use_count=max(0, int(skill.get("count", 0))),
+                ),
+            )
+            saved += 1
+        connection.commit()
+        return saved
+    finally:
+        connection.close()
 
 
 def skill_label_for_position(window: list[dict], position: int, skills: list[dict]) -> int | None:
@@ -17256,6 +18447,7 @@ def choose_skill(
     start_probability: float,
     exploration: float,
     critic_weights: dict | tuple[float, float, float] | None = None,
+    deterministic: bool = False,
 ) -> int | None:
     count = min(SKILL_HEAD_SIZE, len(skills))
     world_steps = max(0, int(model.get("world_training_steps", 0)))
@@ -17265,7 +18457,12 @@ def choose_skill(
         max(0.0, min(1.0, float(start_probability))),
         0.55 * world_confidence,
     )
-    if count <= 0 or random.random() > effective_start:
+    if count <= 0:
+        return None
+    if deterministic:
+        if effective_start < 0.50:
+            return None
+    elif random.random() > effective_start:
         return None
     logits = np.asarray(hidden, dtype=np.float32) @ model["policy_skill_w"][:, :count] + model["policy_skill_b"][:count]
     values = np.asarray(hidden, dtype=np.float32) @ model["skill_value_w"][:, :count] + model["skill_value_b"][:count]
@@ -17279,7 +18476,10 @@ def choose_skill(
         else 0.38
     )
     score = logits + 0.35 * values + 0.20 * quality + planning_weight * planned
-    if random.random() < max(0.0, min(0.30, float(exploration))):
+    if (
+        not deterministic
+        and random.random() < max(0.0, min(0.30, float(exploration)))
+    ):
         return random.randrange(count)
     return int(np.argmax(score))
 
@@ -17371,10 +18571,17 @@ _TEMPORAL_PARAMETER_KEYS = frozenset({
     "frame_proj", "frame_bias", "action_embedding", "duration_embedding",
     "Wz", "Uz", "bz", "Wr", "Ur", "br", "Wh", "Uh", "bh",
 })
+_FROZEN_BACKBONE_PARAMETER_KEYS = frozenset({
+    "conv_master_w", "conv_b", "conv2_depthwise_w", "conv2_pointwise_w",
+    "conv2_b", "conv3_depthwise_w", "conv3_pointwise_w", "conv3_b",
+})
 _CONV_PARAMETER_KEYS = frozenset({
-    "conv_master_w", "conv_b", "conv2_depthwise_w", "conv2_pointwise_w", "conv2_b",
-    "conv3_depthwise_w", "conv3_pointwise_w", "conv3_b",
-    "semantic_projection_w", "semantic_projection_b",
+    "perception_patch_w", "perception_patch_b",
+    "perception_scene_w", "perception_scene_b",
+    "perception_hud_w", "perception_hud_b",
+    "perception_motion_w", "perception_motion_b",
+    "perception_event_w", "perception_event_b",
+    "perception_event_confidence_w", "perception_event_confidence_b",
 })
 _TRAINABLE_PARAMETER_KEYS = (
     *_CONV_PARAMETER_KEYS,
@@ -17383,6 +18590,7 @@ _TRAINABLE_PARAMETER_KEYS = (
     "online_adapter_w", "online_adapter_b",
     "policy_control_w", "policy_control_b", "policy_key_w", "policy_key_b", "policy_mouse_w", "policy_mouse_b",
     "policy_button_w", "policy_button_b", "policy_duration_w", "policy_duration_b", "policy_duration_kind_b",
+    "policy_control_decision_w", "policy_control_decision_b",
     "policy_action_w", "policy_action_b", "policy_skill_w", "policy_skill_b", "skill_value_w", "skill_value_b",
     "mouse_offset_w", "mouse_offset_b",
     "q_control_w", "q_control_b", "q_key_w", "q_key_b", "q_mouse_w", "q_mouse_b",
@@ -17399,6 +18607,8 @@ _TRAINABLE_PARAMETER_KEYS = (
     "world_reward_b", "world_done_w", "world_done_b",
     "world_continuation_w", "world_continuation_b",
     "world_latent_to_hidden_w", "world_latent_to_hidden_b",
+    "world_slot_w", "world_slot_b", "world_hud_w", "world_hud_b",
+    "world_event_w", "world_event_b",
     "reward_model_w", "reward_model_b",
 )
 
@@ -17504,6 +18714,37 @@ def _structured_policy_head_supervision(
         np.mean(np.log(np.maximum(button_likelihood, 1e-9)))
     )
     return float(loss), hidden_gradient.astype(np.float32, copy=False)
+
+
+def _train_control_decision_head(
+    np,
+    model: dict,
+    hidden,
+    previous_action: int,
+    current_action: int,
+    next_action: int,
+    done: bool,
+    weight: float,
+    gradients: dict[str, object],
+) -> tuple[float, object]:
+    target = int(
+        _runtime_module("policy").control_supervision_target(
+            previous_action, current_action, next_action, done
+        )
+    )
+    hidden_value = np.asarray(hidden, dtype=np.float32)
+    logits = hidden_value @ model["policy_control_decision_w"] + model["policy_control_decision_b"]
+    probabilities = _softmax(np, logits)
+    output_gradient = probabilities.copy()
+    output_gradient[target] -= 1.0
+    output_gradient *= max(0.0, min(4.0, float(weight)))
+    gradients["policy_control_decision_w"] += np.outer(hidden_value, output_gradient)
+    gradients["policy_control_decision_b"] += output_gradient
+    hidden_gradient = model["policy_control_decision_w"] @ output_gradient
+    return (
+        -max(0.0, float(weight)) * math.log(max(1e-9, float(probabilities[target]))),
+        hidden_gradient.astype(np.float32, copy=False),
+    )
 
 
 def _train_factor_policy(
@@ -17867,6 +19108,74 @@ def _train_safety_head(
 
 
 
+def structured_world_target_from_state(np, model: dict, state) -> dict | None:
+    """Create stop-gradient object/HUD/event targets from a stored visual state."""
+    if state is None:
+        return None
+    try:
+        frames, _, _ = decode_temporal_state(state)
+        payload = _perception_frame_input(np, normalize_feature_bytes(frames[-1]))
+        _, tracks, hud = game_perception_features(np, model, payload, None)
+        return {
+            "slots": np.asarray(tracks["slots"], dtype=np.float32).copy(),
+            "hud": np.asarray(hud["hud_token"], dtype=np.float32).copy(),
+            "events": dict(hud.get("event_probabilities", {})),
+        }
+    except Exception:
+        return None
+
+
+def _train_structured_world_heads(
+    np,
+    model: dict,
+    latents,
+    structured_target: dict | None,
+    sample_weight: float,
+    gradients: dict[str, object],
+) -> tuple[float, object]:
+    target = _runtime_module("world_model").normalize_structured_target(np, structured_target)
+    latent_values = np.asarray(latents, dtype=np.float32)
+    if target is None:
+        return 0.0, np.zeros_like(latent_values)
+    slot_target = np.asarray(target["slots"], dtype=np.float32).reshape(-1)
+    hud_target = np.asarray(target["hud"], dtype=np.float32)
+    event_target = np.asarray(target["events"], dtype=np.float32)
+    latent_gradient = np.zeros_like(latent_values)
+    loss = 0.0
+    member_weight = max(0.0, min(4.0, float(sample_weight))) / WORLD_MODEL_MEMBERS
+    for member in range(WORLD_MODEL_MEMBERS):
+        latent = latent_values[member]
+        slot_prediction = np.tanh(latent @ model["world_slot_w"][member] + model["world_slot_b"][member])
+        slot_error = slot_prediction - slot_target
+        slot_out_gradient = slot_error * (1.0 - slot_prediction * slot_prediction) * (0.35 * member_weight / slot_target.size)
+        gradients["world_slot_w"][member] += np.outer(latent, slot_out_gradient)
+        gradients["world_slot_b"][member] += slot_out_gradient
+        latent_gradient[member] += model["world_slot_w"][member] @ slot_out_gradient
+        loss += 0.35 * member_weight * float(np.mean(slot_error * slot_error))
+
+        hud_prediction = np.tanh(latent @ model["world_hud_w"][member] + model["world_hud_b"][member])
+        hud_error = hud_prediction - hud_target
+        hud_out_gradient = hud_error * (1.0 - hud_prediction * hud_prediction) * (0.20 * member_weight / hud_target.size)
+        gradients["world_hud_w"][member] += np.outer(latent, hud_out_gradient)
+        gradients["world_hud_b"][member] += hud_out_gradient
+        latent_gradient[member] += model["world_hud_w"][member] @ hud_out_gradient
+        loss += 0.20 * member_weight * float(np.mean(hud_error * hud_error))
+
+        event_prediction = _sigmoid(
+            np, latent @ model["world_event_w"][member] + model["world_event_b"][member]
+        )
+        event_error = event_prediction - event_target
+        event_out_gradient = event_error * (0.30 * member_weight / event_target.size)
+        gradients["world_event_w"][member] += np.outer(latent, event_out_gradient)
+        gradients["world_event_b"][member] += event_out_gradient
+        latent_gradient[member] += model["world_event_w"][member] @ event_out_gradient
+        loss += -0.30 * member_weight * float(np.mean(
+            event_target * np.log(np.maximum(event_prediction, 1e-8))
+            + (1.0 - event_target) * np.log(np.maximum(1.0 - event_prediction, 1e-8))
+        ))
+    return float(loss), latent_gradient.astype(np.float32, copy=False)
+
+
 def train_world_model_transition(
     np,
     model: dict,
@@ -17881,6 +19190,7 @@ def train_world_model_transition(
     target_next_hidden=None,
     duration_index: int = DURATION_HEAD_SIZE // 2,
     action_payload=None,
+    structured_target: dict | None = None,
 ) -> tuple[float, object]:
     action = max(0, min(len(model["action_embedding"]) - 1, int(action_id)))
     duration = max(0, min(DURATION_HEAD_SIZE - 1, int(duration_index)))
@@ -18154,6 +19464,24 @@ def train_world_model_transition(
             + continuation_loss
             + kl_loss
         ) * member_scale
+    if structured_target is not None:
+        structured_latents = world_model_latent(
+            np, model, next_hidden if next_hidden is not None else hidden_value
+        )
+        structured_loss, structured_latent_gradient = _train_structured_world_heads(
+            np, model, structured_latents, structured_target, weight, gradients
+        )
+        total_loss += structured_loss
+        if next_hidden is None:
+            for member in range(WORLD_MODEL_MEMBERS):
+                encoder_gradient = structured_latent_gradient[member] * (
+                    1.0 - structured_latents[member] * structured_latents[member]
+                )
+                gradients["world_encoder_w"][member] += np.outer(
+                    hidden_value, encoder_gradient
+                )
+                gradients["world_encoder_b"][member] += encoder_gradient
+                hidden_gradient += model["world_encoder_w"][member] @ encoder_gradient
     gradients["action_embedding"][action] += action_gradient_total
     gradients["duration_embedding"][duration] += duration_gradient_total
     model["world_training_steps"] = int(model.get("world_training_steps", 0)) + 1
@@ -18909,6 +20237,9 @@ def evaluate_model_records(np, model: dict, items: list[dict]) -> dict[str, floa
         "world_done_brier": -1.0,
         "world_latent_error": -1.0,
         "world_multistep_error": -1.0,
+        "world_slot_error": -1.0,
+        "world_hud_error": -1.0,
+        "world_event_brier": -1.0,
     }
     if not items:
         return empty
@@ -18922,6 +20253,9 @@ def evaluate_model_records(np, model: dict, items: list[dict]) -> dict[str, floa
     world_done_errors = []
     world_latent_errors = []
     world_multistep_errors = []
+    world_slot_errors = []
+    world_hud_errors = []
+    world_event_errors = []
     outcome_error_total = 0.0
     outcome_weight_total = 0.0
     outcome_correct_total = 0.0
@@ -19129,6 +20463,67 @@ def evaluate_model_records(np, model: dict, items: list[dict]) -> dict[str, floa
                 world_latent_errors.append(
                     float(np.sqrt(np.mean((predicted_latents - actual_next_latents) ** 2)))
                 )
+                structured_target = structured_world_target_from_state(
+                    np, model, record["next_state"]
+                )
+                normalized_target = _runtime_module(
+                    "world_model"
+                ).normalize_structured_target(np, structured_target)
+                if normalized_target is not None:
+                    structured_prediction = _runtime_module(
+                        "world_model"
+                    ).predict_structured_state(np, model, predicted_latents)
+                    world_slot_errors.append(
+                        float(
+                            np.sqrt(
+                                np.mean(
+                                    (
+                                        np.asarray(
+                                            structured_prediction["slots"],
+                                            dtype=np.float32,
+                                        )
+                                        - np.asarray(
+                                            normalized_target["slots"],
+                                            dtype=np.float32,
+                                        )
+                                    )
+                                    ** 2
+                                )
+                            )
+                        )
+                    )
+                    world_hud_errors.append(
+                        float(
+                            np.sqrt(
+                                np.mean(
+                                    (
+                                        np.asarray(
+                                            structured_prediction["hud"],
+                                            dtype=np.float32,
+                                        )
+                                        - np.asarray(
+                                            normalized_target["hud"],
+                                            dtype=np.float32,
+                                        )
+                                    )
+                                    ** 2
+                                )
+                            )
+                        )
+                    )
+                    predicted_events = np.asarray(
+                        [
+                            float(structured_prediction["events"].get(name, 0.0))
+                            for name in EVENT_NAMES
+                        ],
+                        dtype=np.float32,
+                    )
+                    target_events = np.asarray(
+                        normalized_target["events"], dtype=np.float32
+                    )
+                    world_event_errors.append(
+                        float(np.mean((predicted_events - target_events) ** 2))
+                    )
             except Exception:
                 pass
 
@@ -19237,6 +20632,18 @@ def evaluate_model_records(np, model: dict, items: list[dict]) -> dict[str, floa
         sum(world_multistep_errors) / len(world_multistep_errors)
         if world_multistep_errors else -1.0
     )
+    world_slot_error = (
+        sum(world_slot_errors) / len(world_slot_errors)
+        if world_slot_errors else -1.0
+    )
+    world_hud_error = (
+        sum(world_hud_errors) / len(world_hud_errors)
+        if world_hud_errors else -1.0
+    )
+    world_event_brier = (
+        sum(world_event_errors) / len(world_event_errors)
+        if world_event_errors else -1.0
+    )
     score = (
         0.38 * outcome_prediction_score
         + 0.20 * return_ranking_accuracy
@@ -19272,6 +20679,9 @@ def evaluate_model_records(np, model: dict, items: list[dict]) -> dict[str, floa
         "world_done_brier": float(world_done_brier),
         "world_latent_error": float(world_latent_error),
         "world_multistep_error": float(world_multistep_error),
+        "world_slot_error": float(world_slot_error),
+        "world_hud_error": float(world_hud_error),
+        "world_event_brier": float(world_event_brier),
     }
 
 def train_model(
@@ -19295,10 +20705,38 @@ def train_model(
     ai_records = [record for record in records if record["source"] == "ai"]
     successful_ai = [record for record in ai_records if record.get("trajectory_class") == "successful_ai"]
     failed_ai = [record for record in ai_records if record.get("trajectory_class") == "failed_ai"]
+    training_round = max(0, int(model.get("training_rounds", 0)))
+    elite_quality_floor = min(0.82, 0.60 + 0.025 * training_round)
+    elite_human_records = [
+        record
+        for record in human_records
+        if not human_record_has_explicit_failure(record)
+        and float(record.get("episode_quality", 0.50)) >= elite_quality_floor
+    ]
+    # Keep enough demonstrations for cold start, but progressively stop cloning
+    # mediocre human play once the policy has learned the controls.
+    if human_records and len(elite_human_records) < min(128, len(human_records)):
+        ordered_human = sorted(
+            (
+                record for record in human_records
+                if not human_record_has_explicit_failure(record)
+            ),
+            key=lambda record: float(record.get("episode_quality", 0.50)),
+            reverse=True,
+        )
+        elite_human_records = ordered_human[:max(
+            min(128, len(ordered_human)),
+            math.ceil(len(ordered_human) * 0.35),
+        )]
     epochs = max(1, min(40, int(epochs)))
     batch_size = max(8, min(8192, int(batch_size)))
     lr = max(1e-6, min(0.02, float(learning_rate)))
-    bc_weight = max(0.1, min(4.0, float(config.get("behavior_cloning_weight", 1.4))))
+    configured_bc_weight = max(0.1, min(4.0, float(config.get("behavior_cloning_weight", 1.4))))
+    bc_weight = max(
+        0.15,
+        configured_bc_weight
+        / math.sqrt(1.0 + max(0, int(model.get("training_rounds", 0)))),
+    )
     expectile = max(0.5, min(0.95, float(config.get("iql_expectile", 0.80))))
     temperature = max(0.25, min(10.0, float(config.get("iql_temperature", 1.5))))
     progress_margin = max(0.01, min(1.0, float(config.get("progress_margin", PROGRESS_RANK_MARGIN))))
@@ -19408,8 +20846,9 @@ def train_model(
             )
             _synchronize_quantized_conv_weights(np, model)
 
-    bc_epochs = max(1, epochs // 3) if human_records else 0
-    bc_windows = sequence_training_windows(human_records, sequence_length, burn_in)
+    bc_epoch_divisor = min(8, 4 + training_round // 2)
+    bc_epochs = max(1, epochs // bc_epoch_divisor) if elite_human_records else 0
+    bc_windows = sequence_training_windows(elite_human_records, sequence_length, burn_in)
     for _ in range(bc_epochs):
         rng.shuffle(bc_windows)
         for group_start in range(0, len(bc_windows), windows_per_batch):
@@ -19427,10 +20866,13 @@ def train_model(
                 for local_index, record in enumerate(window[first_train:train_end]):
                     position = first_train + local_index
                     action_id = int(record["action"])
+                    episode_quality = float(record.get("episode_quality", 0.50))
+                    if human_record_has_explicit_failure(record) or episode_quality < 0.45:
+                        continue
                     quality, _, _ = human_training_signal(
                         float(record.get("n_task_return", record["task_reward"])),
-                        human_record_has_explicit_failure(record),
-                        float(record.get("episode_quality", 0.50)),
+                        False,
+                        episode_quality,
                     )
                     duration_index = _record_duration_index(record)
                     loss, hidden_gradient = _train_factor_policy(
@@ -19477,6 +20919,14 @@ def train_model(
 
     iql_epochs = max(1, epochs - bc_epochs)
     all_windows = sequence_training_windows(records, sequence_length, burn_in)
+    # Replay successful self-generated trajectories an extra time. This shifts
+    # later training from pure imitation toward policy improvement beyond the
+    # demonstrator while failed trajectories remain available to the critics.
+    successful_windows = sequence_training_windows(
+        successful_ai, sequence_length, burn_in
+    )
+    if successful_windows:
+        all_windows.extend(successful_windows)
     for epoch in range(iql_epochs):
         rng.shuffle(all_windows)
         for group_start in range(0, len(all_windows), windows_per_batch):
@@ -19573,11 +21023,35 @@ def train_model(
                     critic_targets[EXPLORATION_CRITIC] = np.clip(critic_targets[EXPLORATION_CRITIC], 0.0, 3.0)
                     critic_targets[SAFETY_CRITIC] = np.clip(critic_targets[SAFETY_CRITIC], 0.0, 4.0)
                     priority_weight = min(3.0, max(0.2, float(record["priority"]) / 3.0))
+                    if str(record.get("source", "")) == "human":
+                        surprise_multiplier = _runtime_module(
+                            "training"
+                        ).human_surprise_sample_weight(record)
+                        configured_surprise = max(
+                            0.0,
+                            min(
+                                2.0,
+                                float(
+                                    config.get(
+                                        "human_surprise_training_weight",
+                                        0.65,
+                                    )
+                                ),
+                            ),
+                        )
+                        priority_weight = min(
+                            4.0,
+                            priority_weight
+                            * (1.0 + configured_surprise * (surprise_multiplier - 1.0)),
+                        )
                     q_loss, q_hidden_gradient = _train_factor_q(
                         np, model, hidden, action_id, critic_targets, lr, priority_weight,
                         gradients=gradients, q_values=q_values[local_index], cql_weight=cql_weight,
                         duration_index=duration_index,
                         action_payload=record.get("action_payload"),
+                        structured_target=structured_world_target_from_state(
+                            np, model, record.get("next_state") or record.get("state")
+                        ),
                     )
                     safety_target = max(
                         0.0,
@@ -19672,9 +21146,14 @@ def train_model(
                     )
                     policy_direction = 1.0
                     if record["source"] == "human":
-                        trajectory_scale = human_policy_multiplier
+                        # Imitate only when the demonstrated action is better
+                        # than the model's state value; otherwise keep it as
+                        # critic data without anchoring the policy to the user.
+                        trajectory_scale = human_policy_multiplier * (
+                            1.0 if advantage > 0.0 else 0.10
+                        )
                     elif record.get("trajectory_class") == "successful_ai":
-                        trajectory_scale = 0.45
+                        trajectory_scale = 0.90
                     elif record.get("trajectory_class") == "failed_ai":
                         failed_return = float(
                             record.get("n_task_return", record.get("task_reward", 0.0))
@@ -19700,14 +21179,36 @@ def train_model(
                         duration_index=duration_index,
                         action_payload=record.get("action_payload"),
                     )
+                    previous_action_for_control = (
+                        int(window[position - 1]["action"])
+                        if position > 0
+                        else -1
+                    )
+                    next_action_for_control = (
+                        int(window[position + 1]["action"])
+                        if position + 1 < len(window)
+                        else -1
+                    )
+                    control_loss, control_hidden_gradient = _train_control_decision_head(
+                        np,
+                        model,
+                        hidden,
+                        previous_action_for_control,
+                        action_id,
+                        next_action_for_control,
+                        bool(record["done"]),
+                        max(0.10, abs(policy_weight) * 0.25),
+                        gradients,
+                    )
                     hidden_gradients[position] += (
                         policy_hidden_gradient
+                        + control_hidden_gradient
                         + q_hidden_gradient
                         + value_hidden_gradient
                         + safety_hidden_gradient
                         + world_hidden_gradient
                     )
-                    policy_loss_total += policy_loss
+                    policy_loss_total += policy_loss + control_loss
                     q_loss_total += q_loss
                     value_loss_total += value_loss
                     safety_loss_total += safety_loss
@@ -19817,6 +21318,48 @@ def train_model(
         if cross_pairs % 16:
             apply_gradients(cross_gradients, 2 * (cross_pairs % 16))
 
+    # Semantic ranking pairs never equate "later" with "better".  They cover
+    # success/failure stage matching, demonstration quality, death risk, and loops.
+    semantic_pairs = _runtime_module("reward_model").progress_ranking_pairs(
+        records, limit=256
+    )
+    if semantic_pairs:
+        semantic_gradients = _training_gradient_buffer(np, model)
+        semantic_count = 0
+        for low_record, high_record, pair_scale, _reason in semantic_pairs:
+            raise_if_cancelled(stop_event)
+            try:
+                low_hidden, low_cache = _latest_temporal_hidden(
+                    np, model, low_record["state"], return_cache=True
+                )
+                high_hidden, high_cache = _latest_temporal_hidden(
+                    np, model, high_record["state"], return_cache=True
+                )
+            except Exception:
+                continue
+            pair_loss, low_gradient, high_gradient = _train_progress_pair(
+                np,
+                model,
+                low_hidden,
+                high_hidden,
+                progress_margin,
+                progress_weight * max(0.10, float(pair_scale)),
+                semantic_gradients,
+            )
+            _backprop_temporal_encoder(
+                np, model, low_cache, low_gradient, lr * 0.20, semantic_gradients
+            )
+            _backprop_temporal_encoder(
+                np, model, high_cache, high_gradient, lr * 0.20, semantic_gradients
+            )
+            progress_loss_total += pair_loss
+            semantic_count += 1
+            if semantic_count % 16 == 0:
+                apply_gradients(semantic_gradients, 32)
+                semantic_gradients = _training_gradient_buffer(np, model)
+        if semantic_count % 16:
+            apply_gradients(semantic_gradients, 2 * (semantic_count % 16))
+
     train_metrics = evaluate_model_records(np, model, records[:min(2048, len(records))])
     validation_metrics = evaluate_model_records(np, model, validation)
     model["trained_samples"] = int(model.get("trained_samples", 0)) + len(records)
@@ -19826,6 +21369,9 @@ def train_model(
     model["world_validation_done_brier"] = float(validation_metrics["world_done_brier"])
     model["world_validation_latent_error"] = float(validation_metrics["world_latent_error"])
     model["world_validation_multistep_error"] = float(validation_metrics["world_multistep_error"])
+    model["world_validation_slot_error"] = float(validation_metrics["world_slot_error"])
+    model["world_validation_hud_error"] = float(validation_metrics["world_hud_error"])
+    model["world_validation_event_brier"] = float(validation_metrics["world_event_brier"])
     priority_updates = 0
     try:
         priority_updates = refresh_transition_priorities(
@@ -19884,6 +21430,7 @@ def train_model(
         "validation_iql_value_mae": validation_metrics["value_mae"],
         "episodes": int(dataset.get("episodes", 0)),
         "human_samples": len(human_records),
+        "elite_human_samples": len(elite_human_records),
         "successful_ai_samples": len(successful_ai),
         "ai_samples": len(ai_records),
         "skills": len(skills),
@@ -20019,6 +21566,27 @@ def runtime_self_check(np) -> None:
         )
         or model["world_latent_to_hidden_w"].shape != (WORLD_MODEL_MEMBERS, model_world_latent_size(model), model["hidden_size"])
         or model["reward_model_w"].shape != (REWARD_MODEL_MEMBERS, model["hidden_size"], REWARD_MODEL_OUTPUTS)
+        or model["discovered_event_prototypes"].shape != (
+            DISCOVERED_EVENT_SLOT_COUNT,
+            DISCOVERED_EVENT_DIM,
+        )
+        or model["discovered_event_counts"].shape != (
+            DISCOVERED_EVENT_SLOT_COUNT,
+        )
+        or model["policy_control_decision_w"].shape != (
+            model["hidden_size"], len(CONTROL_DECISIONS)
+        )
+        or model["world_slot_w"].shape != (
+            WORLD_MODEL_MEMBERS,
+            model_world_latent_size(model),
+            OBJECT_SLOT_COUNT * OBJECT_SLOT_DIM,
+        )
+        or model["world_hud_w"].shape != (
+            WORLD_MODEL_MEMBERS, model_world_latent_size(model), HUD_TOKEN_DIM
+        )
+        or model["world_event_w"].shape != (
+            WORLD_MODEL_MEMBERS, model_world_latent_size(model), len(EVENT_NAMES)
+        )
         or model["value_w"].shape != (model["hidden_size"], 1)
         or not np.isfinite(probabilities).all()
         or abs(float(probabilities.sum()) - 1.0) > 1e-4
@@ -20077,13 +21645,14 @@ def runtime_self_check(np) -> None:
     if (
         not np.any(np.abs(gradients["frame_proj"]) > 0.0)
         or not np.any(np.abs(gradients["Wz"]) > 0.0)
-        or not np.any(np.abs(gradients["conv_master_w"]) > 0.0)
-        or not np.any(np.abs(gradients["conv2_pointwise_w"]) > 0.0)
-        or not np.any(np.abs(gradients["conv3_pointwise_w"]) > 0.0)
+        or not any(
+            np.any(np.abs(gradients[key]) > 0.0)
+            for key in _CONV_PARAMETER_KEYS
+        )
         or not np.any(np.abs(gradients["action_embedding"]) > 0.0)
         or not np.any(np.abs(gradients["duration_embedding"]) > 0.0)
     ):
-        raise RuntimeError("三层视觉网络与GRU反向传播自检失败")
+        raise RuntimeError("冻结感知主干、局部adapter与GRU反向传播自检失败")
     recurrent_first = recurrent_model_step(
         np,
         model,
@@ -20134,6 +21703,7 @@ def runtime_self_check(np) -> None:
         False,
         1.0,
         auxiliary_gradients,
+        structured_target=structured_world_target_from_state(np, model, state),
     )
     overshoot_gradients = _training_gradient_buffer(np, model)
     overshoot_loss, overshoot_hidden_gradient = train_world_model_overshooting(
@@ -20170,6 +21740,9 @@ def runtime_self_check(np) -> None:
         or not np.any(auxiliary_gradients["world_prior_state_w"])
         or not np.any(auxiliary_gradients["world_posterior_observation_w"])
         or not np.any(auxiliary_gradients["world_continuation_w"])
+        or not np.any(auxiliary_gradients["world_slot_b"])
+        or not np.any(auxiliary_gradients["world_hud_b"])
+        or not np.any(auxiliary_gradients["world_event_b"])
         or not np.any(auxiliary_gradients["duration_embedding"])
         or not math.isfinite(overshoot_loss)
         or not np.isfinite(overshoot_hidden_gradient).all()
@@ -20392,6 +21965,12 @@ def runtime_self_check(np) -> None:
         [],
         death_config,
         death_history,
+        learned_reward_signals={
+            "event_probabilities": {**{name: 0.0 for name in EVENT_NAMES}, "death": 0.95},
+            "confidence": 1.0,
+            "current_potential": 0.0,
+            "next_potential": 0.0,
+        },
     )
     progress_config = dict(death_config)
     progress_config["task_reward_weight"] = 0.0
@@ -20400,13 +21979,99 @@ def runtime_self_check(np) -> None:
     positive_progress, _ = classify_transition_reward(
         bright, bright, bright_color, bright_color, bright_color, bright_color,
         [], progress_config, {"score": [], "death": [], "menu": []}, None, 0.8,
+        {
+            "event_probabilities": {**{name: 0.0 for name in EVENT_NAMES}, "progress": 0.8},
+            "confidence": 1.0,
+            "current_potential": 0.0,
+            "next_potential": 0.8,
+        },
     )
     negative_progress, _ = classify_transition_reward(
         bright, bright, bright_color, bright_color, bright_color, bright_color,
         [], progress_config, {"score": [], "death": [], "menu": []}, None, -0.8,
+        {
+            "event_probabilities": {name: 0.0 for name in EVENT_NAMES},
+            "confidence": 1.0,
+            "current_potential": 0.8,
+            "next_potential": 0.0,
+        },
     )
     if not weighted_death < 0.0 or not positive_progress > negative_progress:
         raise RuntimeError("统一奖励组合自检失败")
+
+    understanding_module = _runtime_module("understanding")
+    semantic_entity = understanding_module.Entity(
+        track_id=1,
+        bbox=(0.35, 0.35, 0.55, 0.65),
+        velocity=(0.0, 0.0),
+        appearance=[0.2] * 8,
+        semantic_type="player",
+        type_confidence=0.9,
+        controllable_probability=0.95,
+        interactable_probability=0.1,
+        danger_probability=0.0,
+        goal_probability=0.2,
+    )
+    semantic_before = understanding_module.BeliefState(
+        timestamp=1.0,
+        scene_embedding=[0.0] * 16,
+        entities=[semantic_entity],
+        relations=[],
+        hud_facts={},
+        visible_text=["collect key"],
+        events={name: 0.0 for name in BASE_EVENT_NAMES},
+        goal_hypotheses=[],
+        causal_rules=[],
+        unknown_regions=[(0.7, 0.2, 0.9, 0.4)],
+        uncertainty=0.8,
+    )
+    semantic_before.goal_hypotheses = _runtime_module(
+        "goal_model"
+    ).infer_goal_hypotheses(semantic_before)
+    semantic_goal = active_goal_hypothesis(semantic_before)
+    semantic_after = understanding_module.belief_from_dict(
+        understanding_module.belief_to_dict(semantic_before)
+    )
+    semantic_after.timestamp = 2.0
+    semantic_after.uncertainty = 0.35
+    semantic_after.events["progress"] = 0.7
+    causal_probe_store = _runtime_module("causal_model").CausalRuleStore()
+    causal_probe_store.observe_transition(
+        semantic_before,
+        actions_list[1],
+        semantic_after,
+        intervention=True,
+    )
+    semantic_parts = goal_conditioned_reward(
+        semantic_before,
+        semantic_after,
+        semantic_goal,
+        causal_probe_store,
+        None,
+        DEFAULT_CONFIG,
+    )
+    semantic_plan = plan_with_understanding(
+        semantic_after,
+        semantic_goal,
+        [{
+            "skill_id": "semantic-probe",
+            "goal_condition": semantic_goal.name,
+            "actions": [1],
+            "durations": [2],
+            "success_rate": 0.8,
+        }],
+        causal_probe_store,
+        _runtime_module("world_model"),
+        None,
+        8,
+    )
+    if (
+        not canonical_belief_key(semantic_before).startswith("s2:")
+        or float(semantic_parts.get("information_gain", 0.0)) <= 0.0
+        or not causal_probe_store.snapshot()
+        or semantic_plan is None
+    ):
+        raise RuntimeError("对象→关系→事件→规则→目标→技能语义链自检失败")
 
 
 
@@ -20470,6 +22135,15 @@ def repair_profile(profile_id: str, config: dict, stop_event: threading.Event | 
     memory_result=compact_state_values(paths["db"],int(config["state_memory_limit_per_game"]),len(profile["actions"]),stop_event)
     human_result=compact_human_action_memory(paths["db"],HUMAN_ACTION_MEMORY_LIMIT,len(profile["actions"]),stop_event)
     removed+=int(memory_result.get("removed",0))+int(human_result.get("removed",0))
+    semantic_connection = _runtime_module("memory").open_semantic_database(paths["db"])
+    try:
+        removed += _runtime_module("memory").compact_semantic_memory(
+            semantic_connection,
+            int(config.get("semantic_memory_limit_per_game", 50000)),
+        )
+        semantic_connection.commit()
+    finally:
+        semantic_connection.close()
     return {"repaired":repaired,"removed":removed,"records":int(result.get("records",0)),"memory_records":int(memory_result.get("records",0)),"human_memory_records":int(human_result.get("records",0))}
 
 
@@ -20490,6 +22164,7 @@ def ensure_files(stop_event: threading.Event | None) -> dict:
     repaired += main_repaired
     restart_required = restart_required or main_restart
     raise_if_cancelled(stop_event)
+    downloaded += ensure_runtime_components(True, stop_event)
     config = load_config()
     index = load_index()
     profile_ids = set(index.get("profiles", {}))
@@ -20557,96 +22232,517 @@ def human_observed_effect_reward(idle: bool, observed_effect: float) -> float:
 
 
 def record_human_session(target: int, stop_event: threading.Event) -> str:
-    config,_=ensure_core_ready(stop_event);identity=profile_identity(target);profile,paths=load_or_create_profile(identity);ensure_action_metadata(profile)
-    runtime=adaptive_runtime_settings(config);interval=max(0.04,min(0.25,float(runtime["sample_interval_seconds"])));reacquire=max(0.0,min(15.0,float(config["target_reacquire_seconds"])))
-    max_actions=adaptive_action_catalog_limit(config,str(runtime["hardware_tier"]));sampler=ScreenSampler(target,str(runtime["hardware_tier"]));wheel_monitor=MouseWheelMonitor();wheel_monitor.start()
-    human_memory=load_human_action_memory(paths["db"],len(profile["actions"]),HUMAN_ACTION_MEMORY_LIMIT);dirty_human:set[tuple[str,int]]=set()
-    run_id=f"human-run-{time.time_ns():x}-{os.getpid():x}"
-    episode_id=f"human-{time.time_ns():x}-{os.getpid():x}";step=0;rows=[];pending=None;recorded=0;captured=0;black_frames=0;new_actions=0;pending_catalog_actions:dict[str,dict]={}
-    frame_history=[];action_history=[];duration_history=[];recent_state_keys=[];signal_history={"score":[],"death":[],"menu":[]};human_progress_reference=load_human_progress_reference(paths["db"]);previous_cursor=cursor_position();last_observation_time=time.monotonic()
-    previous_raw=None;previous_blue=None;previous_red=None;previous_model_frame=None
+    """Record actions together with their semantic reason and policy surprise."""
+    ensure_core_ready(stop_event)
+    np = ensure_runtime_ready(stop_event)
+    config = load_config()
+    identity = profile_identity(target)
+    profile, paths = load_or_create_profile(identity)
+    ensure_action_metadata(profile)
+    runtime = adaptive_runtime_settings(config)
+    runtime_tier = str(runtime["hardware_tier"])
+    interval = max(
+        0.04,
+        min(0.25, float(runtime["sample_interval_seconds"])),
+    )
+    reacquire = max(
+        0.0,
+        min(15.0, float(config["target_reacquire_seconds"])),
+    )
+    max_actions = adaptive_action_catalog_limit(config, runtime_tier)
+    active_model_path = (
+        paths["best_model"] if paths["best_model"].is_file() else paths["model"]
+    )
+    semantic_model, _ = load_model(
+        np,
+        active_model_path,
+        MODEL_INPUT_DIM,
+        configured_teacher_hidden_size(config),
+        len(profile["actions"]),
+        profile["actions"],
+    )
+    semantic_model["runtime_tier"] = runtime_tier
+    semantic_model["_discovered_event_min_confidence"] = float(
+        config.get("discovered_event_min_confidence", 0.55)
+    )
+    semantic_connection, causal_store, _ = load_semantic_runtime_state(paths["db"])
+    preference_model = load_human_preference_model(semantic_connection)
+    causal_module = _runtime_module("causal_model")
+
+    sampler = ScreenSampler(target, runtime_tier)
+    wheel_monitor = MouseWheelMonitor()
+    wheel_monitor.start()
+    human_memory = load_human_action_memory(
+        paths["db"],
+        len(profile["actions"]),
+        HUMAN_ACTION_MEMORY_LIMIT,
+    )
+    dirty_human: set[tuple[str, int]] = set()
+    run_id = f"human-run-{time.time_ns():x}-{os.getpid():x}"
+    episode_id = f"human-{time.time_ns():x}-{os.getpid():x}"
+    step = 0
+    rows: list[tuple] = []
+    pending = None
+    recorded = 0
+    captured = 0
+    black_frames = 0
+    new_actions = 0
+    high_surprise_samples = 0
+    pending_catalog_actions: dict[str, dict] = {}
+    frame_history: list[bytes] = []
+    action_history: list[int] = []
+    duration_history: list[float] = []
+    recent_state_keys: list[str] = []
+    semantic_state_keys: list[str] = []
+    signal_history = {"score": [], "death": [], "menu": []}
+    human_progress_reference = load_human_progress_reference(paths["db"])
+    previous_cursor = cursor_position()
+    last_observation_time = time.monotonic()
+    previous_model_frame = None
+    previous_belief = None
+    active_goal = None
+
+    def reset_semantic_episode() -> None:
+        nonlocal previous_belief, active_goal
+        previous_belief = None
+        active_goal = None
+        semantic_state_keys.clear()
+        semantic_model.pop("_perception_tracks", None)
+        semantic_model.pop("_latest_belief", None)
+
+    def prediction_error(before, action_value: dict, after) -> float:
+        effects = set(causal_module.transition_effects(before, after))
+        cause = causal_module.action_cause(action_value)
+        rules = causal_store.applicable_rules(before, cause)
+        if not rules:
+            return max(
+                0.15 if effects else 0.0,
+                min(1.0, float(after.uncertainty)),
+            )
+        errors = [
+            abs((1.0 if rule.effect in effects else 0.0) - float(rule.probability))
+            for rule in rules
+        ]
+        return max(0.0, min(4.0, sum(errors) / max(1, len(errors))))
+
     try:
         while not stop_event.is_set():
-            if esc_pressed(): break
-            replacement=foreground_replacement_window(target,identity)
-            if not window_exists(target): replacement=replacement or wait_for_replacement_window(target,identity,stop_event,reacquire)
+            if esc_pressed():
+                break
+            replacement = foreground_replacement_window(target, identity)
+            if not window_exists(target):
+                replacement = replacement or wait_for_replacement_window(
+                    target,
+                    identity,
+                    stop_event,
+                    reacquire,
+                )
             if replacement:
                 if pending is not None:
-                    pending=list(pending);pending[7]=1;pending[16:19]=[0,1,0];rows.append(tuple(pending));pending=None
-                sampler.close();target=replacement;sampler=ScreenSampler(target,str(runtime["hardware_tier"]));wheel_monitor.clear();previous_cursor=cursor_position();frame_history.clear();action_history.clear();duration_history.clear();signal_history={"score":[],"death":[],"menu":[]};previous_raw=previous_blue=previous_red=previous_model_frame=None;last_observation_time=time.monotonic()
-                episode_id=f"human-{time.time_ns():x}-{os.getpid():x}";step=0;continue
-            if not window_exists(target): break
-            if foreground_window()!=target:
+                    pending = list(pending)
+                    pending[7] = 1
+                    pending[16:19] = [0, 1, 0]
+                    rows.append(tuple(pending))
+                    pending = None
+                sampler.close()
+                target = replacement
+                sampler = ScreenSampler(target, runtime_tier)
+                wheel_monitor.clear()
+                previous_cursor = cursor_position()
+                frame_history.clear()
+                action_history.clear()
+                duration_history.clear()
+                recent_state_keys.clear()
+                signal_history = {"score": [], "death": [], "menu": []}
+                previous_model_frame = None
+                last_observation_time = time.monotonic()
+                episode_id = f"human-{time.time_ns():x}-{os.getpid():x}"
+                step = 0
+                reset_semantic_episode()
+                continue
+            if not window_exists(target):
+                break
+            if foreground_window() != target:
                 if pending is not None:
-                    pending=list(pending);pending[7]=1;pending[16:19]=[0,1,0];rows.append(tuple(pending));pending=None
-                    episode_id=f"human-{time.time_ns():x}-{os.getpid():x}";step=0
-                wheel_monitor.clear();time.sleep(0.08);previous_raw=previous_blue=previous_red=previous_model_frame=None;frame_history.clear();action_history.clear();duration_history.clear();last_observation_time=time.monotonic();continue
-            pre,pre_blue,pre_red=sampler.capture_frame();captured+=1
-            if frame_capture_failed(pre,pre_blue,pre_red):
-                black_frames+=1;time.sleep(interval);continue
-            pre_model=cursor_aware_frame(target,pre);pre_feature=make_feature(pre_model,previous_model_frame,pre_blue,pre_red,sampler.last_spatial_context)
-            if not frame_history: frame_history=[pre_feature]
-            else: frame_history=(frame_history+[pre_feature])[-TEMPORAL_FRAMES:]
-            state=build_temporal_state(frame_history,action_history,duration_history)
-            action,previous_cursor=observe_human_action(target,previous_cursor,wheel_monitor.consume())
-            now=time.monotonic()
-            observed_duration=max(0.01,min(2.0,now-last_observation_time))
-            last_observation_time=now
-            action=normalized_action(action);signature=action_signature(action)
-            exact_index=next((index for index,catalog_action in enumerate(profile["actions"]) if action_signature(catalog_action)==signature),None)
+                    pending = list(pending)
+                    pending[7] = 1
+                    pending[16:19] = [0, 1, 0]
+                    rows.append(tuple(pending))
+                    pending = None
+                    episode_id = f"human-{time.time_ns():x}-{os.getpid():x}"
+                    step = 0
+                wheel_monitor.clear()
+                time.sleep(0.08)
+                previous_model_frame = None
+                frame_history.clear()
+                action_history.clear()
+                duration_history.clear()
+                recent_state_keys.clear()
+                last_observation_time = time.monotonic()
+                reset_semantic_episode()
+                continue
+
+            pre, pre_blue, pre_red = sampler.capture_frame()
+            captured += 1
+            if frame_capture_failed(pre, pre_blue, pre_red):
+                black_frames += 1
+                time.sleep(interval)
+                continue
+            pre_model = cursor_aware_frame(target, pre)
+            pre_feature = make_feature(
+                pre_model,
+                previous_model_frame,
+                pre_blue,
+                pre_red,
+                sampler.last_spatial_context,
+            )
+            frame_history = (
+                [pre_feature]
+                if not frame_history
+                else (frame_history + [pre_feature])[-TEMPORAL_FRAMES:]
+            )
+            state = build_temporal_state(
+                frame_history,
+                action_history,
+                duration_history,
+            )
+            try:
+                policy_probabilities, _, _ = factorized_action_outputs(
+                    np,
+                    semantic_model,
+                    state,
+                )
+                pre_belief = semantic_model.get("_latest_belief")
+            except Exception:
+                policy_probabilities = np.full(
+                    max(1, len(profile["actions"])),
+                    1.0 / max(1, len(profile["actions"])),
+                    dtype=np.float32,
+                )
+                pre_belief = None
+            pre_belief = understand_feature(
+                np,
+                semantic_model,
+                pre_feature,
+                previous_belief,
+                action_history[-1] if action_history else -1,
+                existing_belief=pre_belief,
+            )
+            state = build_temporal_state(
+                frame_history,
+                action_history,
+                duration_history,
+                pre_belief,
+            )
+            active_goal = active_goal_hypothesis(pre_belief, active_goal)
+
+            action, previous_cursor = observe_human_action(
+                target,
+                previous_cursor,
+                wheel_monitor.consume(),
+            )
+            now = time.monotonic()
+            observed_duration = max(0.01, min(2.0, now - last_observation_time))
+            last_observation_time = now
+            action = normalized_action(action)
+            signature = action_signature(action)
+            exact_index = next(
+                (
+                    index
+                    for index, catalog_action in enumerate(profile["actions"])
+                    if action_signature(catalog_action) == signature
+                ),
+                None,
+            )
             if exact_index is None:
-                queue_action_catalog_candidate(pending_catalog_actions,action);base_action=nearest_action_index(profile["actions"],action)
+                queue_action_catalog_candidate(pending_catalog_actions, action)
+                base_action = nearest_action_index(profile["actions"], action)
             else:
-                base_action=int(exact_index);profile["action_origins"][base_action]="human"
-            duration_index=duration_bin(observed_duration);composite_action=encode_action_id(base_action,duration_index);action_payload_blob=encode_action_payload(action,observed_duration,duration_index)
-            if not sleep_cancelable(interval,stop_event,target): break
-            post,post_blue,post_red=sampler.capture_frame();captured+=1
-            black=frame_capture_failed(post,post_blue,post_red)
+                base_action = int(exact_index)
+                profile["action_origins"][base_action] = "human"
+            duration_index = duration_bin(observed_duration)
+            composite_action = encode_action_id(base_action, duration_index)
+            action_payload_blob = encode_action_payload(
+                action,
+                observed_duration,
+                duration_index,
+            )
+            action_probability = (
+                float(policy_probabilities[base_action])
+                if 0 <= base_action < len(policy_probabilities)
+                else 1e-8
+            )
+
+            if not sleep_cancelable(interval, stop_event, target):
+                break
+            post, post_blue, post_red = sampler.capture_frame()
+            captured += 1
+            black = frame_capture_failed(post, post_blue, post_red)
+            surprise = 0.0
             if black:
-                black_frames+=1
-                next_state=None;done=1;terminated=0;truncated=0;capture_failed=1;metrics={"visual":0.0,"confirmed_death":0.0,"confirmed_victory":0.0,"level_transition":0.0,"score_delta":0.0,"score_delta_confidence":0.0,"persistent_event":0.0,"human_progress":0.0,"controllable_novelty":0.0,"task_reward":0.0,"exploration_reward":0.0,"safety_penalty":0.0,"state_key":"capture_failed"};reward=0.0
+                black_frames += 1
+                next_state = None
+                done = 1
+                terminated = 0
+                truncated = 0
+                capture_failed = 1
+                metrics = {
+                    "visual": 0.0,
+                    "confirmed_death": 0.0,
+                    "confirmed_victory": 0.0,
+                    "level_transition": 0.0,
+                    "score_delta": 0.0,
+                    "score_delta_confidence": 0.0,
+                    "persistent_event": 0.0,
+                    "human_progress": 0.0,
+                    "controllable_novelty": 0.0,
+                    "task_reward": 0.0,
+                    "exploration_reward": 0.0,
+                    "safety_penalty": 0.0,
+                    "state_key": "capture_failed",
+                }
+                reward = 0.0
             else:
-                post_model=cursor_aware_frame(target,post);post_feature=make_feature(post_model,pre_model,post_blue,post_red,sampler.last_spatial_context)
-                next_frames=(frame_history+[post_feature])[-TEMPORAL_FRAMES:]
-                next_actions=(action_history+[composite_action])[-ACTION_HISTORY_LENGTH:]
-                next_durations=(duration_history+[observed_duration])[-ACTION_HISTORY_LENGTH:]
-                next_state=build_temporal_state(next_frames,next_actions,next_durations)
-                _,metrics=classify_transition_reward(pre,post,pre_blue,pre_red,post_blue,post_red,recent_state_keys,config,signal_history,human_progress_reference)
-                idle=not(action["keys"] or action["buttons"] or action["mouse_dx"] or action["mouse_dy"] or action["mouse_wheel"])
-                observed_effect=float(metrics.get("persistent_event",0.0))+float(metrics.get("human_progress",0.0))
-                demonstration_effect=human_observed_effect_reward(idle,observed_effect)
-                metrics["task_reward"]=max(-4.0,min(4.0,float(metrics.get("task_reward",0.0))+demonstration_effect))
-                reward=compose_reward(metrics,config)
-                terminated=1 if metrics.get("confirmed_death",0.0)>0.5 or metrics.get("confirmed_victory",0.0)>0.5 else 0;truncated=0;capture_failed=0;done=terminated
-            priority=transition_priority("human",reward,bool(done),float(metrics.get("visual",0.0)))
-            outcome_type,outcome_confidence,score_delta=transition_outcome_labels(metrics)
-            transition=(episode_id,step,"human",state,composite_action,reward,next_state,done,priority,float(metrics.get("task_reward",reward)),float(metrics.get("exploration_reward",0.0)),float(metrics.get("safety_penalty",max(0.0,-reward))),outcome_type,outcome_confidence,score_delta,run_id,terminated,truncated,capture_failed,action_payload_blob)
-            if pending is not None: rows.append(pending)
-            pending=transition;recorded+=1
-            memory_key=memory_state_key(pre,pre_feature);update_human_action_memory(human_memory,(memory_key,base_action));dirty_human.add((memory_key,base_action))
-            update_action_reward(profile,base_action,reward);update_action_effect(profile,base_action,float(metrics.get("visual",0.0)));record_action_duration(profile,base_action,observed_duration)
-            if len(rows)>=96: insert_transitions(paths["db"],rows);rows.clear()
-            if len(dirty_human)>=256: save_human_action_memory(paths["db"],human_memory,dirty_human)
+                post_model = cursor_aware_frame(target, post)
+                post_feature = make_feature(
+                    post_model,
+                    pre_model,
+                    post_blue,
+                    post_red,
+                    sampler.last_spatial_context,
+                )
+                post_belief = understand_feature(
+                    np,
+                    semantic_model,
+                    post_feature,
+                    pre_belief,
+                    base_action,
+                )
+                semantic_key = canonical_belief_key(pre_belief)
+                semantic_state_keys.append(semantic_key)
+                semantic_state_keys[:] = semantic_state_keys[-16:]
+                post_belief.raw_features["semantic_history"] = list(semantic_state_keys)
+                next_frames = (frame_history + [post_feature])[-TEMPORAL_FRAMES:]
+                next_actions = (
+                    action_history + [composite_action]
+                )[-ACTION_HISTORY_LENGTH:]
+                next_durations = (
+                    duration_history + [observed_duration]
+                )[-ACTION_HISTORY_LENGTH:]
+                next_state = build_temporal_state(
+                    next_frames,
+                    next_actions,
+                    next_durations,
+                    post_belief,
+                )
+                _, metrics = classify_transition_reward(
+                    pre,
+                    post,
+                    pre_blue,
+                    pre_red,
+                    post_blue,
+                    post_red,
+                    recent_state_keys,
+                    config,
+                    signal_history,
+                    human_progress_reference,
+                    previous_belief=pre_belief,
+                    current_belief=post_belief,
+                    selected_goal=active_goal,
+                    causal_model=causal_store,
+                    human_preference_model=preference_model,
+                )
+                idle = not (
+                    action["keys"]
+                    or action["buttons"]
+                    or action["mouse_dx"]
+                    or action["mouse_dy"]
+                    or action["mouse_wheel"]
+                )
+                observed_effect = float(metrics.get("persistent_event", 0.0)) + float(
+                    metrics.get("goal_progress", 0.0)
+                )
+                demonstration_effect = human_observed_effect_reward(
+                    idle,
+                    observed_effect,
+                )
+                metrics["task_reward"] = max(
+                    -4.0,
+                    min(
+                        4.0,
+                        float(metrics.get("task_reward", 0.0))
+                        + demonstration_effect,
+                    ),
+                )
+                semantic_prediction_error = prediction_error(
+                    pre_belief,
+                    action,
+                    post_belief,
+                )
+                goal_delta = float(metrics.get("goal_progress", 0.0))
+                save_semantic_transition(
+                    semantic_connection,
+                    causal_store,
+                    pre_belief,
+                    action,
+                    post_belief,
+                    intervention=True,
+                )
+                surprise = record_human_semantic_decision(
+                    semantic_connection,
+                    episode_id,
+                    step,
+                    pre_belief,
+                    action,
+                    post_belief,
+                    active_goal,
+                    goal_delta,
+                    semantic_prediction_error,
+                    action_probability,
+                )
+                semantic_connection.commit()
+                if surprise >= 2.0:
+                    high_surprise_samples += 1
+                metrics["human_action_surprise"] = surprise
+                metrics["prediction_error"] = semantic_prediction_error
+                reward = compose_reward(metrics, config)
+                terminated = int(
+                    metrics.get("confirmed_death", 0.0) > 0.5
+                    or metrics.get("confirmed_victory", 0.0) > 0.5
+                )
+                truncated = 0
+                capture_failed = 0
+                done = terminated
+
+            priority = transition_priority(
+                "human",
+                reward,
+                bool(done),
+                float(metrics.get("visual", 0.0))
+                + float(metrics.get("prediction_error", 0.0))
+                + min(3.0, surprise) / 3.0,
+            )
+            outcome_type, outcome_confidence, score_delta = transition_outcome_labels(
+                metrics
+            )
+            transition = (
+                episode_id,
+                step,
+                "human",
+                state,
+                composite_action,
+                reward,
+                next_state,
+                done,
+                priority,
+                float(metrics.get("task_reward", reward)),
+                float(metrics.get("exploration_reward", 0.0)),
+                float(metrics.get("safety_penalty", max(0.0, -reward))),
+                outcome_type,
+                outcome_confidence,
+                score_delta,
+                run_id,
+                terminated,
+                truncated,
+                capture_failed,
+                action_payload_blob,
+            )
+            if pending is not None:
+                rows.append(pending)
+            pending = transition
+            recorded += 1
+            memory_key = (
+                canonical_belief_key(pre_belief)
+                if not black
+                else memory_state_key(pre, pre_feature)
+            )
+            update_human_action_memory(
+                human_memory,
+                (memory_key, base_action),
+            )
+            dirty_human.add((memory_key, base_action))
+            update_action_reward(profile, base_action, reward)
+            update_action_effect(
+                profile,
+                base_action,
+                float(metrics.get("visual", 0.0)),
+            )
+            record_action_duration(profile, base_action, observed_duration)
+            if len(rows) >= 96:
+                insert_transitions(paths["db"], rows)
+                rows.clear()
+            if len(dirty_human) >= 256:
+                save_human_action_memory(
+                    paths["db"],
+                    human_memory,
+                    dirty_human,
+                )
             if black or done:
                 if pending is not None:
-                    rows.append(pending);pending=None
-                episode_id=f"human-{time.time_ns():x}-{os.getpid():x}";step=0;frame_history.clear();action_history.clear();duration_history.clear();recent_state_keys.clear();signal_history={"score":[],"death":[],"menu":[]};previous_model_frame=None
+                    rows.append(pending)
+                    pending = None
+                episode_id = f"human-{time.time_ns():x}-{os.getpid():x}"
+                step = 0
+                frame_history.clear()
+                action_history.clear()
+                duration_history.clear()
+                recent_state_keys.clear()
+                signal_history = {"score": [], "death": [], "menu": []}
+                previous_model_frame = None
+                reset_semantic_episode()
             else:
-                step+=1;frame_history=next_frames;action_history=next_actions;duration_history=next_durations;recent_state_keys.append(str(metrics.get("state_key","")));recent_state_keys=recent_state_keys[-16:]
-                previous_model_frame=post_model;previous_raw=post;previous_blue=post_blue;previous_red=post_red
+                step += 1
+                frame_history = next_frames
+                action_history = next_actions
+                duration_history = next_durations
+                recent_state_keys.append(str(metrics.get("state_key", "")))
+                recent_state_keys[:] = recent_state_keys[-16:]
+                previous_model_frame = post_model
+                previous_belief = post_belief
+                active_goal = active_goal_hypothesis(post_belief, active_goal)
     finally:
-        wheel_monitor.stop();sampler.close()
+        wheel_monitor.stop()
+        sampler.close()
         if pending is not None:
-            pending=list(pending);pending[7]=1;pending[16:19]=[0,1,0];rows.append(tuple(pending))
-        if rows: insert_transitions(paths["db"],rows)
-        save_human_action_memory(paths["db"],human_memory,dirty_human)
-        new_actions=expand_action_catalog_at_boundary(profile,pending_catalog_actions,max_actions,"human")
+            pending = list(pending)
+            pending[7] = 1
+            pending[16:19] = [0, 1, 0]
+            rows.append(tuple(pending))
+        if rows:
+            insert_transitions(paths["db"], rows)
+        save_human_action_memory(paths["db"], human_memory, dirty_human)
+        try:
+            semantic_connection.commit()
+            if recorded:
+                save_model(np, active_model_path, semantic_model)
+        finally:
+            semantic_connection.close()
+        new_actions = expand_action_catalog_at_boundary(
+            profile,
+            pending_catalog_actions,
+            max_actions,
+            "human",
+        )
         if recorded or new_actions:
-            if recorded: profile["human_sessions"]=int(profile.get("human_sessions",0))+1
-            profile["needs_training"]=True;save_profile(profile,paths)
-        compact_experience(paths["db"],int(config["experience_limit_per_game"]),len(profile["actions"]));wait_esc_release()
-    warning="；画面采集可能失败" if black_frames>max(8,captured//2) else ""
-    return f"人类示范结束：{profile['name']}；保存 {recorded} 条完整转移；新增动作 {new_actions}{warning}"
+            if recorded:
+                profile["human_sessions"] = int(profile.get("human_sessions", 0)) + 1
+            profile["needs_training"] = True
+            save_profile(profile, paths)
+        compact_experience(
+            paths["db"],
+            int(config["experience_limit_per_game"]),
+            len(profile["actions"]),
+        )
+        wait_esc_release()
+    warning = (
+        "；画面采集可能失败"
+        if black_frames > max(8, captured // 2)
+        else ""
+    )
+    return (
+        f"人类示范结束：{profile['name']}；保存 {recorded} 条语义转移；"
+        f"高惊讶样本 {high_surprise_samples}；新增动作 {new_actions}{warning}"
+    )
 
 
 
@@ -20668,6 +22764,18 @@ def train_all_profiles(stop_event: threading.Event) -> str:
             if pool["human"]<4 and pool["records"]<24: summaries.append(f"{profile['name']}：经验不足");continue
             active_path=paths["best_model"] if paths["best_model"].is_file() else paths["model"]
             active_target_path=paths["best_target_model"] if paths["best_target_model"].is_file() else paths["target_model"]
+            pending_runtime_candidate=any(
+                paths[f"student_{tier_name}_candidate"].is_file()
+                and paths[f"student_{tier_name}_candidate_target"].is_file()
+                for tier_name in ("low","mid","high")
+            )
+            pending_offline_teacher=(
+                paths["candidate_model"].is_file()
+                and paths["candidate_target_model"].is_file()
+            )
+            if pending_runtime_candidate and pending_offline_teacher:
+                summaries.append(f"{profile['name']}：候选模型正在真实会话评测，暂不覆盖")
+                continue
             incumbent,_=load_model(np,active_path,MODEL_INPUT_DIM,training_hidden_size,len(profile["actions"]),profile["actions"])
             incumbent_target,target_changed=load_model(np,active_target_path,MODEL_INPUT_DIM,training_hidden_size,len(profile["actions"]),profile["actions"])
             first_model=int(incumbent.get("training_rounds",0))<=0
@@ -20678,6 +22786,7 @@ def train_all_profiles(stop_event: threading.Event) -> str:
             skills=extract_human_skills(list(dataset.get("train",[])),training_config)
             profile["skills"]=skills
             dataset["skills"]=skills
+            persist_semantic_skills(paths["db"], skills)
             validation_records=list(dataset.get("validation",[]))
             baseline=evaluate_model_records(np,incumbent,validation_records)
             if paths["candidate_model"].is_file():
@@ -20784,6 +22893,11 @@ def train_all_profiles(stop_event: threading.Event) -> str:
                 if first_model:
                     save_model(np,paths["best_model"],candidate);save_model(np,paths["model"],candidate)
                     save_model(np,paths["best_target_model"],candidate_target);save_model(np,paths["target_model"],candidate_target)
+                    # The first model is already the champion; no teacher
+                    # challenger should remain to be confused with a later
+                    # online student candidate.
+                    paths["candidate_model"].unlink(missing_ok=True)
+                    paths["candidate_target_model"].unlink(missing_ok=True)
                 else:
                     save_model(np,paths["candidate_model"],candidate)
                     save_model(np,paths["candidate_target_model"],candidate_target)
@@ -20795,6 +22909,9 @@ def train_all_profiles(stop_event: threading.Event) -> str:
                 if not first_model:
                     live_root = ensure_live_model_evaluation(profile)
                     for tier_name in ("low", "mid", "high"):
+                        live_root["tiers"][tier_name]["champion"] = (
+                            _empty_live_model_statistics()
+                        )
                         live_root["tiers"][tier_name]["challenger"] = (
                             _empty_live_model_statistics()
                         )
@@ -20806,7 +22923,11 @@ def train_all_profiles(stop_event: threading.Event) -> str:
                     else f"离线门控通过，等待真实会话晋升（{baseline_score:.3f}→{candidate_score:.3f}）"
                 )
             else:
-                save_model(np,paths["candidate_model"],incumbent);save_model(np,paths["candidate_target_model"],incumbent_target)
+                # Rejected teacher candidates must be removed.  Keeping an
+                # incumbent copy here can later be mistaken for the teacher
+                # corresponding to an independently learned runtime candidate.
+                paths["candidate_model"].unlink(missing_ok=True)
+                paths["candidate_target_model"].unlink(missing_ok=True)
                 profile["needs_training"]=True;save_profile(profile,paths)
                 decision=f"未晋升并自动回滚（{baseline_score:.3f}→{candidate_score:.3f}）"
             planning_confidence=world_model_planning_confidence(
@@ -20939,9 +23060,17 @@ def _mixed_online_replay_samples(population: list[dict], count: int) -> list[dic
     maximum = max(0, min(len(population), int(count)))
     if maximum <= 0:
         return []
+    successful_count = sum(
+        1 for item in population
+        if str(item.get("replay_group", "")) == "successful_ai"
+    )
+    if successful_count >= max(64, maximum):
+        human_fraction, successful_fraction = 0.20, 0.50
+    else:
+        human_fraction, successful_fraction = 0.40, 0.30
     quotas = (
-        ("human", int(round(maximum * 0.40))),
-        ("successful_ai", int(round(maximum * 0.30))),
+        ("human", int(round(maximum * human_fraction))),
+        ("successful_ai", int(round(maximum * successful_fraction))),
         ("recent_online", int(round(maximum * 0.20))),
     )
     selected: list[dict] = []
@@ -21195,6 +23324,12 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
     # never overwritten during play.
     model = clone_target_model(np, model)
     target_model = clone_target_model(np, target_model)
+    model["_discovered_event_min_confidence"] = float(
+        config.get("discovered_event_min_confidence", 0.55)
+    )
+    target_model["_discovered_event_min_confidence"] = model[
+        "_discovered_event_min_confidence"
+    ]
 
     action_count = len(profile["actions"])
     max_actions = adaptive_action_catalog_limit(config, runtime_tier)
@@ -21271,6 +23406,15 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
     target_tau = max(0.01, min(1.0, float(config["target_network_soft_update"])))
     checkpoint = max(32, min(10000, int(runtime["online_checkpoint_steps"])))
     planning_refresh = max(8, min(512, int(runtime["planning_refresh_steps"])))
+    causal_probe_interval = max(
+        8,
+        int(
+            round(
+                planning_refresh
+                / max(0.05, float(config.get("causal_intervention_weight", 0.25)))
+            )
+        ),
+    )
     base_exploration = max(0.0, min(0.65, float(config["exploration"])))
     base_exploration = min(
         base_exploration,
@@ -21319,6 +23463,7 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
     live_deaths = 0
     live_levels = 0
     live_score_total = 0.0
+    live_task_total = 0.0
     live_safety_total = 0.0
     promoted = False
     episode_task_total = 0.0
@@ -21340,6 +23485,15 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
     last_duration = 0.0
     model_hidden = np.zeros(int(model["hidden_size"]), dtype=np.float32)
     target_hidden = np.zeros(int(target_model["hidden_size"]), dtype=np.float32)
+    low_level_period = float(runtime.get("low_level_control_period", 1.0 / 30.0))
+    high_level_period = float(runtime.get("high_level_planning_period", 1.0 / 5.0))
+    next_high_level_time = 0.0
+    cached_world_planning = None
+    previous_belief = None
+    current_belief = None
+    active_goal = None
+    semantic_state_keys: list[str] = []
+    causal_probe_base = None
 
     def reset_episode_state() -> None:
         nonlocal step, frame_history, action_history, duration_history
@@ -21347,6 +23501,8 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
         nonlocal previous_model_frame, previous_raw, smoothed_prob, smoothed_values
         nonlocal last_action_id, last_duration, model_hidden, target_hidden
         nonlocal active_skill, active_skill_index
+        nonlocal next_high_level_time, cached_world_planning
+        nonlocal previous_belief, current_belief, active_goal, causal_probe_base
         nonlocal episode_task_total, episode_exploration_total, episode_safety_total
         nonlocal episode_reward_total, episode_novelty_total, episode_steps
         step = 0
@@ -21373,6 +23529,23 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
         target_hidden = np.zeros(int(target_model["hidden_size"]), dtype=np.float32)
         active_skill.clear()
         active_skill_index = None
+        next_high_level_time = 0.0
+        cached_world_planning = None
+        previous_belief = None
+        current_belief = None
+        active_goal = None
+        causal_probe_base = None
+        semantic_state_keys.clear()
+        model.pop("_perception_tracks", None)
+        model.pop("_latest_belief", None)
+        target_model.pop("_perception_tracks", None)
+        target_model.pop("_latest_belief", None)
+
+    semantic_connection, causal_store, semantic_skill_library = (
+        load_semantic_runtime_state(paths["db"])
+    )
+    semantic_skills = skills + list(semantic_skill_library.skills)
+    preference_model = load_human_preference_model(semantic_connection)
 
     try:
         while not stop_event.is_set():
@@ -21469,6 +23642,12 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                 action_history,
                 duration_history,
             )
+            now_control = time.monotonic()
+            high_level_due = now_control >= next_high_level_time
+            if high_level_due:
+                next_high_level_time = now_control + high_level_period
+            model["_perception_high_level_due"] = bool(high_level_due)
+            target_model["_perception_high_level_due"] = bool(high_level_due)
             model_hidden = recurrent_model_step(
                 np,
                 model,
@@ -21484,6 +23663,23 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                 target_hidden,
                 last_action_id,
                 last_duration,
+            )
+            current_belief = understand_feature(
+                np,
+                model,
+                current_feature,
+                previous_belief,
+                last_action_id,
+                existing_belief=model.get("_latest_belief"),
+            )
+            current_belief.causal_rules = causal_store.snapshot()
+            active_goal = active_goal_hypothesis(current_belief, active_goal)
+            current_belief.raw_features["active_goal"] = active_goal.name
+            state = build_temporal_state(
+                frame_history,
+                action_history,
+                duration_history,
+                current_belief,
             )
             probabilities, values, uncertainty, disagreement = recurrent_ensemble_outputs(
                 np,
@@ -21514,12 +23710,30 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
             smoothed_prob = probabilities.copy()
             smoothed_values = values.copy()
 
-            memory_key = memory_state_key(current_raw, current_feature)
+            memory_key = memory_state_key(
+                current_raw,
+                current_feature,
+                current_belief,
+            )
             human_bias = human_action_memory_biases(
                 human_memory,
                 human_index,
                 memory_key,
                 action_count,
+            )
+            near_success_demo = bool(
+                human_bias.size and float(human_bias.max(initial=0.0)) >= 0.65
+            )
+            human_bias *= adaptive_human_memory_weight(
+                model,
+                stuck=static_streak >= max(
+                    3, int(config["stuck_recovery_threshold"]) // 2
+                ),
+                high_uncertainty=float(
+                    np.mean(np.asarray(uncertainty, dtype=np.float64))
+                ) >= 0.30,
+                near_success_demo=near_success_demo,
+                safety_risk=state_safety_risk,
             )
             approximate_values = approximate_state_action_values(
                 state_index,
@@ -21681,6 +23895,7 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                     scene_control,
                 )
             planning_contextual_probe = None
+            causal_probe_base = None
             if (
                 online_ready
                 and planning_recovery_base is None
@@ -21697,6 +23912,27 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                     float(config["contextual_probe_weight"]),
                     steps,
                 )
+            if (
+                planning_recovery_base is None
+                and not live_evaluation_active
+                and high_level_due
+                and steps % causal_probe_interval == 0
+                and float(current_belief.uncertainty) >= 0.15
+                and state_safety_risk
+                <= float(config.get("causal_probe_max_risk", 0.35))
+            ):
+                safe_candidates = list(broad_allowed_actions)
+                safe_actions = [profile["actions"][action] for action in safe_candidates]
+                safe_risks = [float(risk_guidance[action]) for action in safe_candidates]
+                probe_offset = causal_store.choose_intervention(
+                    current_belief,
+                    safe_actions,
+                    safe_risks,
+                    float(config.get("causal_probe_max_risk", 0.35)),
+                )
+                if probe_offset is not None and 0 <= int(probe_offset) < len(safe_candidates):
+                    causal_probe_base = safe_candidates[int(probe_offset)]
+                    planning_contextual_probe = causal_probe_base
             forced_planning_actions = forced_world_model_actions(
                 profile,
                 broad_allowed_actions,
@@ -21722,6 +23958,8 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                 planning_contextual_probe,
                 runtime_tier,
                 config,
+                current_belief,
+                causal_store,
             )
             if not allowed_actions:
                 allowed_actions = broad_allowed_actions[:1]
@@ -21759,19 +23997,27 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
             online_planning = graph_planning
             plan_disagreement = np.zeros_like(online_planning, dtype=np.float64)
             if bool(runtime["use_latent_world_model"]):
-                world_planning = latent_world_model_plan_values(
-                    np,
-                    model,
-                    model_hidden,
-                    probabilities,
-                    values,
-                    int(runtime["latent_planning_horizon"]),
-                    float(config["planning_discount"]),
-                    config,
-                    allowed_actions,
-                    forced_actions=forced_planning_actions,
-                    runtime_tier=runtime_tier,
-                    hierarchical_low_level=bool(skills),
+                if high_level_due or cached_world_planning is None:
+                    cached_world_planning = latent_world_model_plan_values(
+                        np,
+                        model,
+                        model_hidden,
+                        probabilities,
+                        values,
+                        int(runtime["latent_planning_horizon"]),
+                        float(config["planning_discount"]),
+                        config,
+                        allowed_actions,
+                        forced_actions=forced_planning_actions,
+                        runtime_tier=runtime_tier,
+                        hierarchical_low_level=bool(skills),
+                        belief=current_belief,
+                        goal=active_goal,
+                        skill_library=semantic_skills,
+                        causal_model=causal_store,
+                    )
+                world_planning = np.asarray(
+                    cached_world_planning, dtype=np.float64
                 )
                 world_steps = max(0, int(model.get("world_training_steps", 0)))
                 minimum_world_steps = max(
@@ -21807,6 +24053,10 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                 reward_observations,
             )
             exploration *= max(0.15, 1.0 - 0.70 * state_safety_risk)
+            if live_evaluation_active:
+                # Champion/challenger comparisons must measure the policy,
+                # not different random exploration draws.
+                exploration = 0.0
             recovery_base = planning_recovery_base
             contextual_probe = (
                 planning_contextual_probe if recovery_base is None else None
@@ -21824,11 +24074,41 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                 else:
                     active_skill.clear()
                     active_skill_index = None
+            if selected_base is None and not active_skill and high_level_due:
+                semantic_plan = plan_with_understanding(
+                    current_belief,
+                    active_goal,
+                    semantic_skills,
+                    causal_store,
+                    _runtime_module("world_model"),
+                    None,
+                    min(64, max(1, len(semantic_skills))),
+                )
+                if semantic_plan is not None:
+                    _, semantic_skill, _ = semantic_plan
+                    semantic_controls = _runtime_module("planner").low_level_actions(
+                        semantic_skill
+                    )[:SKILL_EXECUTION_LIMIT]
+                    active_skill = deque(semantic_controls)
+                    active_skill_index = (
+                        semantic_skill.get("skill_id", semantic_skill.get("name"))
+                        if isinstance(semantic_skill, dict)
+                        else getattr(semantic_skill, "skill_id", None)
+                    )
+                    if active_skill:
+                        candidate_base, candidate_duration = active_skill.popleft()
+                        if candidate_base in allowed_actions:
+                            selected_base = candidate_base
+                            selected_skill_duration = candidate_duration
+                        else:
+                            active_skill.clear()
+                            active_skill_index = None
             if selected_base is None and not active_skill:
                 skill_index = choose_skill(
                     np, model, model_hidden, skills,
                     float(config["skill_start_probability"]), exploration,
                     config,
+                    deterministic=live_evaluation_active,
                 )
                 if skill_index is not None:
                     skill = skills[skill_index]
@@ -21895,6 +24175,10 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
             if not 0 <= base_action < action_count:
                 action_id = 0
                 base_action = 0
+            selected_intervention = bool(
+                causal_probe_base is not None
+                and base_action == int(causal_probe_base)
+            )
             if generated_duration is not None:
                 duration_index = max(0, min(DURATION_HEAD_SIZE - 1, generated_duration))
                 configured_hold = float(DURATION_SECONDS[duration_index])
@@ -21942,14 +24226,25 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
             pre_blue = current_blue
             pre_red = current_red
             pre_model = current_model
-            if not execute_action(
+            control_decision = choose_control_decision(
+                np,
+                model,
+                model_hidden,
+                execution_action,
+                last_action_id,
+                static_streak,
+                state_safety_risk,
+            )
+            if not execute_control_decision(
                 target,
                 execution_action,
-                hold,
+                control_decision,
+                low_level_period,
                 mouse_step,
                 stop_event,
             ):
                 break
+            hold = low_level_period
             if pause and not sleep_cancelable(pause, stop_event, target):
                 break
             next_raw, next_blue, next_red = sampler.capture_frame()
@@ -21967,6 +24262,7 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                 next_state = None
                 next_feature = None
                 next_model = None
+                next_belief = None
                 next_memory_key = ""
                 done = 1
                 terminated = 0
@@ -22002,10 +24298,23 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                 next_frames = (frame_history + [next_feature])[-TEMPORAL_FRAMES:]
                 next_actions = (action_history + [action_id])[-ACTION_HISTORY_LENGTH:]
                 next_durations = (duration_history + [hold])[-ACTION_HISTORY_LENGTH:]
+                next_belief = understand_feature(
+                    np,
+                    model,
+                    next_feature,
+                    current_belief,
+                    base_action,
+                )
+                semantic_state_keys.append(canonical_belief_key(current_belief))
+                semantic_state_keys[:] = semantic_state_keys[-16:]
+                next_belief.raw_features["semantic_history"] = list(
+                    semantic_state_keys
+                )
                 next_state = build_temporal_state(
                     next_frames,
                     next_actions,
                     next_durations,
+                    next_belief,
                 )
                 next_hidden_preview = recurrent_model_step(
                     np, model, next_feature, model_hidden, action_id, hold
@@ -22093,8 +24402,27 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                     human_progress_reference,
                     learned_progress_delta,
                     learned_reward_signals,
+                    previous_belief=current_belief,
+                    current_belief=next_belief,
+                    selected_goal=active_goal,
+                    causal_model=causal_store,
+                    human_preference_model=preference_model,
                 )
-                next_memory_key = memory_state_key(next_raw, next_feature)
+                save_semantic_transition(
+                    semantic_connection,
+                    causal_store,
+                    current_belief,
+                    execution_action,
+                    next_belief,
+                    intervention=selected_intervention,
+                )
+                if steps % 32 == 0:
+                    semantic_connection.commit()
+                next_memory_key = memory_state_key(
+                    next_raw,
+                    next_feature,
+                    next_belief,
+                )
                 meaningful = (
                     float(metrics.get("visual", 0.0))
                     >= float(config["successful_transition_threshold"])
@@ -22133,13 +24461,15 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                     min(1.0, float(human_bias[base_action])),
                 )
                 metrics["expert_occupancy"] = expert_occupancy
+                expert_weight = float(config["expert_occupancy_reward_weight"]) / math.sqrt(
+                    1.0 + max(0, int(model.get("training_rounds", 0)))
+                )
                 metrics["task_reward"] = max(
                     -4.0,
                     min(
                         4.0,
                         float(metrics.get("task_reward", 0.0))
-                        + float(config["expert_occupancy_reward_weight"])
-                        * expert_occupancy,
+                        + expert_weight * expert_occupancy,
                     ),
                 )
                 reward = compose_reward(metrics, config)
@@ -22152,6 +24482,10 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                     active_skill_index = None
 
             if not capture_failed:
+                # Keep human and AI benchmark units identical.  Human task
+                # statistics use raw task_reward, not the composed reward that
+                # also contains exploration bonuses and safety penalties.
+                live_task_total += float(metrics.get("task_reward", 0.0))
                 live_safety_total += max(
                     0.0, float(metrics.get("safety_penalty", 0.0))
                 )
@@ -22437,10 +24771,21 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                 recent_state_keys = recent_state_keys[-16:]
                 previous_model_frame = next_model
                 previous_raw = next_raw
+                previous_belief = next_belief
                 last_action_id = action_id
                 last_duration = hold
     finally:
         release_all_inputs()
+        try:
+            _runtime_module("memory").save_causal_rules(
+                semantic_connection,
+                causal_store,
+            )
+            semantic_connection.commit()
+        except Exception:
+            semantic_connection.rollback()
+        finally:
+            semantic_connection.close()
         _flush_online_n_step(
             np,
             online_queue,
@@ -22518,7 +24863,7 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                     "deaths": live_deaths,
                     "levels": live_levels,
                     "score_total": live_score_total,
-                    "task_total": reward_sum,
+                    "task_total": live_task_total,
                     "safety_total": live_safety_total,
                     "steps": steps,
                 },
@@ -22529,6 +24874,7 @@ def run_ai_session(target: int, stop_event: threading.Event) -> str:
                     profile,
                     runtime_tier,
                     float(config["candidate_min_improvement"]),
+                    load_human_benchmark_statistics(paths["db"]),
                 )
             ):
                 promoted = promote_live_challenger(
@@ -23001,7 +25347,7 @@ class AnyGameAIApp:
             self.readiness_text.set(snapshot["readiness"])
             self.path_text.set(snapshot["path"])
         except Exception:
-            self.system_text.set("Windows 11 x64 · CPython 3.12.10 x64")
+            self.system_text.set("Windows 11 x64 · CPython 3.12 x64")
             self.data_text.set("档案与模型概况暂不可读取；可运行“文件”执行完整检查")
             self.readiness_text.set("文件状态待检查")
 
@@ -23539,7 +25885,7 @@ class NativeAnyGameAIApp:
                 user32.SetWindowTextW(self.path_handle, snapshot["path"])
         except Exception:
             if self.overview_handle:
-                user32.SetWindowTextW(self.overview_handle, "Windows 11 x64 · CPython 3.12.10 x64")
+                user32.SetWindowTextW(self.overview_handle, "Windows 11 x64 · CPython 3.12 x64")
             if self.readiness_handle:
                 user32.SetWindowTextW(self.readiness_handle, "文件状态待检查")
 
@@ -23810,11 +26156,11 @@ def supported_host_error() -> str | None:
     ):
         return "需要 Windows 11 x64 和 x64 版 Python。"
     if (
-        sys.version_info[:3] != REQUIRED_PYTHON_VERSION
+        sys.version_info[:2] != REQUIRED_PYTHON_VERSION
         or sys.version_info.releaselevel != "final"
         or platform.python_implementation() != "CPython"
     ):
-        return "需要正式版 CPython 3.12.10 x64。"
+        return "需要正式版 CPython 3.12 x64。"
     if windows_build_number() < MIN_WINDOWS_11_BUILD:
         return "需要 Windows 11 x64。"
     return None
