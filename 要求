@@ -1,8 +1,8 @@
-AnyGameAI.py需能够在任意已安装Python 3.14且网络连接正常的Windows 11 x64设备上高效运行。
-
-除AnyGameAI.py外，其他相关文件均需放在桌面上的AnyGameAI文件夹中。
+在任意网络连接正常的Windows 11 x64设备上高效运行。
 
 运行AnyGameAI.py前，用户手里只有AnyGameAI.py，没有其他文件。
+
+在运行过程中新增的文件均需放在桌面上的AnyGameAI文件夹中。
 
 AnyGameAI.py不得包含对功能无影响的内容。
 
