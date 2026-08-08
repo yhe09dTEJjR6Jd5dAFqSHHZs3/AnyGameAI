@@ -2,7 +2,7 @@
 
 解压后，用户需要将code.py和ApexMind.exe放到同一个文件夹内。
 
-code.py和ApexMind.exe不得包含不会对运行产生影响的内容。
+code.py和ApexMind.exe只保留会影响运行的内容。
 
 所有相关文件尽量存放在code.py和ApexMind.exe所在的文件夹内。
 
