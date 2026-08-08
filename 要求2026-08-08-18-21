@@ -1,5 +1,7 @@
 一开始，用户手里只有install.py。
 
+install.py完全由ChatGPT生成。
+
 运行install.py→安装/修复/删除ApexMind；
 
 所有相关文件尽量存放在用户指定的目录中。
