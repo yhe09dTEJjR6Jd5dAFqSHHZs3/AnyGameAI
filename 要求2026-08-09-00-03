@@ -1,8 +1,8 @@
-一开始，用户手里只有一个压缩包。
+一开始，用户手里只有一个压缩包，里面只有code.py和ApexMind.exe。
+
+code.py和ApexMind.exe只包含会影响运行的内容。
 
 解压后，用户需要将code.py和ApexMind.exe放到同一个文件夹内。
-
-code.py和ApexMind.exe只保留会影响运行的内容。
 
 ApexMind.exe可在已安装合适版本Python且网络连接正常的Windows 11 x64设备上高效运行。
 
