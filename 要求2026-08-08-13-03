@@ -1,10 +1,10 @@
 初始状态下，用户仅有install.py。
 
-install.py不包含任何对功能无影响的内容。
-
-所有相关文件应尽可能统一存放于用户指定的目录中。
+所有相关文件尽可能统一存放于用户指定的目录中。
 
 安装完成后，用户可勾选/取消勾选“运行AnyGameAI”，并点击“确认”关闭安装程序。
+
+install.py和AnyGameAI.exe不包含任何对功能无影响的内容。
 
 install.py和AnyGameAI.exe可在已安装合适版本Python且网络连接正常的Windows 11 x64设备上高效运行。
 
