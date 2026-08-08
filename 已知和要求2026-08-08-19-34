@@ -1,6 +1,10 @@
-一开始，用户手里只有install.py。
+已知：
 
 install.py完全由ChatGPT生成。
+
+一开始，用户手里只有install.py。
+
+要求：
 
 运行install.py→安装/修复/删除ApexMind；
 
